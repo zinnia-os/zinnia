@@ -116,16 +116,6 @@ pub fn dispatch(
         numbers::UMOUNT => sys_unimp!("umount", Err(Errno::ENOSYS)),
         numbers::PIPE => vfs::pipe(a0.into()),
 
-        // Epoll
-        numbers::EPOLL_CREATE => sys_unimp!("epoll_create", Err(Errno::ENOSYS)),
-        numbers::EPOLL_CTL => sys_unimp!("epoll_ctl", Err(Errno::ENOSYS)),
-        numbers::EPOLL_WAIT => sys_unimp!("epoll_wait", Err(Errno::ENOSYS)),
-
-        // Timer FD
-        numbers::TIMERFD_CREATE => sys_unimp!("timerfd_create", Err(Errno::ENOSYS)),
-        numbers::TIMERFD_SETTIME => sys_unimp!("timerfd_settime", Err(Errno::ENOSYS)),
-        numbers::TIMERFD_GETTIME => sys_unimp!("timerfd_gettime", Err(Errno::ENOSYS)),
-
         // Sockets
         numbers::SOCKET => sys_unimp!("socket", Err(Errno::ENOSYS)),
         numbers::SOCKETPAIR => sys_unimp!("socketpair", Err(Errno::ENOSYS)),
