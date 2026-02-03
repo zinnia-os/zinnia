@@ -7,7 +7,7 @@
 
 # Menix
 
-Menix is a lightweight and modular Unix-like kernel targeting 64-bit devices.
+Menix is a lightweight and modular Unix-like microkernel targeting 64-bit devices.
 
 > [!IMPORTANT]
 > Please note that this project is a work in progress.

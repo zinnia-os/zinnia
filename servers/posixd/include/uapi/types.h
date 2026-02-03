@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 typedef long off_t;
+typedef long ssize_t;
 typedef size_t off64_t;
 typedef size_t blksize_t;
 typedef size_t blkcnt_t;

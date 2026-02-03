@@ -4,7 +4,7 @@
 #include <menix/status.h>
 
 int main() {
-    menix_log("Hello, init world!\n");
+    menix_log("Hello from posixd!\n");
 
     menix_status_t e;
 

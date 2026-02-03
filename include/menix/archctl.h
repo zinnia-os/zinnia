@@ -1,18 +1,19 @@
 #ifndef MENIX_ARCHCTL_H
 #define MENIX_ARCHCTL_H
 
+#include <menix/status.h>
+#include <stddef.h>
+
 typedef enum {
+    // Does nothing.
     MENIX_ARCHCTL_NONE = 0,
-#if defined(__x86_64__)
+#ifdef __x86_64__
+    // On x86_64, sets the FSBASE register to the value.
     MENIX_ARCHCTL_SET_FSBASE = 1,
 #endif
 } menix_archctl_t;
 
-#ifndef __KERNEL__
-
 // Performs an architecture-dependent operation identified by `op`.
-menix_errno_t menix_archctl(menix_archctl_t op, size_t value);
-
-#endif
+menix_status_t menix_archctl(menix_archctl_t op, size_t value);
 
 #endif

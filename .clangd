@@ -1,4 +1,2 @@
-CompileFlags:
-  Add: [-nostdlibinc]
 Style:
-  AngledHeaders: ["menix/.*", "uapi/.*"]
+  AngledHeaders: ["menix/.*", " kernel/.*"]

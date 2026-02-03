@@ -43,4 +43,4 @@
 #endif
 
 // Intrinsics
-#define __unreachable __builtin_unreachable
+#define __unreachable() __builtin_unreachable()

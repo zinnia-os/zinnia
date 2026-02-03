@@ -24,4 +24,4 @@ void console_write(const char* buf, size_t len);
 // An early console must not make any heap allocations.
 #define DEFINE_CONSOLE(con) \
     [[__used, __section(".console")]] \
-    static struct console* UNIQUE_IDENT(console) = &(con)
+    static struct console* UNIQUE_IDENT(console) = (con)

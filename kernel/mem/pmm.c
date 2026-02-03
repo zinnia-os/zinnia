@@ -9,24 +9,24 @@
 virt_t mem_hhdm_base = 0;
 struct page* mem_pfndb = nullptr;
 
-static menix_errno_t (*alloc_fn)(size_t num_pages, enum alloc_flags flags, phys_t* out);
-static menix_errno_t (*free_fn)(phys_t start, size_t num_pages);
+static menix_status_t (*alloc_fn)(size_t num_pages, enum alloc_flags flags, phys_t* out);
+static menix_status_t (*free_fn)(phys_t start, size_t num_pages);
 
-menix_errno_t mem_phys_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
+menix_status_t mem_phys_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
     return alloc_fn(num_pages, flags, out);
 }
 
-menix_errno_t mem_phys_free(phys_t start, size_t num_pages) {
+menix_status_t mem_phys_free(phys_t start, size_t num_pages) {
     return free_fn(start, num_pages);
 }
 
 static struct phys_mem bump_mem = {0};
 static struct phys_mem* bump_region = nullptr;
 
-static menix_errno_t bump_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
+static menix_status_t bump_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
     const size_t bytes = num_pages * mem_page_size();
     if (((intptr_t)bump_mem.length - bytes) <= 0)
-        return ENOMEM;
+        return MENIX_ERR_NO_MEMORY;
 
     *out = bump_mem.address;
     bump_mem.length -= bytes;
@@ -39,7 +39,7 @@ static menix_errno_t bump_alloc(size_t num_pages, enum alloc_flags flags, phys_t
     return 0;
 }
 
-static menix_errno_t bump_free(phys_t addr, size_t num_pages) {
+static menix_status_t bump_free(phys_t addr, size_t num_pages) {
     // We don't free bootstrap memory.
     ASSERT(false, "Attempted to free bootstrap memory!");
 }
@@ -59,7 +59,7 @@ static struct page* pmm_head = nullptr;
 static struct spinlock pmm_lock = {0};
 static size_t pmm_total_free = 0;
 
-static menix_errno_t freelist_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
+static menix_status_t freelist_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
     spin_lock(&pmm_lock);
 
     const size_t bytes = num_pages * mem_page_size();
@@ -108,7 +108,7 @@ static menix_errno_t freelist_alloc(size_t num_pages, enum alloc_flags flags, ph
     }
 
     spin_unlock(&pmm_lock);
-    return ENOMEM;
+    return MENIX_ERR_NO_MEMORY;
 
 success:
     // If the NOZERO flag is *not* specified, zero memory.
@@ -120,7 +120,7 @@ success:
     return 0;
 }
 
-static menix_errno_t freelist_free(phys_t addr, size_t num_pages) {
+static menix_status_t freelist_free(phys_t addr, size_t num_pages) {
     spin_lock(&pmm_lock);
 
     struct page* page = &mem_pfndb[addr / mem_page_size()];

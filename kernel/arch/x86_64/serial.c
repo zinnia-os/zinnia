@@ -44,4 +44,4 @@ static struct console serial_con = {
     .write = serial_write,
     .init = serial_setup,
 };
-DEFINE_CONSOLE(serial_con);
+DEFINE_CONSOLE(&serial_con);

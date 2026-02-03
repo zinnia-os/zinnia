@@ -3,13 +3,14 @@ project(
     'c',
     license: 'MIT',
     license_files: ['LICENSE'],
-    version: '0.0.1',
+    version: '0.1.0',
     meson_version: '>=1.1.0',
 )
 
 common_c_args = [
     '-Wall',
     '-Werror',
+    '-Wextra',
     '-Wno-unused',
     '-std=gnu23',
 ]
@@ -30,9 +31,6 @@ c_compiler = meson.get_compiler('c')
 common_cfg.set_quoted('MENIX_COMPILER_ID', c_compiler.get_id() + ' ' + c_compiler.version())
 common_cfg.set_quoted('MENIX_LINKER_ID', c_compiler.get_linker_id())
 
-if get_option('kernel_only')
-    subdir('kernel')
-else
-    subdir('vdso')
-    subdir('servers')
-endif
+subdir('kernel')
+subdir('lib')
+subdir('servers')

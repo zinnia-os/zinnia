@@ -325,7 +325,7 @@ print_num:
             char str[buf_size];
             lutoa(num, number, 0x10);
             const size_t len = strlen(number); // Get the length of the final number.
-            for (int i = 0; i < buf_size; i++) // Fill with zeroes.
+            for (size_t i = 0; i < buf_size; i++)
                 str[i] = '0';
             size_t offset = sizeof(str) - len - 1;
 

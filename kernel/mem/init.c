@@ -1,6 +1,5 @@
 #include <kernel/assert.h>
 #include <kernel/common.h>
-#include <kernel/errno.h>
 #include <kernel/mem.h>
 #include <kernel/panic.h>
 #include <kernel/print.h>
@@ -65,7 +64,7 @@ void mem_init(struct phys_mem* map, size_t map_len, virt_t kernel_virt, phys_t k
     // text
     kprintf("Mapping text segment at %p\n", __ld_text_start);
     for (uint8_t* p = __ld_text_start; p <= __ld_text_end; p += pgsz) {
-        menix_errno_t status = mem_pt_map(
+        menix_status_t status = mem_pt_map(
             &mem_kernel_table,
             (virt_t)p,
             (phys_t)(p - __ld_kernel_start + kernel_phys),
@@ -78,7 +77,7 @@ void mem_init(struct phys_mem* map, size_t map_len, virt_t kernel_virt, phys_t k
     // rodata
     kprintf("Mapping rodata segment at %p\n", __ld_rodata_start);
     for (uint8_t* p = __ld_rodata_start; p < __ld_rodata_end; p += pgsz) {
-        menix_errno_t status = mem_pt_map(
+        menix_status_t status = mem_pt_map(
             &mem_kernel_table,
             (virt_t)p,
             (phys_t)(p - __ld_kernel_start + kernel_phys),
@@ -91,7 +90,7 @@ void mem_init(struct phys_mem* map, size_t map_len, virt_t kernel_virt, phys_t k
     // data
     kprintf("Mapping data segment at %p\n", __ld_data_start);
     for (uint8_t* p = __ld_data_start; p < __ld_data_end; p += pgsz) {
-        menix_errno_t status = mem_pt_map(
+        menix_status_t status = mem_pt_map(
             &mem_kernel_table,
             (virt_t)p,
             (phys_t)(p - __ld_kernel_start + kernel_phys),
@@ -113,7 +112,7 @@ void mem_init(struct phys_mem* map, size_t map_len, virt_t kernel_virt, phys_t k
         for (size_t p = 0; p <= map[i].length; p += pgsz) {
             virt_t vaddr = (virt_t)(map[i].address + p + tmp_hhdm);
             phys_t paddr = (phys_t)(map[i].address + p);
-            menix_errno_t status = mem_pt_map(&mem_kernel_table, vaddr, paddr, PTE_READ | PTE_WRITE, CACHE_NONE);
+            menix_status_t status = mem_pt_map(&mem_kernel_table, vaddr, paddr, PTE_READ | PTE_WRITE, CACHE_NONE);
             ASSERT(!status, "Failed to map HHDM page %p to %p with error %i", (void*)vaddr, (void*)paddr, status);
         }
     }

@@ -1,6 +1,6 @@
 #include <menix/archctl.h>
+#include <menix/status.h>
 #include <kernel/compiler.h>
-#include <kernel/errno.h>
 #include <kernel/init.h>
 #include <kernel/percpu.h>
 #include "asm.h"
@@ -28,12 +28,12 @@ void arch_panic() {
     __unreachable();
 }
 
-menix_errno_t arch_archctl(menix_archctl_t op, uintptr_t arg) {
+menix_status_t arch_archctl(menix_archctl_t op, uintptr_t arg) {
     switch (op) {
     case MENIX_ARCHCTL_SET_FSBASE:
         asm_wrmsr(MSR_FS_BASE, arg);
         return 0;
     default:
-        return EINVAL;
+        return MENIX_ERR_BAD_ARG;
     }
 }

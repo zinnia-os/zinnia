@@ -1,14 +1,13 @@
 #include <kernel/assert.h>
-#include <kernel/errno.h>
 #include <kernel/mem.h>
 #include <kernel/print.h>
 #include <kernel/spin.h>
 
-menix_errno_t mem_pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
+menix_status_t mem_pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
     flags &= ~ALLOC_NOZERO;
 
     phys_t addr;
-    menix_errno_t status = mem_phys_alloc(1, flags, &addr);
+    menix_status_t status = mem_phys_alloc(1, flags, &addr);
     if (status)
         return status;
 
@@ -16,7 +15,7 @@ menix_errno_t mem_pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
     return 0;
 }
 
-menix_errno_t mem_pt_new_user(struct page_table* pt, enum alloc_flags flags) {
+menix_status_t mem_pt_new_user(struct page_table* pt, enum alloc_flags flags) {
     // TODO
     return 0;
 }
@@ -25,7 +24,7 @@ menix_errno_t mem_pt_new_user(struct page_table* pt, enum alloc_flags flags) {
 // If `check_only` is set, only checks if the PTE exists,
 // and doesn't allocate new levels if they don't already exist.
 // If it can't allocate a page if it has to, returns `nullptr`.
-static menix_errno_t get_pte(struct page_table* pt, virt_t vaddr, bool is_user, bool check_only, pte_t** ret) {
+static menix_status_t get_pte(struct page_table* pt, virt_t vaddr, bool is_user, bool check_only, pte_t** ret) {
     pte_t* current_head = HHDM_PTR(pt->root);
     size_t index = 0;
 
@@ -50,10 +49,10 @@ static menix_errno_t get_pte(struct page_table* pt, virt_t vaddr, bool is_user, 
         } else {
             // If the current level isn't present, we can skip the rest.
             if (check_only)
-                return ENOMEM;
+                return MENIX_ERR_NO_MEMORY;
 
             phys_t addr;
-            menix_errno_t alloc_status = mem_phys_alloc(1, 0, &addr);
+            menix_status_t alloc_status = mem_phys_alloc(1, 0, &addr);
             if (alloc_status)
                 return alloc_status;
 
@@ -66,7 +65,7 @@ static menix_errno_t get_pte(struct page_table* pt, virt_t vaddr, bool is_user, 
     return 0;
 }
 
-menix_errno_t mem_pt_map(
+menix_status_t mem_pt_map(
     struct page_table* pt,
     virt_t vaddr,
     phys_t paddr,
@@ -76,7 +75,7 @@ menix_errno_t mem_pt_map(
     spin_lock(&pt->lock);
 
     pte_t* pte;
-    menix_errno_t status = get_pte(pt, vaddr, flags & PTE_USER, false, &pte);
+    menix_status_t status = get_pte(pt, vaddr, flags & PTE_USER, false, &pte);
     if (status) {
         goto fail;
     }
