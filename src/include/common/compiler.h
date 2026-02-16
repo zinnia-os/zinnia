@@ -38,6 +38,7 @@
 #define __aligned(x) gnu::aligned(x)
 #define __packed     gnu::packed
 #define __naked      gnu::naked
+#define __alias(x)   gnu::alias(x)
 #else
 #error "Unsupported compiler!"
 #endif

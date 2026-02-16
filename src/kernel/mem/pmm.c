@@ -1,5 +1,5 @@
+#include <common/compiler.h>
 #include <kernel/assert.h>
-#include <kernel/compiler.h>
 #include <kernel/mem.h>
 #include <kernel/print.h>
 #include <kernel/spin.h>

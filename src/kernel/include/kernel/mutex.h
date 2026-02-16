@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/sched.h>
+struct task;
 
 struct mutex {
     struct task* owner;

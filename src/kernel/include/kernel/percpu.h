@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/irq.h>
 #include <kernel/sched.h>
 #include <kernel/usercopy.h>

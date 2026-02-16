@@ -1,9 +1,4 @@
-#ifndef ZINNIA_SYSCALL_NUMBERS_H
-#define ZINNIA_SYSCALL_NUMBERS_H
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+#pragma once
 
 typedef enum {
     ZN_SYSCALL_LOG,
@@ -33,9 +28,3 @@ typedef enum {
     ZN_SYSCALL_RANDOM_GET,
     ZN_SYSCALL_RANDOM_ENTROPY,
 } zn_syscall_t;
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif

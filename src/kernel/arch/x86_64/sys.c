@@ -1,6 +1,6 @@
 #include <zinnia/archctl.h>
 #include <zinnia/status.h>
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/init.h>
 #include <kernel/percpu.h>
 #include <x86_64/apic.h>

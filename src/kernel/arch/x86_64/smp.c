@@ -1,4 +1,4 @@
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/types.h>
 #include <x86_64/smp.h>
 

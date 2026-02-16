@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <stdint.h>
 #include <x86_64/tss.h>
 

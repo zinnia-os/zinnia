@@ -1,4 +1,4 @@
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/print.h>

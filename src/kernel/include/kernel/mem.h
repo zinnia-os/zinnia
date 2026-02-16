@@ -1,7 +1,7 @@
 #pragma once
 
 #include <zinnia/status.h>
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/spin.h>
 #include <kernel/types.h>
 #include <bits/mem.h>

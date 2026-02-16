@@ -3,10 +3,11 @@ kernel_sources += files(
     'console.c',
     'elf.c',
     'irq.c',
+    'namespace.c',
     'panic.c',
     'percpu.c',
     'print.c',
     'sched.c',
     'spin.c',
-    'universe.c',
+    'vdso.c',
 )

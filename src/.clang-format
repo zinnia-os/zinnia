@@ -51,12 +51,16 @@ SpaceInEmptyBlock: false
 SpacesBeforeTrailingComments: 1
 IncludeBlocks: Merge
 IncludeCategories:
-  - Regex: "^<zinnia/.*>"
-    Priority: 1
-  - Regex: "^<kernel/.*>"
-    Priority: 2
-  - Regex: '^<.*\.h>'
-    Priority: 3
-  - Regex: '^".*\.h"'
-    Priority: 4
+- Regex: "^<zinnia/.*>"
+  Priority: 1
+- Regex: "^<common/.*>"
+  Priority: 2
+- Regex: "^<kernel/.*>"
+  Priority: 3
+- Regex: "^<vdso/.*>"
+  Priority: 4
+- Regex: '^<.*\.h>'
+  Priority: 5
+- Regex: '^".*\.h"'
+  Priority: 6
 SortIncludes: CaseInsensitive

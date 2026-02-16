@@ -18,7 +18,7 @@ zn_status_t syscall_handle_drop(zn_handle_t handle) {
 
 zn_status_t syscall_handle_validate(zn_handle_t handle) {
     struct task* current = percpu_get()->sched.current;
-    struct universe* universe = current->universe;
+    struct namespace* ns = current->namespace;
 
     return ZN_ERR_UNSUPPORTED;
 }

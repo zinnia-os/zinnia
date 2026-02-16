@@ -37,6 +37,13 @@ SECTIONS
         *(.rodata .rodata.*)
         *(.got .got.*)
 
+    } :rodata
+
+    .vdso ALIGN(CONSTANT(MAXPAGESIZE)) : {
+        __ld_vdso_start = .;
+        KEEP(*(.vdso))
+        __ld_vdso_end = .;
+
         __ld_rodata_end = .;
     } :rodata
 
@@ -99,7 +106,7 @@ SECTIONS
         *(.eh_frame*)
         *(.rel.eh_frame*)
         *(.gcc_except_table*)
-        *(.note*)
+        *(.note.gnu.property)
         *(.interp)
     }
 }

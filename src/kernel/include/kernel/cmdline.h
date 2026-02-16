@@ -1,13 +1,13 @@
 #pragma once
 
+#include <common/compiler.h>
 #include <kernel/common.h>
-#include <kernel/compiler.h>
 
 #define CMDLINE_MAX 0x1000
 
 #define CMDLINE_OPTION(opt_name, opt_func) \
     [[__used, __section(".cmdline")]] \
-    static const struct cmdline_option UNIQUE_IDENT(__cmline_option_) = { \
+    static const struct cmdline_option UNIQUE_IDENT(cmdline_option) = { \
         .name = opt_name, \
         .func = opt_func, \
     }

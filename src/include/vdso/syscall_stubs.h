@@ -1,11 +1,8 @@
-#ifndef ZINNIA_SYSCALL_STUBS_H
-#define ZINNIA_SYSCALL_STUBS_H
+#pragma once
 
+#include <zinnia/status.h>
+#include <common/syscall_numbers.h>
 #include <stdint.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #ifdef __x86_64__
 typedef uint64_t zn_arg_t;
@@ -18,11 +15,6 @@ typedef uint64_t zn_arg_t;
 #else
 #error "Unsupported architecture!"
 #endif
-
-#ifndef __KERNEL__
-
-#include <zinnia/status.h>
-#include <zinnia/syscall_numbers.h>
 
 #ifdef __x86_64__
 #define ASM_REG_NUM "rax"
@@ -72,6 +64,7 @@ typedef uint64_t zn_arg_t;
 #define ASM_REG_A3  "a3"
 #define ASM_REG_A4  "a4"
 #define ASM_REG_A5  "a5"
+// TODO: Define ABI
 #define ASM_REG_A6  TODO
 #define ASM_REG_A7  TODO
 #define ASM_SYSCALL "syscall 0"
@@ -94,6 +87,7 @@ static inline zn_status_t zn_syscall1(zn_arg_t a0, zn_syscall_t num) {
     asm volatile(ASM_SYSCALL : "=r"(value) : "r"(rnum), "r"(r0) : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall1(a0, num) zn_syscall1((zn_arg_t)a0, num)
 
 static inline zn_status_t zn_syscall2(zn_arg_t a0, zn_arg_t a1, zn_syscall_t num) {
     register zn_syscall_t rnum asm(ASM_REG_NUM) = num;
@@ -103,6 +97,7 @@ static inline zn_status_t zn_syscall2(zn_arg_t a0, zn_arg_t a1, zn_syscall_t num
     asm volatile(ASM_SYSCALL : "=r"(value) : "r"(rnum), "r"(r0), "r"(r1) : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall2(a0, a1, num) zn_syscall2((zn_arg_t)a0, (zn_arg_t)a1, num)
 
 static inline zn_status_t zn_syscall3(zn_arg_t a0, zn_arg_t a1, zn_arg_t a2, zn_syscall_t num) {
     register zn_syscall_t rnum asm(ASM_REG_NUM) = num;
@@ -113,6 +108,7 @@ static inline zn_status_t zn_syscall3(zn_arg_t a0, zn_arg_t a1, zn_arg_t a2, zn_
     asm volatile(ASM_SYSCALL : "=r"(value) : "r"(rnum), "r"(r0), "r"(r1), "r"(r2) : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall3(a0, a1, a2, num) zn_syscall3((zn_arg_t)a0, (zn_arg_t)a1, (zn_arg_t)a2, num)
 
 static inline zn_status_t zn_syscall4(zn_arg_t a0, zn_arg_t a1, zn_arg_t a2, zn_arg_t a3, zn_syscall_t num) {
     register zn_syscall_t rnum asm(ASM_REG_NUM) = num;
@@ -124,6 +120,7 @@ static inline zn_status_t zn_syscall4(zn_arg_t a0, zn_arg_t a1, zn_arg_t a2, zn_
     asm volatile(ASM_SYSCALL : "=r"(value) : "r"(rnum), "r"(r0), "r"(r1), "r"(r2), "r"(r3) : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall4(a0, a1, a2, a3, num) zn_syscall4((zn_arg_t)a0, (zn_arg_t)a1, (zn_arg_t)a2, (zn_arg_t)a3, num)
 
 static inline zn_status_t zn_syscall5(
     zn_arg_t a0,
@@ -146,6 +143,8 @@ static inline zn_status_t zn_syscall5(
                  : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall5(a0, a1, a2, a3, a4, num) \
+    zn_syscall5((zn_arg_t)a0, (zn_arg_t)a1, (zn_arg_t)a2, (zn_arg_t)a3, (zn_arg_t)a4, num)
 
 static inline zn_status_t zn_syscall6(
     zn_arg_t a0,
@@ -170,6 +169,8 @@ static inline zn_status_t zn_syscall6(
                  : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall6(a0, a1, a2, a3, a4, a5, num) \
+    zn_syscall6((zn_arg_t)a0, (zn_arg_t)a1, (zn_arg_t)a2, (zn_arg_t)a3, (zn_arg_t)a4, (zn_arg_t)a5, num)
 
 static inline zn_status_t zn_syscall7(
     zn_arg_t a0,
@@ -196,6 +197,8 @@ static inline zn_status_t zn_syscall7(
                  : "memory", ASM_CLOBBER);
     return value;
 }
+#define zn_syscall7(a0, a1, a2, a3, a4, a5, a6, num) \
+    zn_syscall7((zn_arg_t)a0, (zn_arg_t)a1, (zn_arg_t)a2, (zn_arg_t)a3, (zn_arg_t)a4, (zn_arg_t)a5, (zn_arg_t)a6, num)
 
 static inline zn_status_t zn_syscall8(
     zn_arg_t a0,
@@ -224,11 +227,15 @@ static inline zn_status_t zn_syscall8(
                  : "memory", ASM_CLOBBER);
     return value;
 }
-
-#endif // !__KERNEL__
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif
+#define zn_syscall8(a0, a1, a2, a3, a4, a5, a6, a7, num) \
+    zn_syscall8( \
+        (zn_arg_t)a0, \
+        (zn_arg_t)a1, \
+        (zn_arg_t)a2, \
+        (zn_arg_t)a3, \
+        (zn_arg_t)a4, \
+        (zn_arg_t)a5, \
+        (zn_arg_t)a6, \
+        (zn_arg_t)a7, \
+        num \
+    )

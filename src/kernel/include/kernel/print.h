@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <stdarg.h>
 
 [[__format(printf, 1, 2)]]

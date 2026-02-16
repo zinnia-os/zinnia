@@ -1,7 +1,7 @@
 #pragma once
 
+#include <common/compiler.h>
 #include <kernel/common.h>
-#include <kernel/compiler.h>
 #include <kernel/types.h>
 #include <stddef.h>
 #include <stdint.h>

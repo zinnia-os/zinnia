@@ -24,20 +24,25 @@ kernel_includes = include_directories(
 
 kernel_sources = []
 
+configure_file(configuration: cfg, output: 'config.h')
+
 subdir('arch' / target_machine.cpu_family())
 subdir('boot')
-subdir('klibc')
 subdir('mem')
 subdir('core')
 subdir('syscalls')
 
+subdir('klibc')
+subdir('vdso')
+
 executable(
     'zinnia',
-    include_directories: [common_includes, kernel_includes, cfg_inc],
+    include_directories: [common_includes, kernel_includes],
     c_args: kernel_c_args,
     link_args: kernel_link_args,
     link_depends: kernel_lds,
-    sources: kernel_sources,
+    sources: [kernel_sources, klibc_sources],
+    objects: vdso,
     install: true,
     install_dir: '/boot',
 )

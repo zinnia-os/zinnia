@@ -1,7 +1,7 @@
 #pragma once
 
+#include <common/compiler.h>
 #include <kernel/common.h>
-#include <kernel/compiler.h>
 #include <stddef.h>
 
 struct console {

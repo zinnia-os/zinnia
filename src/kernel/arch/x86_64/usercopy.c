@@ -1,4 +1,4 @@
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/usercopy.h>
 
 extern void x86_64_read_start();

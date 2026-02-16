@@ -16,5 +16,6 @@ kernel_sources += files(
     'sys.c',
     'syscall.c',
     'trampoline.S',
+    'tsc.c',
     'usercopy.c',
 )

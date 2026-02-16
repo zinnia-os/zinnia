@@ -4,7 +4,7 @@
 #include <kernel/list.h>
 #include <kernel/mem.h>
 #include <kernel/types.h>
-#include <kernel/universe.h>
+#include <kernel/namespace.h>
 #include <bits/sched.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -21,7 +21,7 @@ enum task_state {
 // A task is the smallest unit of the scheduler.
 struct task {
     size_t id;
-    struct universe* universe;
+    struct namespace* namespace;
     enum task_state state;
     struct arch_context context;
     virt_t kernel_stack;

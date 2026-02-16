@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/list.h>
 #include <bits/irq.h>
 #include <stdint.h>

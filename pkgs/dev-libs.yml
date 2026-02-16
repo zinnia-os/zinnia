@@ -51,6 +51,8 @@ packages:
     - "-Dno_headers=true"
     - "-Ddefault_library=both"
     - "@THIS_SOURCE_DIR@"
+    environ:
+      CXXFLAGS: "-Wno-unused-local-typedefs"
   build:
   - args: [ "ninja" ]
   - args: [ "ninja", "install" ]

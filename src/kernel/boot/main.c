@@ -1,6 +1,6 @@
+#include <common/compiler.h>
 #include <kernel/assert.h>
 #include <kernel/cmdline.h>
-#include <kernel/compiler.h>
 #include <kernel/console.h>
 #include <kernel/init.h>
 #include <kernel/irq.h>

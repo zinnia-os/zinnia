@@ -1,7 +1,7 @@
 #include <zinnia/channel.h>
 #include <zinnia/handle.h>
 #include <zinnia/status.h>
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 
 zn_status_t syscall_channel_create(
     enum zn_channel_flags flags,

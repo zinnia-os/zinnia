@@ -7,6 +7,7 @@ project(
         'c_std=gnu23',
         'werror=true',
         'warning_level=2',
+        'strip=true',
     ],
 )
 
@@ -40,8 +41,9 @@ cfg.set_quoted('ZINNIA_VERSION', meson.project_version())
 cfg.set_quoted('ZINNIA_ARCH', target_machine.cpu_family())
 cfg.set_quoted('ZINNIA_COMPILER_ID', c_compiler.get_id() + ' ' + c_compiler.version())
 cfg.set_quoted('ZINNIA_LINKER_ID', c_compiler.get_linker_id())
-configure_file(configuration: cfg, output: 'config.h')
-cfg_inc = include_directories('.')
+
+strip = find_program('strip')
+objcopy = find_program('objcopy')
 
 if get_option('build_kernel')
     subdir('kernel')

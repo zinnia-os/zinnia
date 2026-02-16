@@ -4,7 +4,7 @@
 #include <zinnia/handle.h>
 #include <zinnia/status.h>
 #include <zinnia/system.h>
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/types.h>
 #include <stddef.h>
 #include <stdint.h>

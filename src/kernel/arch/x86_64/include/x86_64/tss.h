@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <stdint.h>
 
 struct [[__packed, __aligned(0x10)]] tss {

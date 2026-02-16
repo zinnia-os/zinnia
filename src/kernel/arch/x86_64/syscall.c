@@ -1,4 +1,4 @@
-#include <kernel/compiler.h>
+#include <common/compiler.h>
 #include <kernel/percpu.h>
 #include <stddef.h>
 #include <x86_64/defs.h>
