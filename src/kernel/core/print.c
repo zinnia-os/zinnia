@@ -1,3 +1,4 @@
+#include <kernel/clock.h>
 #include <kernel/console.h>
 #include <kernel/panic.h>
 #include <kernel/print.h>
@@ -17,69 +18,93 @@ static void reverse(char* s) {
     }
 }
 
-static int pow(int x, unsigned int y) {
-    if (y == 0)
-        return 1;
-    else if ((y % 2) == 0)
-        return pow(x, y / 2) * pow(x, y / 2);
-    else
-        return x * pow(x, y / 2) * pow(x, y / 2);
+static int char_to_digit(char c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A' + 10;
+    return -1;
+}
+
+unsigned long atolu(const char* str, int base) {
+    unsigned long result = 0;
+
+    if (base == 16 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
+        str += 2;
+    }
+
+    while (*str) {
+        int digit = char_to_digit(*str++);
+        if (digit < 0 || digit >= base)
+            break;
+
+        result = result * base + digit;
+    }
+
+    return result;
 }
 
 long atol(const char* str, int base) {
-    size_t len = strlen(str);
-    int64_t result = 0;
-    size_t i = 0;
-    if (str[0] == '-')
-        i++;
-    for (; i < len; i++)
-        result += (str[i] - '0') * pow(base, len - i - 1);
-    if (str[0] == '-')
-        result *= -1;
-    return result;
-};
+    int neg = 0;
 
-unsigned long atolu(const char* str, int base) {
-    size_t len = strlen(str);
-    uint64_t result = 0;
-    size_t i = 0;
-    for (; i < len; i++)
-        result += (str[i] - '0') * pow(base, len - i - 1);
-    return result;
-};
+    if (*str == '-') {
+        neg = 1;
+        str++;
+    }
 
-char* ltoa(int64_t value, char* str, int base) {
-    size_t i;
-    int64_t sign;
-    sign = value;
-    if (base == 10 && sign < 0)
-        value = -value;
-    i = 0;
-    do {
-        char c = value % base;
-        if (c > 9)
-            c += 7;
-        str[i++] = c + '0';
-    } while ((value /= base) > 0);
-    if (base == 10 && sign < 0)
-        str[i++] = '-';
-    str[i] = '\0';
-    reverse(str);
-    return str;
-};
+    unsigned long val = atolu(str, base);
+    return neg ? -(long)val : (long)val;
+}
 
 char* lutoa(uint64_t value, char* str, int base) {
+    if (base < 2 || base > 36)
+        return nullptr;
+
     size_t i = 0;
+
     do {
-        char c = value % base;
-        if (c > 9)
-            c += 7;
-        str[i++] = c + '0';
-    } while ((value /= base) > 0);
+        uint64_t digit = value % base;
+        str[i++] = (digit < 10) ? '0' + digit : 'a' + (digit - 10);
+        value /= base;
+    } while (value);
+
     str[i] = '\0';
     reverse(str);
     return str;
-};
+}
+
+char* ltoa(int64_t value, char* str, int base) {
+    if (base < 2 || base > 36)
+        return nullptr;
+
+    uint64_t magnitude;
+    int negative = 0;
+
+    if (value < 0) {
+        negative = 1;
+        magnitude = (uint64_t)(-(value + 1)) + 1;
+        // avoids INT64_MIN overflow
+    } else {
+        magnitude = (uint64_t)value;
+    }
+
+    size_t i = 0;
+
+    do {
+        uint64_t digit = magnitude % base;
+        str[i++] = (digit < 10) ? '0' + digit : 'a' + (digit - 10);
+        magnitude /= base;
+    } while (magnitude);
+
+    if (negative)
+        str[i++] = '-';
+
+    str[i] = '\0';
+    reverse(str);
+    return str;
+}
 
 typedef void (*log_fn_t)(void* ctx, const char* buf, size_t len);
 
@@ -219,8 +244,8 @@ check_fmt:
             if (!str)
                 str = "(null)";
             size_t len = 0;
-            if (has_width)
-                len = strnlen(str, width);
+            if (has_precision)
+                len = strnlen(str, precision);
             else
                 len = strlen(str);
 
@@ -365,9 +390,7 @@ static void printf_console(void*, const char* msg, size_t len) {
 void kprintf(const char* message, ...) {
     va_list args;
     va_start(args, message);
-
     do_print(printf_console, nullptr, message, args);
-
     va_end(args);
 }
 

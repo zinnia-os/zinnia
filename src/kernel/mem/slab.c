@@ -1,6 +1,7 @@
 #include <zinnia/status.h>
 #include <common/compiler.h>
-#include <kernel/mem.h>
+#include <kernel/alloc.h>
+#include <kernel/spin.h>
 #include <string.h>
 
 typedef struct {
@@ -31,11 +32,11 @@ static zn_status_t slab_new(struct slab* slab, size_t size) {
     if (status)
         return status;
 
-    slab->head = (void**)(addr + mem_hhdm_addr());
+    slab->head = (void**)(addr + arch_mem_hhdm_addr());
     slab->ent_size = size;
 
     const size_t offset = ALIGN_UP(sizeof(slab_header), size);
-    const size_t available_size = mem_page_size() - offset;
+    const size_t available_size = arch_mem_page_size() - offset;
 
     slab_header* ptr = (slab_header*)slab->head;
     ptr->slab = slab;
@@ -109,7 +110,7 @@ void* mem_alloc(size_t size, enum alloc_flags flags) {
         return slab_do_alloc(slab);
     }
 
-    size_t num_pages = ROUND_UP(size, mem_page_size());
+    size_t num_pages = ROUND_UP(size, arch_mem_page_size());
 
     // Allocate the pages plus an additional page for metadata.
     phys_t ret;
@@ -117,13 +118,13 @@ void* mem_alloc(size_t size, enum alloc_flags flags) {
     if (__unlikely(status != ZN_OK))
         return nullptr;
 
-    ret = ret + (phys_t)mem_hhdm_addr();
+    ret = ret + (phys_t)arch_mem_hhdm_addr();
     // Write metadata into the first page.
     slab_info* info = (slab_info*)ret;
     info->num_pages = num_pages;
     info->size = size;
     // Skip the first page and return the next one.
-    return (void*)(ret + mem_page_size());
+    return (void*)(ret + arch_mem_page_size());
 }
 
 void mem_free(void* addr) {
@@ -131,12 +132,12 @@ void mem_free(void* addr) {
         return;
 
     // If the address is page aligned.
-    if ((size_t)addr == ALIGN_DOWN((size_t)addr, mem_page_size())) {
-        slab_info* info = (slab_info*)(addr - mem_page_size());
-        mem_phys_free(((phys_t)info - (phys_t)mem_hhdm_addr()), info->num_pages + 1);
+    if ((size_t)addr == ALIGN_DOWN((size_t)addr, arch_mem_page_size())) {
+        slab_info* info = (slab_info*)(addr - arch_mem_page_size());
+        mem_phys_free(((phys_t)info - (phys_t)arch_mem_hhdm_addr()), info->num_pages + 1);
         return;
     }
 
-    slab_header* header = (slab_header*)(ALIGN_DOWN((size_t)addr, mem_page_size()));
+    slab_header* header = (slab_header*)(ALIGN_DOWN((size_t)addr, arch_mem_page_size()));
     slab_do_free(header->slab, addr);
 }

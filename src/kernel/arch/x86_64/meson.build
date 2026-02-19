@@ -8,9 +8,11 @@ kernel_c_args += [
 kernel_sources += files(
     'apic.c',
     'gdt.c',
+    'hpet.c',
     'idt.c',
-    'mem.c',
+    'mmu.c',
     'percpu.c',
+    'sched.c',
     'serial.c',
     'smp.c',
     'sys.c',

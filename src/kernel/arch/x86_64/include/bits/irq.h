@@ -17,5 +17,5 @@ static inline void arch_irq_set_state(bool state) {
 }
 
 static inline void arch_irq_wait() {
-    asm volatile("sti; hlt");
+    asm volatile("hlt");
 }

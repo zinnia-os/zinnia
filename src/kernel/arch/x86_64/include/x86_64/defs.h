@@ -197,4 +197,5 @@
 #define CPL_USER   (0b11)
 #define CPL_KERNEL (0b00)
 
+#define IDT_PF          (0xE)
 #define IDT_IPI_RESCHED (0xFF)

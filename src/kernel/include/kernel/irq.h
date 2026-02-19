@@ -39,25 +39,13 @@ void irq_line_attach(struct irq_line* self, struct irq_handler* handler);
 
 struct irq_percpu {
     uint32_t level;
+    bool in_interrupt;
 };
 
 void irq_lock();
-
 void irq_unlock();
+bool irq_set_interrupted(bool is_interrupted);
 
-// Enables or disables interrupts on this CPU.
-// Don't use this function directly.
-static inline void irq_set_state(bool state) {
-    return arch_irq_set_state(state);
-}
-
-// Returns true if interrupts are enabled on this CPU.
-// Don't use this function directly.
-static inline bool irq_get_state() {
-    return arch_irq_get_state();
-}
-
-// Halts the CPU until an interrupt arrives.
-static inline void irq_wait() {
-    arch_irq_wait();
-}
+void arch_irq_set_state(bool state);
+bool arch_irq_get_state();
+void arch_irq_wait();

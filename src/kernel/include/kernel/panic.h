@@ -1,5 +1,6 @@
 #pragma once
+#include <common/compiler.h>
 
 // Stop all execution upon panic.
-[[noreturn]]
-void panic();
+[[noreturn, __format(printf, 1, 2)]]
+void panic(const char* msg, ...);

@@ -14,7 +14,7 @@
 #ifndef __ASSEMBLER__
 
 #include <common/compiler.h>
-#include <kernel/common.h>
+#include <common/utils.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <x86_64/gdt.h>

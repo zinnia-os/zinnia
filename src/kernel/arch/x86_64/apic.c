@@ -1,6 +1,7 @@
 #include <zinnia/mem.h>
 #include <kernel/assert.h>
-#include <kernel/mem.h>
+#include <kernel/clock.h>
+#include <kernel/mmio.h>
 #include <kernel/percpu.h>
 #include <stdint.h>
 #include <x86_64/apic.h>
@@ -43,8 +44,8 @@ void lapic_init(struct local_apic* lapic) {
     if (cpuid.ecx & CPUID_1C_X2APIC)
         apic_msr |= 1 << 10;
     else {
-        lapic->xapic_regs = mem_mmio_new(apic_msr & 0xFFFF'F000, 0x1000);
-        ASSERT(lapic->xapic_regs, "Failed to allocate virtual memory!");
+        lapic->xapic_regs = mmio_new(apic_msr & 0xFFFF'F000, 0x1000);
+        ASSERT(lapic->xapic_regs, "Failed to allocate virtual memory!\n");
     }
 
     asm_wrmsr(0x1B, apic_msr);
@@ -67,7 +68,8 @@ void lapic_init(struct local_apic* lapic) {
     // Set the timer to the highest value possible.
     lapic_write_reg(lapic, APIC_REG_ICR_TIMER, 0xFFFF'FFFF);
 
-    // TODO: Sleep for 10 milliseconds.
+    // Sleep for 10 milliseconds.
+    clock_spin_ns(10'000'000);
 
     lapic->ticks_per_10ms = 0xFFFF'FFFF - lapic_read_reg(lapic, APIC_REG_CCR);
     lapic_write_reg(lapic, APIC_REG_LVT_TR, IDT_IPI_RESCHED | 0x20000);

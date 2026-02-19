@@ -6,8 +6,10 @@
 			"request": "launch",
 			"name": "Debug x86_64",
 			"targetCreateCommands": [
-				"settings set target.source-map /var/bootstrap-zinnia/src/src ${workspaceFolder}/src",
+				"settings set target.source-map /var/bootstrap-zinnia/src ${workspaceFolder}",
+				"target create ${workspaceFolder}/build-x86_64/pkg-builds/zinnia-servers/servers/initd/initd",
 				"target create ${workspaceFolder}/build-x86_64/pkg-builds/zinnia/kernel/zinnia",
+				"breakpoint set --name __mlibc_entry",
 
 			],
 			"processCreateCommands": [

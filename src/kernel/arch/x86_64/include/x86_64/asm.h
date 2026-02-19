@@ -19,6 +19,13 @@ static inline uint64_t asm_rdmsr(uint32_t msr) {
     return ((uint64_t)edx << 32) | eax;
 }
 
+static inline uint64_t asm_rdtsc() {
+    uint32_t eax;
+    uint32_t edx;
+    asm volatile("rdtsc" : "=a"(eax), "=d"(edx) : : "memory");
+    return ((uint64_t)edx << 32) | eax;
+}
+
 // Writes a 64-bit value to a given MSR.
 static inline void asm_wrmsr(uint32_t msr, uint64_t val) {
     uint32_t eax = (uint32_t)val;
@@ -85,4 +92,44 @@ static inline void asm_outw(uint16_t port, uint16_t value) {
 
 static inline void asm_outl(uint16_t port, uint32_t value) {
     asm volatile("out %0, %1" : : "Nd"(port), "a"(value));
+}
+
+static inline uint16_t asm_read_ds() {
+    uint16_t value = 0;
+    asm volatile("mov %0, ds" : "=r"(value));
+    return value;
+}
+
+static inline uint16_t asm_read_es() {
+    uint16_t value = 0;
+    asm volatile("mov %0, es" : "=r"(value));
+    return value;
+}
+
+static inline uint16_t asm_read_fs() {
+    uint16_t value = 0;
+    asm volatile("mov %0, fs" : "=r"(value));
+    return value;
+}
+
+static inline uint16_t asm_read_gs() {
+    uint16_t value = 0;
+    asm volatile("mov %0, gs" : "=r"(value));
+    return value;
+}
+
+static inline void asm_write_ds(uint16_t value) {
+    asm volatile("mov ds, %0" ::"r"(value));
+}
+
+static inline void asm_write_es(uint16_t value) {
+    asm volatile("mov es, %0" ::"r"(value));
+}
+
+static inline void asm_write_fs(uint16_t value) {
+    asm volatile("mov fs, %0" ::"r"(value));
+}
+
+static inline void asm_write_gs(uint16_t value) {
+    asm volatile("mov gs, %0" ::"r"(value));
 }

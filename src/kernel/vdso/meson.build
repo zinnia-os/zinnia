@@ -4,7 +4,7 @@
 vdso_lds = meson.current_source_dir() / 'vdso.ld'
 
 vdso_lib = shared_library(
-    'vdso',
+    'zinnia-vdso',
     'archctl.c',
     'channel.c',
     'handle.c',
@@ -31,7 +31,10 @@ vdso_lib = shared_library(
         kernel_includes,
     ],
     link_depends: vdso_lds,
+    name_prefix: '',
 )
+
+# TODO: Check that the vDSO contains no relocations.
 
 vdso_stripped = custom_target(
     'vdso_stripped.so',
@@ -40,6 +43,10 @@ vdso_stripped = custom_target(
     command: [strip, '--strip-unneeded', '@INPUT@', '-o', '@OUTPUT@'],
 )
 
+if target_machine.cpu_family() == 'x86_64'
+    arch_format = 'elf64-x86-64'
+endif
+
 vdso = custom_target(
     'vdso_blob.o',
     input: vdso_stripped,
@@ -47,7 +54,7 @@ vdso = custom_target(
     command: [
         objcopy,
         '--input-target=binary',
-        '--output-target=elf64-x86-64',
+        '--output-target=' + arch_format,
         '--rename-section', '.data=.vdso,alloc,load,readonly,data,contents',
         '@INPUT@',
         '@OUTPUT@',

@@ -2,9 +2,9 @@
 
 #include <zinnia/handle.h>
 #include <kernel/channel.h>
-#include <kernel/mem.h>
 #include <kernel/mutex.h>
 #include <kernel/spin.h>
+#include <kernel/vas.h>
 #include <stddef.h>
 
 enum namespace_desc_type {
@@ -35,7 +35,7 @@ struct namespace_desc_channel {
 
 struct namespace_desc_vas {
     struct namespace_desc desc;
-    struct address_space* space;
+    struct vas* space;
 };
 
 // Creates a new namespace with no contents.

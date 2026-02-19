@@ -14,8 +14,8 @@ struct percpu {
     struct percpu* self;       // A pointer to this structure.
     size_t id;                 // The virtual ID of this CPU.
     bool online;               // Whether this CPU is initialized and active.
-    virt_t kernel_stack;       // The kernel mode stack.
-    virt_t user_stack;         // The user mode stack.
+    uintptr_t kernel_stack;    // The kernel mode stack.
+    uintptr_t user_stack;      // The user mode stack.
     struct arch_percpu arch;   // Architecture-specific fields.
     struct irq_percpu irq;     // IRQ information.
     struct sched_percpu sched; // Scheduler information.

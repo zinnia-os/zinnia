@@ -1,7 +1,7 @@
 #pragma once
 
 #include <common/compiler.h>
-#include <kernel/common.h>
+#include <common/utils.h>
 #include <kernel/types.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -13,7 +13,7 @@
 struct boot_file {
     phys_t data;
     size_t length;
-    const char* path;
+    char path[128];
 };
 
 struct boot_info {
@@ -21,14 +21,17 @@ struct boot_info {
     struct phys_mem* mem_map;
     size_t num_mem_maps;
     phys_t phys_base;
-    virt_t virt_base;
-    virt_t hhdm_base;
+    uintptr_t virt_base;
+    uintptr_t hhdm_base;
     struct boot_file* files;
     size_t num_files;
+    phys_t rsdp;
 };
 
 extern uint8_t __ld_stack_top[];
 extern uint8_t __ld_stack_bottom[];
+
+extern phys_t rsdp_addr;
 
 // Entry point for the kernel after arch-specific setup has finished.
 void kernel_entry();
@@ -38,6 +41,3 @@ void kernel_early_init();
 
 [[noreturn]]
 void kernel_main(struct boot_info* info);
-
-[[noreturn]]
-void kernel_main_task();

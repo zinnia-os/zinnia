@@ -45,11 +45,16 @@ cfg.set_quoted('ZINNIA_LINKER_ID', c_compiler.get_linker_id())
 strip = find_program('strip')
 objcopy = find_program('objcopy')
 
-if get_option('build_kernel')
+build_kernel = get_option('build_kernel')
+build_servers = get_option('build_servers')
+
+uacpi = subproject('uacpi')
+
+if build_kernel
     subdir('kernel')
 endif
 
-if get_option('build_servers')
+if build_servers
     subdir('lib')
     subdir('servers')
 endif

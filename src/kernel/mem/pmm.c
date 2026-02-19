@@ -1,13 +1,13 @@
 #include <common/compiler.h>
-#include <kernel/assert.h>
-#include <kernel/mem.h>
+#include <kernel/alloc.h>
+#include <kernel/panic.h>
 #include <kernel/print.h>
 #include <kernel/spin.h>
+#include <kernel/virt.h>
 #include <stdint.h>
 #include <string.h>
 
-virt_t mem_hhdm_base = 0;
-struct page* mem_pfndb = nullptr;
+uintptr_t mem_hhdm_base = 0;
 
 static zn_status_t (*alloc_fn)(size_t num_pages, enum alloc_flags flags, phys_t* out);
 static zn_status_t (*free_fn)(phys_t start, size_t num_pages);
@@ -24,7 +24,7 @@ static struct phys_mem bump_mem = {0};
 static struct phys_mem* bump_region = nullptr;
 
 static zn_status_t bump_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
-    const size_t bytes = num_pages * mem_page_size();
+    const size_t bytes = num_pages * arch_mem_page_size();
     if (((intptr_t)bump_mem.length - bytes) <= 0)
         return ZN_ERR_NO_MEMORY;
 
@@ -41,7 +41,7 @@ static zn_status_t bump_alloc(size_t num_pages, enum alloc_flags flags, phys_t* 
 
 static zn_status_t bump_free(phys_t addr, size_t num_pages) {
     // We don't free bootstrap memory.
-    ASSERT(false, "Attempted to free bootstrap memory!");
+    panic("Attempted to free bootstrap memory!");
 }
 
 void mem_phys_bootstrap(struct phys_mem* mem) {
@@ -62,7 +62,7 @@ static size_t pmm_total_free = 0;
 static zn_status_t freelist_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
     spin_lock(&pmm_lock);
 
-    const size_t bytes = num_pages * mem_page_size();
+    const size_t bytes = num_pages * arch_mem_page_size();
     phys_t limit = UINTPTR_MAX;
     if (flags & ALLOC_MEM20) {
         limit = (phys_t)1 << 20;
@@ -74,8 +74,7 @@ static zn_status_t freelist_alloc(size_t num_pages, enum alloc_flags flags, phys
     struct page* prev_it = nullptr;
 
     while (it) {
-        const phys_t page_addr = (((uintptr_t)it - (uintptr_t)mem_pfndb) / sizeof(struct page)) * mem_page_size();
-
+        const phys_t page_addr = (((uintptr_t)it - (uintptr_t)vm_pfndb) / sizeof(struct page)) * arch_mem_page_size();
         // If the region is too high up or doesn't have enough pages left, continue searching.
         if (page_addr + bytes >= limit || __unlikely(it->freelist.count < num_pages)) {
             prev_it = it;
@@ -102,7 +101,7 @@ static zn_status_t freelist_alloc(size_t num_pages, enum alloc_flags flags, phys
             it->freelist.count -= num_pages;
 
             if (__likely(out))
-                *out = page_addr + (it->freelist.count * mem_page_size());
+                *out = page_addr + (it->freelist.count * arch_mem_page_size());
         }
         goto success;
     }
@@ -123,7 +122,7 @@ success:
 static zn_status_t freelist_free(phys_t addr, size_t num_pages) {
     spin_lock(&pmm_lock);
 
-    struct page* page = &mem_pfndb[addr / mem_page_size()];
+    struct page* page = &vm_pfndb[addr / arch_mem_page_size()];
     page->freelist.count = num_pages;
     page->freelist.next = pmm_head;
     pmm_head = page;
@@ -140,16 +139,16 @@ void mem_phys_init(struct phys_mem* map, size_t length) {
 
     for (size_t i = 0; i < length; i++) {
         // Regions smaller than a page are useless.
-        if (map[i].length < mem_page_size() || map[i].usage != PHYS_USABLE)
+        if (map[i].length < arch_mem_page_size() || map[i].usage != PHYS_USABLE)
             continue;
 
-        struct page* page = &mem_pfndb[map[i].address / mem_page_size()];
-        page->freelist.count = map[i].length / mem_page_size();
+        struct page* page = &vm_pfndb[map[i].address / arch_mem_page_size()];
+        page->freelist.count = map[i].length / arch_mem_page_size();
         page->freelist.next = pmm_head;
         pmm_head = page;
         pmm_total_free += page->freelist.count;
     }
 
-    const size_t free_bytes = (pmm_total_free * mem_page_size());
+    const size_t free_bytes = (pmm_total_free * arch_mem_page_size());
     kprintf("Total available memory: %zu MiB\n", free_bytes / 1024 / 1024);
 }

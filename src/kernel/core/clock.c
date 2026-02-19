@@ -17,7 +17,7 @@ uint64_t clock_get_elapsed_ns() {
     if (__unlikely(!active))
         return 0;
 
-    return atomic_load(&counter_base) + active->get_elapsed_ns();
+    return atomic_load(&counter_base) + active->get_elapsed_ns(active);
 }
 
 bool clock_switch(struct clock* clock) {
@@ -32,9 +32,22 @@ bool clock_switch(struct clock* clock) {
 
     kprintf("Switching to clock source \"%s\"\n", clock->name);
 
-    uint64_t elapsed = active_clock->get_elapsed_ns();
+    uint64_t elapsed = clock_get_elapsed_ns();
     counter_base += elapsed;
 
+    active_clock = clock;
     spin_unlock(&lock);
     return true;
+}
+
+void clock_spin_ns(uint64_t ns) {
+    if (active_clock == nullptr) {
+        kprintf("Unable to sleep for %lu ns, no clock available!\n", ns);
+        return;
+    }
+
+    uint64_t target = clock_get_elapsed_ns() + ns;
+    while (clock_get_elapsed_ns() < target) {
+        // TODO: Maybe pause?
+    }
 }

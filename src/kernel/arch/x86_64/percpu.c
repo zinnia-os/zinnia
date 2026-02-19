@@ -5,8 +5,10 @@
 #include <x86_64/asm.h>
 #include <x86_64/defs.h>
 #include <x86_64/gdt.h>
+#include <x86_64/hpet.h>
 #include <x86_64/idt.h>
 #include <x86_64/syscall.h>
+#include <x86_64/tsc.h>
 
 void arch_percpu_bsp_init() {
     asm_wrmsr(MSR_GS_BASE, (uint64_t)&percpu_bsp);
@@ -104,6 +106,9 @@ static void setup_cpu(struct percpu* cpu) {
 }
 
 void arch_percpu_init() {
+    hpet_init();
+    tsc_init();
+
     // Init the BSP.
     setup_cpu(&percpu_bsp);
 

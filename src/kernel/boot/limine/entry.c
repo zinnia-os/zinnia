@@ -1,9 +1,10 @@
+#include <common/utils.h>
+#include <kernel/alloc.h>
 #include <kernel/assert.h>
 #include <kernel/cmdline.h>
-#include <kernel/common.h>
 #include <kernel/init.h>
-#include <kernel/mem.h>
 #include <kernel/print.h>
+#include <string.h>
 #include "limine.h"
 
 [[__initdata_sorted("limine.0")]]
@@ -61,6 +62,9 @@ void kernel_entry() {
         case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE:
             mem[i].usage = PHYS_RECLAIMABLE;
             break;
+        case LIMINE_MEMMAP_EXECUTABLE_AND_MODULES:
+            mem[i].usage = PHYS_STATIC;
+            break;
         default:
             mem[i].usage = PHYS_RESERVED;
             break;
@@ -73,14 +77,18 @@ void kernel_entry() {
         for (size_t i = 0; i < info.num_files; i++) {
             files[i].data = (phys_t)module_res->modules[i]->address - hhdm_request.response->offset;
             files[i].length = module_res->modules[i]->size;
-            files[i].path = module_res->modules[i]->path;
+            strncpy(files[i].path, module_res->modules[i]->path, sizeof(files[i].path));
         }
     }
 
     info.mem_map = mem;
     info.phys_base = (phys_t)exec_res->physical_base;
-    info.virt_base = (virt_t)exec_res->virtual_base;
-    info.hhdm_base = (virt_t)hhdm_request.response->offset;
+    info.virt_base = (uintptr_t)exec_res->virtual_base;
+    info.hhdm_base = (uintptr_t)hhdm_request.response->offset;
+
+    info.rsdp = (phys_t)rsdp_request.response->address - info.hhdm_base;
 
     kernel_main(&info);
 }
+
+phys_t rsdp_addr;

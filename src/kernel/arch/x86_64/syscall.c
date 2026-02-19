@@ -1,9 +1,25 @@
 #include <common/compiler.h>
 #include <kernel/percpu.h>
+#include <kernel/syscalls.h>
+#include <bits/sched.h>
 #include <stddef.h>
 #include <x86_64/defs.h>
 
-void arch_syscall_handler() {}
+#define ASM_REG_NUM "rax"
+#define ASM_REG_RET "rax"
+#define ASM_REG_A0  "rdi"
+#define ASM_REG_A1  "rsi"
+#define ASM_REG_A2  "rdx"
+#define ASM_REG_A3  "r9"
+#define ASM_REG_A4  "r8"
+#define ASM_REG_A5  "r10"
+#define ASM_REG_A6  "r12"
+#define ASM_REG_A7  "r13"
+#define ASM_SYSCALL "syscall"
+
+void arch_syscall_handler(struct arch_context* ctx) {
+    ctx->rax = syscall_dispatch(ctx->rax, ctx->rdi, ctx->rsi, ctx->rdx, ctx->r9, ctx->r8, ctx->r10, ctx->r12, ctx->r13);
+}
 
 [[__naked]]
 void arch_syscall_stub() {
@@ -58,9 +74,10 @@ void arch_syscall_stub() {
         "mov rsp, gs:%c0\n" // Load user stack from `Cpu.user_stack`.
         "swapgs\n"
         "sysretq\n" // Return to user mode.
-        ::"i"(offsetof(struct percpu, user_stack)),
-        "i"(offsetof(struct percpu, kernel_stack)),
-        "i"(offsetof(struct gdt, user_code64) | CPL_USER),
-        "i"(offsetof(struct gdt, user_data) | CPL_USER)
+        :
+        : "i"(offsetof(struct percpu, user_stack)),
+          "i"(offsetof(struct percpu, kernel_stack)),
+          "i"(offsetof(struct gdt, user_code64) | CPL_USER),
+          "i"(offsetof(struct gdt, user_data) | CPL_USER)
     );
 }

@@ -3,7 +3,7 @@
 #include <common/compiler.h>
 #include <stdint.h>
 
-struct [[__packed, __aligned(0x10)]] tss {
+struct [[__packed]] tss {
     uint32_t reserved0;
     uint64_t rsp0;
     uint64_t rsp1;
@@ -22,3 +22,5 @@ struct [[__packed, __aligned(0x10)]] tss {
     uint16_t reserved5;
     uint16_t iopb;
 };
+
+static_assert(sizeof(struct tss) == 0x68);

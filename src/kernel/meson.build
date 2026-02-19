@@ -4,7 +4,9 @@ kernel_c_args = [
     '-fno-omit-frame-pointer',
     '-fno-pie',
     '-nostdinc',
-    '-D__KERNEL__=1',
+    '-DUACPI_OVERRIDE_TYPES',
+    '-DUACPI_FORMATTED_LOGGING',
+    '-DUACPI_BAREBONES_MODE',
 ]
 
 kernel_lds = meson.current_source_dir() / 'kernel.ld'
@@ -35,13 +37,24 @@ subdir('syscalls')
 subdir('klibc')
 subdir('vdso')
 
+uacpi_sources = uacpi.get_variable('sources')
+uacpi_includes = uacpi.get_variable('includes')
+
 executable(
     'zinnia',
-    include_directories: [common_includes, kernel_includes],
+    include_directories: [
+        common_includes,
+        kernel_includes,
+        uacpi_includes,
+    ],
     c_args: kernel_c_args,
     link_args: kernel_link_args,
     link_depends: kernel_lds,
-    sources: [kernel_sources, klibc_sources],
+    sources: [
+        kernel_sources,
+        klibc_sources,
+        uacpi_sources,
+    ],
     objects: vdso,
     install: true,
     install_dir: '/boot',

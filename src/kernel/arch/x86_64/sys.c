@@ -18,11 +18,7 @@ void _start() {
     );
 }
 
-[[noreturn]]
-void arch_panic() {
-    asm volatile("cli; hlt");
-    __unreachable();
-}
+void arch_panic() {}
 
 zn_status_t arch_archctl(zn_archctl_t op, uintptr_t arg) {
     switch (op) {

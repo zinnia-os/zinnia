@@ -31,8 +31,8 @@ FILES=(
     usr/lib/libpthread.so
     usr/lib/libm.so
     # Servers
-    usr/bin/initd
-    usr/bin/posixd
+    # usr/bin/initd
+    # usr/bin/posixd
 )
 echo "Installing:" ${FILES[@]}
 

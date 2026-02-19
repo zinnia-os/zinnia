@@ -1,10 +1,11 @@
 #include <zinnia/status.h>
-#include <kernel/assert.h>
-#include <kernel/mem.h>
-#include <kernel/print.h>
+#include <kernel/alloc.h>
+#include <kernel/mmu.h>
 #include <kernel/spin.h>
+#include <kernel/vas.h>
+#include <string.h>
 
-zn_status_t mem_pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
+zn_status_t pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
     flags &= ~ALLOC_NOZERO;
 
     phys_t addr;
@@ -12,26 +13,47 @@ zn_status_t mem_pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
     if (status)
         return status;
 
-    pt->root = addr;
-    return 0;
+    struct page_table result = {
+        .root = addr,
+        .lock = (struct spinlock){0},
+        .is_user = false,
+    };
+
+    *pt = result;
+    return ZN_OK;
 }
 
-zn_status_t mem_pt_new_user(struct page_table* pt, enum alloc_flags flags) {
-    // TODO
-    return 0;
+zn_status_t pt_new_user(struct page_table* pt, enum alloc_flags flags) {
+    phys_t user_l1;
+    zn_status_t status = mem_phys_alloc(1, 0, &user_l1);
+    if (status)
+        return status;
+
+    void* user_l1_ptr = HHDM_PTR(user_l1);
+    void* kernel_l1_ptr = HHDM_PTR(kernel_vas.pt.root);
+    memcpy(user_l1_ptr, kernel_l1_ptr, arch_mem_page_size());
+
+    struct page_table result = {
+        .root = user_l1,
+        .lock = (struct spinlock){0},
+        .is_user = true,
+    };
+
+    *pt = result;
+    return ZN_OK;
 }
 
 // Gets a reference to the PTE at the given virtual address.
 // If `check_only` is set, only checks if the PTE exists,
 // and doesn't allocate new levels if they don't already exist.
 // If it can't allocate a page if it has to, returns `nullptr`.
-static pte_t* get_pte(struct page_table* pt, virt_t vaddr, bool is_user, bool check_only) {
+static pte_t* get_pte(struct page_table* pt, uintptr_t vaddr, bool is_user, bool check_only) {
     pte_t* current_head = HHDM_PTR(pt->root);
     size_t index = 0;
 
-    for (int8_t level = mem_num_levels() - 1; level >= 0; level--) {
-        const size_t addr_mask = (1 << mem_level_bits()) - 1;
-        const size_t addr_shift = mem_page_bits() + (mem_level_bits() * level);
+    for (int8_t level = arch_mem_num_levels() - 1; level >= 0; level--) {
+        const size_t addr_mask = (1 << arch_mem_level_bits()) - 1;
+        const size_t addr_shift = arch_mem_page_bits() + (arch_mem_level_bits() * level);
         const enum pte_flags level_flags = PTE_DIR | (is_user ? PTE_USER : 0);
 
         index = (vaddr >> addr_shift) & addr_mask;
@@ -43,10 +65,10 @@ static pte_t* get_pte(struct page_table* pt, virt_t vaddr, bool is_user, bool ch
 
         pte_t* pte = &current_head[index];
 
-        if (mem_pte_is_present(pte)) {
+        if (pte_is_present(pte)) {
             // Get the next level.
-            *pte = mem_pte_build(mem_pte_address(pte), level_flags, CACHE_NONE);
-            current_head = HHDM_PTR(mem_pte_address(pte));
+            *pte = pte_build(pte_address(pte), level_flags, CACHE_NONE);
+            current_head = HHDM_PTR(pte_address(pte));
         } else {
             // If the current level isn't present, we can skip the rest.
             if (check_only)
@@ -56,7 +78,7 @@ static pte_t* get_pte(struct page_table* pt, virt_t vaddr, bool is_user, bool ch
             if (mem_phys_alloc(1, 0, &addr) != ZN_OK)
                 return nullptr;
 
-            *pte = mem_pte_build(addr, level_flags, CACHE_NONE);
+            *pte = pte_build(addr, level_flags, CACHE_NONE);
             current_head = HHDM_PTR(addr);
         }
     }
@@ -64,7 +86,7 @@ static pte_t* get_pte(struct page_table* pt, virt_t vaddr, bool is_user, bool ch
     return &current_head[index];
 }
 
-zn_status_t mem_pt_map(struct page_table* pt, virt_t vaddr, phys_t paddr, enum pte_flags flags, enum cache_mode cache) {
+zn_status_t pt_map(struct page_table* pt, uintptr_t vaddr, phys_t paddr, enum pte_flags flags, enum cache_mode cache) {
     spin_lock(&pt->lock);
 
     zn_status_t status = ZN_OK;
@@ -74,7 +96,7 @@ zn_status_t mem_pt_map(struct page_table* pt, virt_t vaddr, phys_t paddr, enum p
         goto fail;
     }
 
-    *pte = mem_pte_build(paddr, flags, cache);
+    *pte = pte_build(paddr, flags, cache);
 
 fail:
     spin_unlock(&pt->lock);

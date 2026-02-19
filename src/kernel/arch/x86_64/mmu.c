@@ -1,4 +1,4 @@
-#include <kernel/mem.h>
+#include <kernel/mmu.h>
 #include <kernel/types.h>
 
 enum : pte_t {
@@ -18,11 +18,11 @@ enum : pte_t {
     ARCH_PTE_ADDR_MASK = 0x000F'FFFF'FFFF'F000,
 };
 
-void arch_mem_pte_clear(pte_t* pte) {
+void pte_clear(pte_t* pte) {
     *pte = 0;
 }
 
-pte_t arch_mem_pte_build(phys_t addr, enum pte_flags flags, enum cache_mode cache) {
+pte_t pte_build(phys_t addr, enum pte_flags flags, enum cache_mode cache) {
     pte_t result = ((pte_t)addr & ARCH_PTE_ADDR_MASK) | ARCH_FLAG_PRESENT;
 
     if (flags & PTE_USER)
@@ -39,18 +39,18 @@ pte_t arch_mem_pte_build(phys_t addr, enum pte_flags flags, enum cache_mode cach
     return result;
 }
 
-bool arch_mem_pte_is_present(pte_t* pte) {
+bool pte_is_present(pte_t* pte) {
     return *pte & ARCH_FLAG_PRESENT;
 }
 
-bool arch_mem_pte_is_dir(pte_t* pte) {
+bool pte_is_dir(pte_t* pte) {
     return *pte & ARCH_FLAG_SIZE;
 }
 
-phys_t arch_mem_pte_address(pte_t* pte) {
+phys_t pte_address(pte_t* pte) {
     return (phys_t)(*pte & ARCH_PTE_ADDR_MASK);
 }
 
-void arch_mem_pt_set(struct page_table* pt) {
+void pt_set(struct page_table* pt) {
     asm volatile("mov cr3, %0" ::"r"(pt->root) : "memory");
 }

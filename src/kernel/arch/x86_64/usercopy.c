@@ -12,7 +12,7 @@ static const struct usercopy_region read_region = {
 };
 
 [[__naked]]
-bool arch_usercopy_read(void* dst, const __user void* src, size_t len, struct usercopy_region* region) {
+bool arch_usercopy_read(void* dst, const __user void* src, size_t len, struct usercopy_region** region) {
     asm volatile(
         "stac\n"
         // Setup regs for `rep movsb`.
@@ -55,7 +55,7 @@ static const struct usercopy_region write_region = {
 };
 
 [[__naked]]
-bool arch_usercopy_write(__user void* dst, const void* src, size_t len, struct usercopy_region* region) {
+bool arch_usercopy_write(__user void* dst, const void* src, size_t len, struct usercopy_region** region) {
     asm volatile(
         "stac\n"
         // Setup regs for `rep movsb`.
@@ -98,7 +98,7 @@ static const struct usercopy_region strlen_region = {
 };
 
 [[__naked]]
-bool arch_usercopy_strlen(const __user char* str, size_t max, size_t* len, struct usercopy_region* region) {
+bool arch_usercopy_strlen(const __user char* str, size_t max, size_t* len, struct usercopy_region** region) {
     asm volatile(
         "stac\n"
         "mov rax, [rip + %0]\n"

@@ -9,5 +9,5 @@ kernel_sources += files(
     'print.c',
     'sched.c',
     'spin.c',
-    'vdso.c',
+    'uacpi_glue.c',
 )

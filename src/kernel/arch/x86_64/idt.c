@@ -1,4 +1,6 @@
 #include <common/compiler.h>
+#include <kernel/assert.h>
+#include <kernel/irq.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/print.h>
@@ -6,6 +8,8 @@
 #include <bits/sched.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <x86_64/apic.h>
+#include <x86_64/defs.h>
 #include <x86_64/gdt.h>
 
 struct [[__packed]] idt_entry {
@@ -28,8 +32,32 @@ struct [[__packed]] idtr {
 static_assert(sizeof(struct idtr) == 10);
 
 void interrupt_handler(struct arch_context* ctx) {
-    kprintf("Interrupt!\n");
-    kprintf("rax: %zx rbx: %zx rcx: %zx rdx: %zx\n", ctx->rax, ctx->rbx, ctx->rcx, ctx->rdx);
+    struct percpu* cpu = percpu_get();
+    bool old = irq_set_interrupted(true);
+
+    uint64_t isr = ctx->isr;
+    switch (isr) {
+    case IDT_PF:
+        uint64_t cr2;
+        asm volatile("mov %0, cr2" : "=r"(cr2));
+        panic("Page fault at %#lx, accessed: %#lx\n", ctx->rip, cr2);
+    case IDT_IPI_RESCHED:
+        arch_sched_preempt_disable();
+        if (arch_sched_preempt_enable()) {
+            lapic_eoi(&cpu->arch.lapic);
+            sched_reschedule(&cpu->sched);
+        }
+        break;
+    case 0x20 ...(0x20 + ARRAY_SIZE(cpu->arch.irq_lines)):
+        struct irq_line* line = cpu->arch.irq_lines[isr - 0x20];
+        ASSERT(line, "Unhandled interrupt on ISR %lu\n", isr);
+        // TODO: irq_raise(line);
+        break;
+    default:
+        panic("Unhandled exception on ISR %lu\n", isr);
+    }
+
+    irq_set_interrupted(old);
 }
 
 #define CS_OFFSET (sizeof(struct arch_context) - sizeof(uint64_t) - offsetof(struct arch_context, cs))
@@ -137,6 +165,7 @@ void interrupt_stub_internal() {
 // clang-format on
 
 #define INTERRUPT_STUB(n) \
+    [[__naked]] \
     static void interrupt_stub_##n() { \
         asm volatile( \
             ".if (%c0 == 8 || (%c0 >= 10 && %c0 <= 14) || %c0 == 17 || %c0 == 21 || %c0 == 29 || %c0 == 30)\n" \
@@ -157,7 +186,7 @@ void interrupt_stub_internal() {
         idt[n].base1 = (addr >> 16) & 0xFFFF; \
         idt[n].base2 = (addr >> 32) & 0xFFFF'FFFF; \
         idt[n].ist = 0; \
-        idt[n].attrib = (1 << 7) | 0xF; \
+        idt[n].attrib = (1 << 7) | 0xE; \
         idt[n].selector = offsetof(struct gdt, kernel_code64); \
         idt[n].reserved = 0; \
     } while (0);

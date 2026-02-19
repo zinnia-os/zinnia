@@ -1,0 +1,3 @@
+[submodule "src/subprojects/uacpi"]
+	path = src/subprojects/uacpi
+	url = https://github.com/uACPI/uacpi

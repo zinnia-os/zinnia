@@ -55,7 +55,7 @@ packages:
     - "@BUILD_ROOT@/tools/host-meson/cross.txt"
     - "--prefix=/usr"
     - "--libdir=lib"
-    - "-Dbuildtype=debugoptimized"
+    - "-Dbuildtype=debug"
     - "-Dbuild_kernel=true"
     - "@THIS_SOURCE_DIR@"
   build:
@@ -105,8 +105,9 @@ packages:
     - "@BUILD_ROOT@/tools/host-meson/cross.txt"
     - "--prefix=/usr"
     - "--libdir=lib"
-    - "-Dbuildtype=debugoptimized"
-    - "-Dstrip=true"
+    - "--bindir=/boot"
+    - "-Dbuildtype=debug"
+    - "-Dstrip=false"
     - "-Dbuild_servers=true"
     - "@THIS_SOURCE_DIR@"
   build:

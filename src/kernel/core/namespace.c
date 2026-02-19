@@ -1,5 +1,5 @@
 #include <zinnia/status.h>
-#include <kernel/mem.h>
+#include <kernel/alloc.h>
 #include <kernel/namespace.h>
 #include <kernel/spin.h>
 

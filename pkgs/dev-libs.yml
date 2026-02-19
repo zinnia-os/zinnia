@@ -47,7 +47,7 @@ packages:
     - "@BUILD_ROOT@/tools/host-meson/cross.txt"
     - "--prefix=/usr"
     - "--libdir=lib"
-    - "-Dbuildtype=release"
+    - "-Dbuildtype=debugoptimized"
     - "-Dno_headers=true"
     - "-Ddefault_library=both"
     - "@THIS_SOURCE_DIR@"

@@ -17,3 +17,6 @@ build*/
 .xbstrap/
 *.xbstrap
 ports/
+
+# Meson files
+.wraplock

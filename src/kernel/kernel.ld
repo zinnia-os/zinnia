@@ -26,10 +26,6 @@ SECTIONS
     .rodata ALIGN(CONSTANT(MAXPAGESIZE)) : {
         __ld_rodata_start = .;
 
-        __ld_init_ctors_start = .;
-        KEEP(*(.initgraph.ctors))
-        __ld_init_ctors_end = .;
-
         __ld_cmdline_start = .;
         KEEP(*(.cmdline))
         __ld_cmdline_end = .;

@@ -1,9 +1,11 @@
 kernel_sources += files(
     'init.c',
     'mmio.c',
+    'mmu.c',
     'pmm.c',
-    'pt.c',
     'slab.c',
     'usercopy.c',
-    'vmm.c',
+    'vas.c',
+    'virt.c',
+    'vmo.c',
 )

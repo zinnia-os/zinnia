@@ -7,7 +7,7 @@
 #define ELF_ARCH_DATA    ELFDATA2LSB
 #define ELF_ARCH_MACHINE EM_X86_64
 
-#define elf_hdr  elf64_hdr
+#define elf_ehdr elf64_ehdr
 #define elf_phdr elf64_phdr
 #define elf_dyn  elf64_dyn
 #define elf_addr elf64_addr
@@ -143,6 +143,13 @@ enum : uint32_t {
     AT_EUID = 12,
     AT_GID = 13,
     AT_EGID = 14,
+    AT_HWCAP = 16,
+    AT_SECURE = 23,
+    AT_RANDOM = 25,
+    AT_EXECFN = 31,
+    AT_SYSINFO_EHDR = 33,
+    AT_INIT_HANDLE = 0x1000,
+    AT_POSIX_HANDLE = 0x1001,
 };
 
 struct elf64_ehdr {

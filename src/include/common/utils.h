@@ -11,7 +11,7 @@
 
 #define BIT_TEST(value, bit) (((value) & (1 << bit)) == (1 << bit))
 
-#define CONTAINER_OF(value, p, field) ((p*)((char*)(&(value)) + offsetof(p, field)))
+#define CONTAINER_OF(value, p, field) ((p*)((char*)((value)) - offsetof(p, field)))
 
 #define CONCAT(A, B)  _CONCAT(A, B)
 #define _CONCAT(A, B) A##B
