@@ -8,6 +8,7 @@ project(
         'werror=true',
         'warning_level=2',
         'strip=true',
+        'b_lto=true',
     ],
 )
 

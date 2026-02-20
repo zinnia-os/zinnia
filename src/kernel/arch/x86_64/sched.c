@@ -38,7 +38,7 @@ static void perform_switch(uint64_t* old_rsp, uint64_t new_rsp) {
         "mov r14, [rsp + %c4]\n"
         "mov r15, [rsp + %c5]\n"
         "add rsp, 0x30\n"
-        "call irq_unlock\n"
+        "call %c6\n"
         "ret" // This will conveniently move us to the RIP we put at this stack entry.
         :
         : "i"(offsetof(struct task_frame, rbx)),
@@ -46,7 +46,8 @@ static void perform_switch(uint64_t* old_rsp, uint64_t new_rsp) {
           "i"(offsetof(struct task_frame, r12)),
           "i"(offsetof(struct task_frame, r13)),
           "i"(offsetof(struct task_frame, r14)),
-          "i"(offsetof(struct task_frame, r15))
+          "i"(offsetof(struct task_frame, r15)),
+          "i"(irq_unlock)
         : "memory"
     );
 }

@@ -52,8 +52,8 @@ void arch_syscall_stub() {
         "push r14\n"
         "push r15\n"
         "xor rbp, rbp\n"
-        "mov rdi, rsp\n"              // Put the trap frame struct as first argument.
-        "call arch_syscall_handler\n" // Call syscall handler
+        "mov rdi, rsp\n" // Put the trap frame struct as first argument.
+        "call %c4\n"     // Call syscall handler
         "cli\n"
         "pop r15\n"
         "pop r14\n"
@@ -78,6 +78,7 @@ void arch_syscall_stub() {
         : "i"(offsetof(struct percpu, user_stack)),
           "i"(offsetof(struct percpu, kernel_stack)),
           "i"(offsetof(struct gdt, user_code64) | CPL_USER),
-          "i"(offsetof(struct gdt, user_data) | CPL_USER)
+          "i"(offsetof(struct gdt, user_data) | CPL_USER),
+          "i"(arch_syscall_handler)
     );
 }

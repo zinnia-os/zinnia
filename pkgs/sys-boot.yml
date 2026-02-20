@@ -55,8 +55,9 @@ packages:
     - "@BUILD_ROOT@/tools/host-meson/cross.txt"
     - "--prefix=/usr"
     - "--libdir=lib"
-    - "-Dbuildtype=debug"
+    - "-Dbuildtype=release"
     - "-Dbuild_kernel=true"
+    - "-Dstrip=true"
     - "@THIS_SOURCE_DIR@"
   build:
   - args: [ "ninja" ]
@@ -106,8 +107,8 @@ packages:
     - "--prefix=/usr"
     - "--libdir=lib"
     - "--bindir=/boot"
-    - "-Dbuildtype=debug"
-    - "-Dstrip=false"
+    - "-Dbuildtype=release"
+    - "-Dstrip=true"
     - "-Dbuild_servers=true"
     - "@THIS_SOURCE_DIR@"
   build:
