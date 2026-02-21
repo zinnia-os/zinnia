@@ -25,7 +25,7 @@ tools:
     - "-DLLVM_ENABLE_FFI=ON"
     - "-DLLVM_ENABLE_EH=ON"
     - "-DLLVM_ENABLE_RTTI=ON"
-    - "-DLLVM_ENABLE_PROJECTS=clang;lld"
+    - "-DLLVM_ENABLE_PROJECTS=clang;lld;clang-tools-extra"
     - "-DLLVM_BINUTILS_INCDIR=@SOURCE_ROOT@/ports/binutils/include"
     - "-DLLVM_DEFAULT_TARGET_TRIPLE=@OPTION:arch@-@OPTION:triple@"
     - "@THIS_SOURCE_DIR@/llvm"
