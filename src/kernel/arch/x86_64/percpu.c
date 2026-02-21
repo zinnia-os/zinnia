@@ -42,7 +42,7 @@ static void setup_cpu(struct percpu* cpu) {
     asm_wrmsr(MSR_EFER, asm_rdmsr(MSR_EFER) | MSR_EFER_SCE);
     union ia32_star star = {0};
     star.kernel_cs_ss = offsetof(struct gdt, kernel_code64);
-    star.user_cs_ss = offsetof(struct gdt, user_code64);
+    star.user_cs_ss = offsetof(struct gdt, user_code32);
     asm_wrmsr(MSR_STAR, star.value);
     asm_wrmsr(MSR_LSTAR, (uint64_t)arch_syscall_stub);
     asm_wrmsr(MSR_SFMASK, RFLAGS_AC | RFLAGS_DF | RFLAGS_IF);
