@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-void zn_log(const char* message);
+void zn_log(const char* message, size_t len);
 
 // Returns the page size of the system.
 size_t zn_page_size();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bits/types.h>
 #include <stdint.h>
 
 struct arch_task_context {
@@ -33,3 +34,15 @@ struct arch_context {
     uint64_t rsp;
     uint64_t ss;
 };
+
+#define ARCH_CTX_NUM  rax
+#define ARCH_CTX_A0   rdi
+#define ARCH_CTX_A1   rsi
+#define ARCH_CTX_A2   rdx
+#define ARCH_CTX_A3   r9
+#define ARCH_CTX_A4   r8
+#define ARCH_CTX_A5   r10
+#define ARCH_CTX_A6   r12
+#define ARCH_CTX_A7   r13
+#define ARCH_CTX_RET0 rax
+#define ARCH_CTX_RET1 rdx

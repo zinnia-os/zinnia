@@ -4,7 +4,6 @@
 #include <zinnia/system.h>
 
 int main() {
-    zn_log("Hello, posixd world!\n");
 
     zn_status_t e;
 

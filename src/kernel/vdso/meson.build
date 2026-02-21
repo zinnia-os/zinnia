@@ -8,7 +8,7 @@ vdso_lib = shared_library(
     'archctl.c',
     'channel.c',
     'handle.c',
-    'mem.c',
+    'vmo.c',
     'namespace.c',
     'random.c',
     'rights.c',

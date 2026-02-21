@@ -1,7 +1,7 @@
 #pragma once
 
 #include <zinnia/status.h>
-#include <common/syscall_numbers.h>
+#include <kernel/syscall_numbers.h>
 #include <stdint.h>
 
 #ifdef __x86_64__

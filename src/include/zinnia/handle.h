@@ -12,7 +12,11 @@ extern "C" {
 // A generic object handle.
 typedef size_t zn_handle_t;
 
-#define ZN_HANDLE_INVALID ((zn_handle_t)(0))
+#define ZN_HANDLE_INVALID     ((zn_handle_t)(0))
+#define ZN_HANDLE_THIS_NS     ((zn_handle_t)(-1))
+#define ZN_HANDLE_THIS_VAS    ((zn_handle_t)(-2))
+#define ZN_HANDLE_THIS_THREAD ((zn_handle_t)(-3))
+#define ZN_HANDLE_ZERO_VMO    ((zn_handle_t)(-4))
 
 // Checks an object handle for validity.
 zn_status_t zn_handle_validate(zn_handle_t handle);

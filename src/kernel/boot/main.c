@@ -42,8 +42,12 @@ static void kernel_main_task(uintptr_t arg0, uintptr_t) {
     ASSERT(vmo_new_phys(&init_file) == ZN_OK, "");
     vmo_write(&init_file->object, 0, HHDM_PTR(file_data->data), file_data->length, nullptr);
 
+    struct namespace* ns;
+    ASSERT(namespace_new(&ns) == ZN_OK, "");
+
     struct exec_info init_info = {
         .file_obj = &init_file->object,
+        .ns = ns,
         .space = init_space,
         .argv = init_argv,
         .envp = init_envp,
