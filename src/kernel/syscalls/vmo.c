@@ -1,3 +1,4 @@
+#include <zinnia/handle.h>
 #include <zinnia/status.h>
 #include <common/utils.h>
 #include <kernel/alloc.h>
@@ -9,26 +10,26 @@
 #include <kernel/usercopy.h>
 #include <kernel/vas.h>
 #include <kernel/vmo.h>
+#include <stdatomic.h>
 
 zn_status_t syscall_vmo_create(struct arch_context* ctx) {
     size_t length = ctx->ARCH_CTX_A0;
     __user zn_handle_t* out = (__user zn_handle_t*)ctx->ARCH_CTX_A1;
-
-    // Create descriptor.
-    struct namespace_desc_vmo* desc = mem_alloc(sizeof(*desc), 0);
-    if (!desc)
-        return ZN_ERR_NO_MEMORY;
 
     // Allocate new VMO.
     struct paged_vmo* vmo;
     zn_status_t status = vmo_new_phys(&vmo);
     if (status != ZN_OK)
         return status;
-    desc->vmo = &vmo->object;
+
+    struct namespace_desc desc = {
+        .type = NAMESPACE_DESC_VMO,
+        .vmo = &vmo->object,
+    };
 
     struct task* current = percpu_get()->sched.current;
     zn_handle_t handle;
-    status = namespace_add_desc(current->namespace, &desc->desc, &handle);
+    status = namespace_add_desc(current->namespace, desc, &handle);
     if (status != ZN_OK)
         return status;
 
@@ -53,28 +54,41 @@ zn_status_t syscall_vmo_map(struct arch_context* ctx) {
     struct task* current = percpu_get()->sched.current;
 
     // Get VAS.
-    struct namespace_desc* vas_desc;
-    zn_status_t status = namespace_get(current->namespace, vmo_handle, &vas_desc);
-    if (!status)
-        return status;
-    if (vas_desc->type != NAMESPACE_DESC_VAS)
-        return ZN_ERR_BAD_HANDLE;
-    struct vas* vas = CONTAINER_OF(vas_desc, struct namespace_desc_vas, desc)->vas;
+    struct vas* vas;
+    if (vas_handle == ZN_HANDLE_THIS_VAS) {
+        vas = current->space;
+    } else {
+        struct namespace_desc vas_desc;
+        zn_status_t status = namespace_get(current->namespace, vmo_handle, &vas_desc);
+        if (status != ZN_OK)
+            return status;
+        if (vas_desc.type != NAMESPACE_DESC_VAS)
+            return ZN_ERR_BAD_HANDLE;
+        vas = vas_desc.vas;
+    }
 
     // Get VMO.
-    struct namespace_desc* vmo_desc;
-    status = namespace_get(current->namespace, vmo_handle, &vmo_desc);
-    if (!status)
+    struct namespace_desc vmo_desc;
+    zn_status_t status = namespace_get(current->namespace, vmo_handle, &vmo_desc);
+    if (status != ZN_OK)
         return status;
-    if (vmo_desc->type != NAMESPACE_DESC_VMO)
+    if (vmo_desc.type != NAMESPACE_DESC_VMO)
         return ZN_ERR_BAD_HANDLE;
-    struct vmo* vmo = CONTAINER_OF(vmo_desc, struct namespace_desc_vmo, desc)->vmo;
+    struct vmo* vmo = vmo_desc.vmo;
 
-    // Determine address.
+    // Determine mapping address.
     uintptr_t target_addr;
-    if (!usercopy_read(&target_addr, addr, sizeof(target_addr))) {
+    if (!usercopy_read(&target_addr, addr, sizeof(target_addr)))
         return ZN_ERR_BAD_BUFFER;
+
+    // TODO: Use actual allocator for user task.
+    if (target_addr == 0) {
+        static uintptr_t map_offset = 0xA000'0000;
+        target_addr = atomic_fetch_add(&map_offset, ALIGN_UP(bytes, arch_mem_page_size()));
     }
+
+    if (!usercopy_write(addr, &target_addr, sizeof(target_addr)))
+        return ZN_ERR_BAD_BUFFER;
 
     vas_map_vmo(vas, vmo, target_addr, bytes, flags, vmo_offset);
 
