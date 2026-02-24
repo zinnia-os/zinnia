@@ -25,6 +25,7 @@ c_compiler = meson.get_compiler('c')
 add_project_arguments(
     '-Wno-unused',
     '-Wno-unused-parameter',
+    '-fno-stack-protector',
     language: 'c',
 )
 
