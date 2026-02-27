@@ -36,6 +36,10 @@ add_project_link_arguments(
     language: 'c',
 )
 
+if target_machine.cpu_family() == 'x86_64'
+    add_project_arguments('-masm=intel', language: 'c')
+endif
+
 common_includes = include_directories('include')
 
 cfg = configuration_data()

@@ -30,6 +30,8 @@ typedef enum {
     ZN_ERR_BAD_PERMS = -9,
     // Buffer is not large enough or doesn't point to a valid memory region.
     ZN_ERR_BAD_BUFFER = -10,
+    // The resource already exists.
+    ZN_ERR_ALREADY_EXISTS = -11,
 } zn_status_t;
 
 const char* zn_status_to_string(zn_status_t err);

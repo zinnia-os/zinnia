@@ -7,6 +7,11 @@
 #define ELF_ARCH_DATA    ELFDATA2LSB
 #define ELF_ARCH_MACHINE EM_X86_64
 
+#define ELF_R_SYM   ELF64_R_SYM
+#define ELF_R_TYPE  ELF64_R_TYPE
+#define ELF_ST_BIND ELF64_ST_BIND
+#define ELF_ST_TYPE ELF64_ST_TYPE
+
 #define elf_ehdr elf64_ehdr
 #define elf_phdr elf64_phdr
 #define elf_dyn  elf64_dyn
@@ -14,6 +19,7 @@
 #define elf_off  elf64_off
 #define elf_nhdr elf64_nhdr
 #define elf_auxv elf64_auxv
+#define elf_sym  elf64_sym
 #endif
 
 constexpr char ELF_MAG[4] = {0x7F, 'E', 'L', 'F'};
@@ -149,7 +155,6 @@ enum : uint32_t {
     AT_EXECFN = 31,
     AT_SYSINFO_EHDR = 33,
     AT_INIT_HANDLE = 0x1000,
-    AT_POSIX_HANDLE = 0x1001,
 };
 
 struct elf64_ehdr {
@@ -244,4 +249,74 @@ struct elf64_auxv {
 struct elf32_auxv {
     uint32_t atype;
     uint32_t avalue;
+};
+
+struct elf_hash {
+    uint32_t n_buckets;
+    uint32_t n_chain;
+};
+
+struct elf32_sym {
+    elf32_off_t st_name;
+    elf32_addr_t st_value;
+    elf32_off_t st_size;
+    uint8_t st_info;
+    uint8_t st_other;
+    uint16_t st_shndx;
+};
+
+struct elf64_sym {
+    uint32_t st_name;
+    uint8_t st_info;
+    uint8_t st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+};
+
+static uint8_t ELF64_ST_BIND(uint8_t info) {
+    return info >> 4;
+}
+
+static inline uint8_t ELF64_ST_TYPE(uint8_t info) {
+    return info & 0x0F;
+}
+
+static inline uint8_t ELF64_ST_INFO(uint8_t bind, uint8_t type) {
+    return (bind << 4) | type;
+}
+
+typedef struct {
+    uint16_t si_boundto;
+    uint16_t si_flags;
+} elf64_syminfo;
+
+static inline uint8_t ELF32_ST_BIND(uint8_t info) {
+    return info >> 4;
+}
+
+static inline uint8_t ELF32_ST_TYPE(uint8_t info) {
+    return info & 0xF;
+}
+
+static inline uint8_t ELF32_ST_INFO(uint8_t bind, uint8_t type) {
+    return (bind << 4) | (type & 0xF);
+}
+
+enum {
+    STB_GLOBAL = 1,
+    STB_WEAK = 2,
+    STB_GNU_UNIQUE = 10,
+    STB_LOPROC = 13,
+    STB_HIPROC = 15
+};
+
+enum {
+    STT_NOTYPE = 0,
+    STT_OBJECT = 1,
+    STT_FUNC = 2,
+    STT_TLS = 6,
+    STT_GNU_IFUNC = 10,
+    STT_LOPROC = 13,
+    STT_HIPROC = 15
 };

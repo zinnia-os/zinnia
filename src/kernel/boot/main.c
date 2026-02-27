@@ -7,6 +7,7 @@
 #include <kernel/elf.h>
 #include <kernel/init.h>
 #include <kernel/irq.h>
+#include <kernel/namespace.h>
 #include <kernel/percpu.h>
 #include <kernel/print.h>
 #include <kernel/sched.h>
@@ -58,6 +59,7 @@ static void kernel_main_task(uintptr_t arg0, uintptr_t) {
     struct task* init_task;
     zn_status_t status = elf_load(&init_info, &init_task);
     ASSERT(status == ZN_OK, "Failed to load init process (%i)\n", status);
+
     sched_add_task(&percpu_get()->sched, init_task);
     sched_yield(&percpu_get()->sched);
 

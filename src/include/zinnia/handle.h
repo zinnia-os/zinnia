@@ -3,14 +3,14 @@
 
 #include <zinnia/rights.h>
 #include <zinnia/status.h>
-#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // A generic object handle.
-typedef size_t zn_handle_t;
+typedef int32_t zn_handle_t;
 
 #define ZN_HANDLE_INVALID     ((zn_handle_t)(0))
 #define ZN_HANDLE_THIS_NS     ((zn_handle_t)(-1))

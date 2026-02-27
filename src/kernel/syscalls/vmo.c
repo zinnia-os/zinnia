@@ -24,7 +24,7 @@ zn_status_t syscall_vmo_create(struct arch_context* ctx) {
 
     struct namespace_desc desc = {
         .type = NAMESPACE_DESC_VMO,
-        .vmo = &vmo->object,
+        .value.vmo = &vmo->object,
     };
 
     struct task* current = percpu_get()->sched.current;
@@ -64,7 +64,7 @@ zn_status_t syscall_vmo_map(struct arch_context* ctx) {
             return status;
         if (vas_desc.type != NAMESPACE_DESC_VAS)
             return ZN_ERR_BAD_HANDLE;
-        vas = vas_desc.vas;
+        vas = vas_desc.value.vas;
     }
 
     // Get VMO.
@@ -74,22 +74,24 @@ zn_status_t syscall_vmo_map(struct arch_context* ctx) {
         return status;
     if (vmo_desc.type != NAMESPACE_DESC_VMO)
         return ZN_ERR_BAD_HANDLE;
-    struct vmo* vmo = vmo_desc.vmo;
+    struct vmo* vmo = vmo_desc.value.vmo;
 
     // Determine mapping address.
-    uintptr_t target_addr;
-    if (!usercopy_read(&target_addr, addr, sizeof(target_addr)))
-        return ZN_ERR_BAD_BUFFER;
-
+    uintptr_t target_addr = 0;
+    if (addr != nullptr) {
+        if (!usercopy_read(&target_addr, addr, sizeof(target_addr)))
+            return ZN_ERR_BAD_BUFFER;
+    }
     // TODO: Use actual allocator for user task.
     if (target_addr == 0) {
         static uintptr_t map_offset = 0xA000'0000;
         target_addr = atomic_fetch_add(&map_offset, ALIGN_UP(bytes, arch_mem_page_size()));
     }
 
-    if (!usercopy_write(addr, &target_addr, sizeof(target_addr)))
-        return ZN_ERR_BAD_BUFFER;
-
+    if (addr != nullptr) {
+        if (!usercopy_write(addr, &target_addr, sizeof(target_addr)))
+            return ZN_ERR_BAD_BUFFER;
+    }
     vas_map_vmo(vas, vmo, target_addr, bytes, flags, vmo_offset);
 
     return ZN_OK;

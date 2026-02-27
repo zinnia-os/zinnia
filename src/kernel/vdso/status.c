@@ -25,6 +25,8 @@ VDSO_FUNC(const char*, zn_status_to_string, zn_status_t err) {
         return "Object has insufficient permissions for this operation (BAD_PERMS)";
     case ZN_ERR_BAD_BUFFER:
         return "Buffer is not large enough or doesn't point to a valid memory region (BAD_BUFFER)";
+    case ZN_ERR_ALREADY_EXISTS:
+        return "The resource already exists (ALREADY_EXISTS)";
     }
 
     return "Unknown error code";

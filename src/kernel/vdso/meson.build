@@ -23,7 +23,6 @@ vdso_lib = shared_library(
     link_args: [
         '-ffreestanding',
         '-nostdlib',
-        '-Wl,-nostdlib',
         '-T' + vdso_lds,
     ],
     include_directories: [

@@ -1,32 +1,22 @@
 #include <zinnia/channel.h>
 #include <zinnia/handle.h>
+#include <zinnia/mem.h>
 #include <zinnia/status.h>
 #include <zinnia/system.h>
-#include <stdarg.h>
-#include <stdio.h>
+#include <stdint.h>
+#include <sys/auxv.h>
 
-void zn_printf(const char* msg, ...) {
-    char buf[1024];
+void server_main(zn_handle_t handle) {
+    zn_log("Hello, init world!\n", 19);
+    zn_log("Hello, foo world!\n", 18);
+    zn_log("Hello, fo1 world!\n", 18);
+    zn_log("Hello, fo2 world!\n", 18);
+    zn_log("Hello, fo3 world!\n", 18);
+    zn_log("Hello, fo4 world!\n", 18);
+    zn_log("Hello, fo5 world!\n", 18);
+    zn_log("Hello, fo6 world!\n", 18);
 
-    va_list args;
-    va_start(args, msg);
-    int len = vsnprintf(buf, sizeof(buf), msg, args);
-    va_end(args);
-
-    zn_log(buf, len);
-}
-
-int main() {
-    zn_printf("Hello, init world!\n");
-
-    // Create the root channel so other processes can find each other.
-    zn_status_t e;
-    zn_handle_t end0, end1;
-    zn_printf("init: Creating root channel\n");
-    if ((e = zn_channel_create(0, &end0, &end1))) {
-        zn_printf("%s\n", zn_status_to_string(e));
-        return e;
-    }
-
-    return 0;
+    uintptr_t info_ptr = 0;
+    zn_status_t status =
+        zn_vmo_map(handle, ZN_HANDLE_THIS_VAS, 0, &info_ptr, sizeof(int), ZN_VM_MAP_READ | ZN_VM_MAP_WRITE);
 }
