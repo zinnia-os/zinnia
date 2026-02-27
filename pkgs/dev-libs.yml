@@ -3,7 +3,6 @@ sources:
   subdir: ports
   git: "https://github.com/marv7000/mlibc.git"
   branch: "zinnia"
-  commit: "9d9b536c99de970b1de80e5694f9cf69956ed2e4"
   rolling_version: true
   version: "0.0pl@ROLLING_ID@"
 
@@ -39,6 +38,8 @@ packages:
   pkgs_required:
   - mlibc-headers
   - zinnia-headers
+  - frigg
+  - libsmarter
   configure:
   - args:
     - "meson"
@@ -58,6 +59,60 @@ packages:
   - args: [ "ninja", "install" ]
     environ:
       DESTDIR: "@THIS_COLLECT_DIR@"
+
+- name: frigg
+  architecture: '@OPTION:arch@'
+  source:
+    rolling_version: true
+    version: '0.0pl@ROLLING_ID@'
+    subdir: 'ports'
+    git: 'https://github.com/managarm/frigg.git'
+    branch: 'master'
+  revision: 1
+  configure:
+  - args:
+    - 'meson'
+    - 'setup'
+    - '--prefix=/usr'
+    - '--libdir=lib'
+    # Install to /usr/share to avoid conflicts with standard C++ headers.
+    - '--includedir=share/frigg/include'
+    - '--buildtype=debugoptimized'
+    - '-Dbuild_tests=disabled'
+    - '@THIS_SOURCE_DIR@'
+  build:
+  - args: [ 'ninja' ]
+  - args: [ 'ninja', 'install' ]
+    environ:
+      DESTDIR: '@THIS_COLLECT_DIR@'
+    quiet: true
+
+- name: libsmarter
+  architecture: '@OPTION:arch@'
+  source:
+    rolling_version: true
+    version: '0.0pl@ROLLING_ID@'
+    subdir: 'ports'
+    git: 'https://github.com/managarm/libsmarter.git'
+    branch: 'master'
+  revision: 1
+  configure:
+  - args: [ 'mkdir', '-p', '@THIS_COLLECT_DIR@/usr/include' ]
+  - args:
+    - 'meson'
+    - 'setup'
+    - '--prefix=/usr'
+    # install to separate libdir and a separate includedir (instdead of /usr/include)
+    - '--includedir=share/libsmarter/include'
+    - '--libdir=lib/libsmarter'
+    - '@THIS_SOURCE_DIR@'
+  build:
+  - args: [ 'ninja', 'install' ]
+    environ:
+      DESTDIR: '@THIS_COLLECT_DIR@'
+  # symlink the pkgconfig file to the standard location
+  - args: [ 'mkdir', '-p', '@THIS_COLLECT_DIR@/usr/lib/pkgconfig' ]
+  - args: [ 'ln', '-srf', '@THIS_COLLECT_DIR@/usr/lib/libsmarter/pkgconfig/libsmarter.pc', '@THIS_COLLECT_DIR@/usr/lib/pkgconfig/libsmarter.pc' ]
 
 - name: zstd
   architecture: "@OPTION:arch@"
