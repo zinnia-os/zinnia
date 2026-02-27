@@ -1,8 +1,13 @@
-#pragma once
+#ifndef ZINNIA_SYSCALL_STUBS_H
+#define ZINNIA_SYSCALL_STUBS_H
 
 #include <zinnia/status.h>
-#include <kernel/syscall_numbers.h>
+#include <zinnia/syscall_numbers.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #ifdef __x86_64__
 typedef uint64_t zn_arg_t;
@@ -239,3 +244,9 @@ static inline zn_status_t zn_syscall8(
         (zn_arg_t)a7, \
         num \
     )
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

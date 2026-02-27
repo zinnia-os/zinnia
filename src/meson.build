@@ -8,7 +8,6 @@ project(
         'werror=true',
         'warning_level=2',
         'strip=true',
-        'b_lto=true',
     ],
 )
 
@@ -26,6 +25,8 @@ add_project_arguments(
     '-Wno-unused',
     '-Wno-unused-parameter',
     '-fno-stack-protector',
+    '-ffunction-sections',
+    '-fdata-sections',
     language: 'c',
 )
 
@@ -36,6 +37,10 @@ add_project_link_arguments(
     language: 'c',
 )
 
+if target_machine.cpu_family() == 'x86_64'
+    add_project_arguments('-masm=intel', language: 'c')
+endif
+
 common_includes = include_directories('include')
 
 cfg = configuration_data()
@@ -43,9 +48,6 @@ cfg.set_quoted('ZINNIA_VERSION', meson.project_version())
 cfg.set_quoted('ZINNIA_ARCH', target_machine.cpu_family())
 cfg.set_quoted('ZINNIA_COMPILER_ID', c_compiler.get_id() + ' ' + c_compiler.version())
 cfg.set_quoted('ZINNIA_LINKER_ID', c_compiler.get_linker_id())
-
-strip = find_program('strip')
-objcopy = find_program('objcopy')
 
 build_kernel = get_option('build_kernel')
 build_servers = get_option('build_servers')

@@ -8,7 +8,7 @@
 #include <x86_64/defs.h>
 #include <x86_64/gdt.h>
 
-[[__init, __naked]]
+[[__init, __naked, __used]]
 void _start() {
     asm volatile(
         "lea rsp, [rip + %0]\n"

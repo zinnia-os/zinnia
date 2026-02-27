@@ -1,5 +1,4 @@
 kernel_c_args += [
-    '-masm=intel',
     '-mgeneral-regs-only',
     '-mno-red-zone',
     '-mcmodel=kernel',

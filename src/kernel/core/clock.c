@@ -12,6 +12,7 @@ static struct spinlock lock = {};
 bool clock_available() {
     return active_clock != nullptr;
 }
+
 uint64_t clock_get_elapsed_ns() {
     struct clock* active = atomic_load(&active_clock);
     if (__unlikely(!active))

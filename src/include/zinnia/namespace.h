@@ -9,9 +9,13 @@ extern "C" {
 #endif
 
 // Creates a new namespace.
-zn_status_t zn_ns_create(zn_handle_t* out);
+static inline zn_status_t zn_ns_create(zn_handle_t* out) {
+    return ZN_ERR_UNSUPPORTED;
+}
 
-zn_status_t zn_ns_move(zn_handle_t handle, zn_handle_t target_namespace);
+static inline zn_status_t zn_ns_move(zn_handle_t handle, zn_handle_t target_namespace) {
+    return ZN_ERR_UNSUPPORTED;
+}
 
 #ifdef __cplusplus
 }

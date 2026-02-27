@@ -131,27 +131,23 @@ zn_status_t elf_load(struct exec_info* info, struct task** out) {
         vmo_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
     }
 
-    uintptr_t auxv_val = 0;
-
-    // TODO: Use a VMO that's shared between all tasks.
-    size_t vdso_len = __ld_vdso_end - __ld_vdso_start;
-    struct paged_vmo* vdso;
-    status = vmo_new_phys(&vdso);
-    if (status)
-        return status;
-
-    vmo_write(&vdso->object, 0, __ld_vdso_start, vdso_len, nullptr);
-
-    const uintptr_t vdso_addr = ((uintptr_t)1 << (mem_high_shift() - 2));
-    vas_map_vmo(info->space, &vdso->object, vdso_addr, vdso_len, ZN_VM_MAP_READ | ZN_VM_MAP_EXEC, 0);
+    // TODO: Init handle.
+    struct paged_vmo* new_vmo;
+    vmo_new_phys(&new_vmo);
+    vmo_write(&new_vmo->object, 0, info, sizeof(*info), nullptr);
+    struct namespace_desc desc = {.type = NAMESPACE_DESC_VMO, .value.vmo = &new_vmo->object};
+    zn_handle_t test_handle;
+    namespace_add_desc(info->ns, desc, &test_handle);
 
 #define WRITE_AUXV(auxv, value) \
-    stack_off -= sizeof(uintptr_t); \
-    auxv_val = value; \
-    vmo_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
-    stack_off -= sizeof(uintptr_t); \
-    auxv_val = auxv; \
-    vmo_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr)
+    do { \
+        stack_off -= sizeof(uintptr_t); \
+        uintptr_t auxv_val = value; \
+        vmo_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
+        stack_off -= sizeof(uintptr_t); \
+        auxv_val = auxv; \
+        vmo_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
+    } while (0)
 
     // Write auxiliary values.
     WRITE_AUXV(AT_NULL, 0);
@@ -159,7 +155,7 @@ zn_status_t elf_load(struct exec_info* info, struct task** out) {
     WRITE_AUXV(AT_PHNUM, ehdr.e_phnum);
     WRITE_AUXV(AT_PHENT, ehdr.e_phentsize);
     WRITE_AUXV(AT_ENTRY, ehdr.e_entry);
-    WRITE_AUXV(AT_SYSINFO_EHDR, vdso_addr);
+    WRITE_AUXV(AT_INIT_HANDLE, test_handle);
 
     // envp pointers.
     stack_off -= sizeof(uintptr_t);

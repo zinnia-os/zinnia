@@ -4,12 +4,23 @@
 		{
 			"type": "lldb",
 			"request": "launch",
-			"name": "Debug x86_64",
+			"name": "Debug x86_64 initd",
 			"targetCreateCommands": [
 				"settings set target.source-map /var/bootstrap-zinnia/src ${workspaceFolder}",
 				"target create ${workspaceFolder}/build-x86_64/pkg-builds/zinnia-servers/servers/initd/initd",
+
+			],
+			"processCreateCommands": [
+				"gdb-remote localhost:1234"
+			]
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug x86_64 kernel",
+			"targetCreateCommands": [
+				"settings set target.source-map /var/bootstrap-zinnia/src ${workspaceFolder}",
 				"target create ${workspaceFolder}/build-x86_64/pkg-builds/zinnia/kernel/zinnia",
-				"breakpoint set --name __mlibc_entry",
 
 			],
 			"processCreateCommands": [

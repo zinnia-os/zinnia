@@ -1,2 +1,10 @@
 Style:
-  AngledHeaders: ["zinnia/.*", " kernel/.*"]
+  AngledHeaders: [ "zinnia/.*", " kernel/.*" ]
+---
+CompileFlags:
+  CompilationDatabase: /var/bootstrap-zinnia/build/pkg-builds/zinnia-servers
+---
+If:
+  PathMatch: kernel/.*
+CompileFlags:
+  CompilationDatabase: /var/bootstrap-zinnia/build/pkg-builds/zinnia

@@ -1,4 +1,3 @@
-settings set target.source-map /var/bootstrap-zinnia/src/src src
-settings set target.source-map ../../../src/src src
+settings set target.source-map /var/bootstrap-zinnia/src .
 target create build-x86_64/pkg-builds/zinnia/kernel/zinnia
 gdb-remote 1234

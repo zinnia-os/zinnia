@@ -52,7 +52,7 @@ packages:
     - "-Ddefault_library=both"
     - "@THIS_SOURCE_DIR@"
     environ:
-      CXXFLAGS: "-Wno-unused-local-typedefs"
+      CXXFLAGS: "-fdata-sections -ffunction-sections -Wno-unused-local-typedefs"
   build:
   - args: [ "ninja" ]
   - args: [ "ninja", "install" ]

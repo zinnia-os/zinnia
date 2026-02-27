@@ -1,5 +1,5 @@
-# Freestanding libc functions that are needed e.g. in the kernel
+# Freestanding libc functions that are needed in the kernel
 
-klibc_sources = files(
+kernel_sources += files(
     'string.c',
 )

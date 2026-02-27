@@ -14,7 +14,6 @@ kernel_lds = meson.current_source_dir() / 'kernel.ld'
 kernel_link_args = [
     '-ffreestanding',
     '-nostdlib',
-    '-Wl,-nostdlib',
     '-static',
     '-T' + kernel_lds,
 ]
@@ -35,7 +34,6 @@ subdir('core')
 subdir('syscalls')
 
 subdir('klibc')
-subdir('vdso')
 
 uacpi_sources = uacpi.get_variable('sources')
 uacpi_includes = uacpi.get_variable('includes')
@@ -52,10 +50,8 @@ executable(
     link_depends: kernel_lds,
     sources: [
         kernel_sources,
-        klibc_sources,
         uacpi_sources,
     ],
-    objects: vdso,
     install: true,
     install_dir: '/boot',
 )

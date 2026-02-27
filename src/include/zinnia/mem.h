@@ -3,6 +3,7 @@
 
 #include <zinnia/handle.h>
 #include <zinnia/status.h>
+#include <zinnia/syscall_stubs.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,23 +21,31 @@ enum zn_vm_flags {
 };
 
 // Creates a new virtual memory object.
-zn_status_t zn_vmo_create(size_t length, zn_handle_t* out);
+static inline zn_status_t zn_vmo_create(size_t length, zn_handle_t* out) {
+    return zn_syscall2(length, out, ZN_SYSCALL_VMO_CREATE);
+}
 
 // Creates a new virtual memory object which points to a contiguous phyiscal memory region.
-zn_status_t zn_vmo_create_phys(uintptr_t phys_addr, size_t length, zn_handle_t* out);
+static inline zn_status_t zn_vmo_create_phys(uintptr_t phys_addr, size_t length, zn_handle_t* out) {
+    return zn_syscall3(phys_addr, length, out, ZN_SYSCALL_VMO_CREATE_PHYS);
+}
 
 // Maps `bytes` of `vmo` at `vmo_offset` to `addr` in `vas`.
-zn_status_t zn_vmo_map(
+static inline zn_status_t zn_vmo_map(
     zn_handle_t vmo,
     zn_handle_t vas,
     uintptr_t vmo_offset,
     uintptr_t* addr,
     size_t bytes,
     enum zn_vm_flags flags
-);
+) {
+    return zn_syscall6(vmo, vas, vmo_offset, addr, bytes, flags, ZN_SYSCALL_VMO_MAP);
+}
 
 // Creates a new virtual address space.
-zn_status_t zn_vas_create(zn_handle_t* out);
+static inline zn_status_t zn_vas_create(zn_handle_t* out) {
+    return zn_syscall1(out, ZN_SYSCALL_VAS_CREATE);
+}
 
 #ifdef __cplusplus
 }

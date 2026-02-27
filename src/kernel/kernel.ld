@@ -33,22 +33,11 @@ SECTIONS
         *(.rodata .rodata.*)
         *(.got .got.*)
 
-    } :rodata
-
-    .vdso ALIGN(CONSTANT(MAXPAGESIZE)) : {
-        __ld_vdso_start = .;
-        KEEP(*(.vdso))
-        __ld_vdso_end = .;
-
         __ld_rodata_end = .;
     } :rodata
 
     .data ALIGN(CONSTANT(MAXPAGESIZE)) : {
         __ld_data_start = .;
-
-        __ld_init_start = .;
-        *(.initgraph.nodes)
-        __ld_init_end = .;
 
         __ld_console_start = .;
         KEEP(*(.console))

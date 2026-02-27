@@ -1,8 +1,8 @@
 #include <zinnia/status.h>
+#include <zinnia/syscall_numbers.h>
 #include <common/compiler.h>
 #include <common/utils.h>
 #include <kernel/sched.h>
-#include <kernel/syscall_numbers.h>
 #include <kernel/syscalls.h>
 #include <kernel/types.h>
 
