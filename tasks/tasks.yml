@@ -1,5 +1,4 @@
 imports:
-- file: empty-image.yml
 - file: make-initramfs.yml
 - file: make-image.yml
 - file: qemu.yml
