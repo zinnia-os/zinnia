@@ -3,8 +3,10 @@ tasks:
   tasks_required:
   - task: make-initramfs
     order_only: true
+  - task: empty-image
+    order_only: true
   args:
-  - '@SOURCE_ROOT@/tasks/make-image.py'
+  - '@SOURCE_ROOT@/tasks/make-image.sh'
   - '@SYSROOT_DIR@'
   - '@BUILD_ROOT@/zinnia.img'
   workdir: '@BUILD_ROOT@'
