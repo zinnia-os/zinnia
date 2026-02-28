@@ -1,0 +1,9 @@
+tasks:
+- name: empty-image
+  args:
+  - '@SOURCE_ROOT@/tasks/empty-image.sh'
+  - '@BUILD_ROOT@/zinnia.img'
+  - '4G'
+  - '512MiB'
+  workdir: '@BUILD_ROOT@'
+  containerless: true
