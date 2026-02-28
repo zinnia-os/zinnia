@@ -68,9 +68,6 @@ xbstrap init ..
 # Note that this will literally build *every* package and might take a while
 xbstrap build --all
 
-# Create an empty image
-xbstrap run empty-image
-
 # Create an initramfs
 xbstrap run make-initramfs
 
