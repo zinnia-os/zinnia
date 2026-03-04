@@ -11,7 +11,23 @@
 
 #define BIT_TEST(value, bit) (((value) & (1 << bit)) == (1 << bit))
 
-#define CONTAINER_OF(value, p, field) ((p*)((char*)((value)) - offsetof(p, field)))
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_types_compatible_p)
+// Get pointer to parent object given pointer to a struct or union member.
+#define CONTAINER_OF(ptr, type, member) \
+    ({ \
+        _Static_assert( \
+            __builtin_types_compatible_p(__typeof__(*(ptr)), __typeof__(((type*)0)->member)), \
+            "Incompatible types for CONTAINER_OF" \
+        ); \
+        (type*)((size_t)ptr - offsetof(type, member)); \
+    })
+#endif
+#endif
+#ifndef CONTAINER_OF
+// Get pointer to parent object given pointer to a struct or union member.
+#define CONTAINER_OF(ptr, type, member) (type*)((size_t)ptr - offsetof(type, member))
+#endif
 
 #define CONCAT(A, B)  _CONCAT(A, B)
 #define _CONCAT(A, B) A##B

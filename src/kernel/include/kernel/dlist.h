@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <common/utils.h>
 #include <stddef.h>
 
 // A node of a doubly linked list structure. It contains no data, use
@@ -33,28 +34,10 @@ struct dlist {
 // Initializer value for a list node. Convenience macro for zero-initialization.
 #define DLIST_NODE_EMPTY ((struct dlist_node){.next = nullptr, .previous = nullptr})
 
-#if defined(__has_builtin)
-#if __has_builtin(__builtin_types_compatible_p)
-// Get pointer to parent object given pointer to a struct or union member.
-#define container_of(ptr, type, member) \
-    ({ \
-        _Static_assert( \
-            __builtin_types_compatible_p(*(ptr), ((type*)0)->member), \
-            "Incompatible types for container_of" \
-        ); \
-        (type*)((size_t)ptr - offsetof(type, member)); \
-    })
-#endif
-#endif
-#ifndef container_of
-// Get pointer to parent object given pointer to a struct or union member.
-#define container_of(ptr, type, member) (type*)((size_t)ptr - offsetof(type, member))
-#endif
-
 // Generate a foreach loop for a dlist.
 #define dlist_foreach(type, varname, nodename, list) \
-    for (type* varname = container_of((list)->head, type, nodename); &varname->nodename; \
-         varname = container_of(varname->nodename.next, type, nodename))
+    for (type* varname = CONTAINER_OF((list)->head, type, nodename); &varname->nodename; \
+         varname = CONTAINER_OF(varname->nodename.next, type, nodename))
 
 // Generate a foreach loop for a dlist where the node name is `node`.
 #define dlist_foreach_node(type, varname, list) dlist_foreach(type, varname, node, list)
