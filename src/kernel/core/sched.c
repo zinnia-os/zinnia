@@ -68,7 +68,7 @@ static void do_reschedule(struct sched_percpu* sched) {
 
     atomic_store_explicit(&sched->current, to, memory_order_relaxed);
 
-    pt_set(&to->space->pt);
+    pmap_set(&to->space->pmap);
 
     struct percpu* cpu = percpu_get();
     from->kernel_stack = cpu->kernel_stack;
@@ -92,7 +92,7 @@ void sched_yield(struct sched_percpu* sched) {
 
 zn_status_t task_create(
     const char* name,
-    struct vas* space,
+    struct vmspace* space,
     struct namespace* ns,
     task_fn_t entry,
     uintptr_t arg0,

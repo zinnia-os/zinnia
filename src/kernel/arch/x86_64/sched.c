@@ -135,7 +135,7 @@ zn_status_t arch_task_init(
                 return s;
             }
 
-            pt_map(&kernel_vas.pt, (uintptr_t)fpu_base, page, PTE_WRITE | PTE_READ, CACHE_WRITE_BACK);
+            pmap_map(&kernel_vas.pmap, (uintptr_t)fpu_base, page, PTE_WRITE | PTE_READ, CACHE_WRITE_BACK);
         }
         context->fpu_region = fpu_base;
 

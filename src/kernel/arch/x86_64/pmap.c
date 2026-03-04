@@ -1,4 +1,4 @@
-#include <kernel/mmu.h>
+#include <kernel/pmap.h>
 #include <kernel/types.h>
 
 enum : pte_t {
@@ -51,6 +51,6 @@ phys_t pte_address(pte_t* pte) {
     return (phys_t)(*pte & ARCH_PTE_ADDR_MASK);
 }
 
-void pt_set(struct page_table* pt) {
+void pmap_set(struct pmap* pt) {
     asm volatile("mov cr3, %0" ::"r"(pt->root) : "memory");
 }

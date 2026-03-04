@@ -3,11 +3,11 @@
 #include <zinnia/status.h>
 #include <kernel/namespace.h>
 #include <kernel/sched.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <kernel/vmo.h>
 
 struct exec_info {
-    struct vas* space;
+    struct vmspace* space;
     struct vmo* file_obj;
     struct namespace* ns;
     const char** argv;

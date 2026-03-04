@@ -1,11 +1,11 @@
 #include <zinnia/status.h>
 #include <kernel/alloc.h>
-#include <kernel/mmu.h>
+#include <kernel/pmap.h>
 #include <kernel/spin.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <string.h>
 
-zn_status_t pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
+zn_status_t pmap_new_kernel(struct pmap* pt, enum alloc_flags flags) {
     flags &= ~ALLOC_NOZERO;
 
     phys_t addr;
@@ -13,7 +13,7 @@ zn_status_t pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
     if (status)
         return status;
 
-    struct page_table result = {
+    struct pmap result = {
         .root = addr,
         .lock = (struct spinlock){0},
         .is_user = false,
@@ -23,17 +23,17 @@ zn_status_t pt_new_kernel(struct page_table* pt, enum alloc_flags flags) {
     return ZN_OK;
 }
 
-zn_status_t pt_new_user(struct page_table* pt, enum alloc_flags flags) {
+zn_status_t pmap_new_user(struct pmap* pt, enum alloc_flags flags) {
     phys_t user_l1;
     zn_status_t status = mem_phys_alloc(1, 0, &user_l1);
     if (status)
         return status;
 
     void* user_l1_ptr = HHDM_PTR(user_l1);
-    void* kernel_l1_ptr = HHDM_PTR(kernel_vas.pt.root);
+    void* kernel_l1_ptr = HHDM_PTR(kernel_vas.pmap.root);
     memcpy(user_l1_ptr, kernel_l1_ptr, arch_mem_page_size());
 
-    struct page_table result = {
+    struct pmap result = {
         .root = user_l1,
         .lock = (struct spinlock){0},
         .is_user = true,
@@ -47,7 +47,7 @@ zn_status_t pt_new_user(struct page_table* pt, enum alloc_flags flags) {
 // If `check_only` is set, only checks if the PTE exists,
 // and doesn't allocate new levels if they don't already exist.
 // If it can't allocate a page if it has to, returns `nullptr`.
-static pte_t* get_pte(struct page_table* pt, uintptr_t vaddr, bool is_user, bool check_only) {
+static pte_t* get_pte(struct pmap* pt, uintptr_t vaddr, bool is_user, bool check_only) {
     pte_t* current_head = HHDM_PTR(pt->root);
     size_t index = 0;
 
@@ -86,7 +86,7 @@ static pte_t* get_pte(struct page_table* pt, uintptr_t vaddr, bool is_user, bool
     return &current_head[index];
 }
 
-zn_status_t pt_map(struct page_table* pt, uintptr_t vaddr, phys_t paddr, enum pte_flags flags, enum cache_mode cache) {
+zn_status_t pmap_map(struct pmap* pt, uintptr_t vaddr, phys_t paddr, enum pte_flags flags, enum cache_mode cache) {
     spin_lock(&pt->lock);
 
     zn_status_t status = ZN_OK;

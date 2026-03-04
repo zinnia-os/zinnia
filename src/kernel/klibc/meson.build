@@ -2,4 +2,6 @@
 
 kernel_sources += files(
     'string.c',
+    'dlist.c',
+    'refcount.c',
 )

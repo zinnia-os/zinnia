@@ -5,11 +5,11 @@
 #include <kernel/alloc.h>
 #include <kernel/assert.h>
 #include <kernel/elf.h>
-#include <kernel/mmu.h>
+#include <kernel/pmap.h>
 #include <kernel/percpu.h>
 #include <kernel/print.h>
 #include <kernel/sched.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <kernel/vdso.h>
 #include <kernel/vmo.h>
 #include <string.h>
@@ -67,7 +67,7 @@ zn_status_t elf_load(struct exec_info* info, struct task** out) {
                 return status;
 
             // We map more than we copied so the rest is filled with zeroed pages.
-            status = vas_map_vmo(info->space, &phdr_obj->object, phdr.p_vaddr, phdr.p_memsz, prot, phdr.p_offset);
+            status = vmspace_map_vmo(info->space, &phdr_obj->object, phdr.p_vaddr, phdr.p_memsz, prot, phdr.p_offset);
             if (status)
                 return status;
         }
@@ -182,7 +182,7 @@ zn_status_t elf_load(struct exec_info* info, struct task** out) {
     uintptr_t argc = num_argv;
     vmo_write(&stack->object, stack_off, &argc, sizeof(argc), nullptr);
 
-    status = vas_map_vmo(info->space, &stack->object, stack_start, stack_size, ZN_VM_MAP_READ | ZN_VM_MAP_WRITE, 0);
+    status = vmspace_map_vmo(info->space, &stack->object, stack_start, stack_size, ZN_VM_MAP_READ | ZN_VM_MAP_WRITE, 0);
     if (status)
         return status;
 

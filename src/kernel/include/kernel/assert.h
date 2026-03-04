@@ -17,3 +17,9 @@
             ); \
         } \
     })
+
+#ifndef NDEBUG
+#define DEBUG_ASSERT(...) ASSERT(__VA_ARGS__)
+#else
+#define DEBUG_ASSERT(...) ((void)0)
+#endif

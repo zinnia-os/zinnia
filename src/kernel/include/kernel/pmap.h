@@ -24,18 +24,18 @@ enum cache_mode {
     CACHE_MMIO,
 };
 
-struct page_table {
+struct pmap {
     phys_t root;
     struct spinlock lock;
     bool is_user;
 };
 
-zn_status_t pt_new_kernel(struct page_table* pt, enum alloc_flags flags);
-zn_status_t pt_new_user(struct page_table* pt, enum alloc_flags flags);
-zn_status_t pt_map(struct page_table* pt, uintptr_t vaddr, phys_t paddr, enum pte_flags flags, enum cache_mode cache);
-zn_status_t pt_protect(struct page_table* pt, uintptr_t vaddr, enum pte_flags flags);
-zn_status_t pt_unmap(struct page_table* pt, uintptr_t vaddr);
-void pt_set(struct page_table* pt);
+zn_status_t pmap_new_kernel(struct pmap* pt, enum alloc_flags flags);
+zn_status_t pmap_new_user(struct pmap* pt, enum alloc_flags flags);
+zn_status_t pmap_map(struct pmap* pt, uintptr_t vaddr, phys_t paddr, enum pte_flags flags, enum cache_mode cache);
+zn_status_t pmap_protect(struct pmap* pt, uintptr_t vaddr, enum pte_flags flags);
+zn_status_t pmap_unmap(struct pmap* pt, uintptr_t vaddr);
+void pmap_set(struct pmap* pt);
 
 void pte_clear(pte_t* pte);
 pte_t pte_build(phys_t addr, enum pte_flags flags, enum cache_mode cache);

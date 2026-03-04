@@ -34,4 +34,6 @@ typedef enum memory_order {
 #define atomic_fetch_and_explicit(ptr, op, ord) __atomic_fetch_and(ptr, op, ord)
 #define atomic_fetch_and(ptr, op)               atomic_fetch_and_explicit(ptr, op, __ATOMIC_SEQ_CST)
 
+#define atomic_thread_fence(ord) __atomic_thread_fence(ord)
+
 #endif

@@ -27,7 +27,7 @@ enum task_state {
 struct task {
     size_t id;
     char name[TASK_NAME_MAX];
-    struct vas* space;
+    struct vmspace* space;
     struct namespace* namespace;
     enum task_state state;
     struct arch_task_context context;
@@ -51,7 +51,7 @@ typedef void (*task_fn_t)(uintptr_t arg0, uintptr_t arg1);
 
 zn_status_t task_create(
     const char* name,
-    struct vas* space,
+    struct vmspace* space,
     struct namespace* ns,
     task_fn_t entry,
     uintptr_t arg0,

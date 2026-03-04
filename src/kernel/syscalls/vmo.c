@@ -8,7 +8,7 @@
 #include <kernel/sched.h>
 #include <kernel/syscalls.h>
 #include <kernel/usercopy.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <kernel/vmo.h>
 #include <stdatomic.h>
 
@@ -54,7 +54,7 @@ zn_status_t syscall_vmo_map(struct arch_context* ctx) {
     struct task* current = percpu_get()->sched.current;
 
     // Get VAS.
-    struct vas* vas;
+    struct vmspace* vas;
     if (vas_handle == ZN_HANDLE_THIS_VAS) {
         vas = current->space;
     } else {
@@ -92,7 +92,7 @@ zn_status_t syscall_vmo_map(struct arch_context* ctx) {
         if (!usercopy_write(addr, &target_addr, sizeof(target_addr)))
             return ZN_ERR_BAD_BUFFER;
     }
-    vas_map_vmo(vas, vmo, target_addr, bytes, flags, vmo_offset);
+    vmspace_map_vmo(vas, vmo, target_addr, bytes, flags, vmo_offset);
 
     return ZN_OK;
 }

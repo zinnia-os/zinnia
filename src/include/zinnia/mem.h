@@ -13,11 +13,21 @@ extern "C" {
 
 // Virtual memory flags.
 enum zn_vm_flags {
+    // Mapping is readable.
     ZN_VM_MAP_READ = 1 << 0,
+    // Mapping is writable.
     ZN_VM_MAP_WRITE = 1 << 1,
+    // Mapping is executable.
     ZN_VM_MAP_EXEC = 1 << 2,
+    // Shared memory (not cloned on calls to fork).
     ZN_VM_MAP_SHARED = 1 << 3,
-    ZN_VM_MAP_FIXED = 1 << 4,
+
+    // Map at a fixed address, replacing whatever is in the way.
+    ZN_VM_MAP_FIXED = 1 << 8,
+    // Map at a fixed address, failing if anything is in the way.
+    ZB_VM_MAP_FIXED_NOREPLACE = 1 << 9,
+    // Map the entire range immediately.
+    ZN_VM_MAP_POPULATE = 1 << 10,
 };
 
 // Creates a new virtual memory object.

@@ -4,7 +4,7 @@
 #include <kernel/init.h>
 #include <kernel/panic.h>
 #include <kernel/print.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <kernel/virt.h>
 #include <string.h>
 
@@ -16,7 +16,7 @@ extern uint8_t __ld_data_start[];
 extern uint8_t __ld_data_end[];
 extern uint8_t __ld_kernel_start[];
 
-struct vas kernel_vas = {0};
+struct vmspace kernel_vas = {0};
 
 [[__init]]
 void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_t kernel_phys, uintptr_t tmp_hhdm) {
@@ -66,13 +66,13 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
     // since we're likely going to map it at a different base address.
     mem_hhdm_base = tmp_hhdm;
 
-    ASSERT(pt_new_kernel(&kernel_vas.pt, 0) == 0, "Unable to allocate the kernel page table\n");
+    ASSERT(pmap_new_kernel(&kernel_vas.pmap, 0) == 0, "Unable to allocate the kernel page table\n");
 
     // text
     kprintf("Mapping text segment at %p\n", __ld_text_start);
     for (uint8_t* p = __ld_text_start; p <= __ld_text_end; p += pgsz) {
-        zn_status_t status = pt_map(
-            &kernel_vas.pt,
+        zn_status_t status = pmap_map(
+            &kernel_vas.pmap,
             (uintptr_t)p,
             (phys_t)(p - __ld_kernel_start + kernel_phys),
             PTE_READ | PTE_EXEC,
@@ -85,15 +85,15 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
     kprintf("Mapping rodata segment at %p\n", __ld_rodata_start);
     for (uint8_t* p = __ld_rodata_start; p < __ld_rodata_end; p += pgsz) {
         zn_status_t status =
-            pt_map(&kernel_vas.pt, (uintptr_t)p, (phys_t)(p - __ld_kernel_start + kernel_phys), PTE_READ, CACHE_NONE);
+            pmap_map(&kernel_vas.pmap, (uintptr_t)p, (phys_t)(p - __ld_kernel_start + kernel_phys), PTE_READ, CACHE_NONE);
         ASSERT(!status, "Failed to map %p with error %i\n", p, status);
     }
 
     // data
     kprintf("Mapping data segment at %p\n", __ld_data_start);
     for (uint8_t* p = __ld_data_start; p < __ld_data_end; p += pgsz) {
-        zn_status_t status = pt_map(
-            &kernel_vas.pt,
+        zn_status_t status = pmap_map(
+            &kernel_vas.pmap,
             (uintptr_t)p,
             (phys_t)(p - __ld_kernel_start + kernel_phys),
             PTE_READ | PTE_WRITE,
@@ -116,14 +116,14 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
         for (size_t p = 0; p <= map[i].length; p += pgsz) {
             uintptr_t vaddr = (uintptr_t)(map[i].address + p + tmp_hhdm);
             phys_t paddr = (phys_t)(map[i].address + p);
-            zn_status_t status = pt_map(&kernel_vas.pt, vaddr, paddr, PTE_READ | PTE_WRITE, CACHE_NONE);
+            zn_status_t status = pmap_map(&kernel_vas.pmap, vaddr, paddr, PTE_READ | PTE_WRITE, CACHE_NONE);
             ASSERT(!status, "Failed to map HHDM page %p to %p with error %i\n", (void*)vaddr, (void*)paddr, status);
         }
     }
     mem_hhdm_base = tmp_hhdm;
 
     // Switch to our own page table.
-    pt_set(&kernel_vas.pt);
+    pmap_set(&kernel_vas.pmap);
 
     // We record metadata for every single page of available memory in a large array.
     // This array is contiguous in virtual memory, but is sparsely populated.
@@ -146,7 +146,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
         for (size_t page = 0; page < length; page += pgsz) {
             phys_t paddr;
             ASSERT(!mem_phys_alloc(1, 0, &paddr), "Failed to allocate memory for PFNDB!\n");
-            pt_map(&kernel_vas.pt, vaddr + page, paddr, PTE_READ | PTE_WRITE, CACHE_NONE);
+            pmap_map(&kernel_vas.pmap, vaddr + page, paddr, PTE_READ | PTE_WRITE, CACHE_NONE);
         }
     }
     vm_pfndb = (struct page*)arch_vm_pfndb_addr();

@@ -11,7 +11,7 @@
 #include <kernel/percpu.h>
 #include <kernel/print.h>
 #include <kernel/sched.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <kernel/vmo.h>
 #include <config.h>
 #include <stdint.h>
@@ -35,8 +35,8 @@ static void kernel_main_task(uintptr_t arg0, uintptr_t) {
     const char* init_argv[] = {"init", nullptr};
     const char* init_envp[] = {"MLIBC_RTLD_DEBUG_VERBOSE=1", nullptr};
 
-    struct vas* init_space;
-    ASSERT(vas_new(&init_space) == ZN_OK, "");
+    struct vmspace* init_space;
+    ASSERT(vmspace_new(&init_space) == ZN_OK, "");
 
     struct boot_file* file_data = &info->files[0];
     struct paged_vmo* init_file;

@@ -5,7 +5,7 @@
 #include <kernel/hashmap.h>
 #include <kernel/mutex.h>
 #include <kernel/spin.h>
-#include <kernel/vas.h>
+#include <kernel/vmspace.h>
 #include <kernel/vmo.h>
 
 enum namespace_desc_type {
@@ -20,7 +20,7 @@ struct namespace_desc {
     union {
         struct namespace* namespace;
         struct channel* channel;
-        struct vas* vas;
+        struct vmspace* vas;
         struct vmo* vmo;
     } value;
 };
