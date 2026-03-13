@@ -1,0 +1,20 @@
+# IDE Files
+.vscode/
+.idea/
+*.code-workspace
+.cache/
+
+# Allow VS Code debug config
+!.vscode/launch.json
+
+# Build files
+build*/
+compile_commands.json
+
+# xbstrap files
+.xbstrap/
+*.xbstrap
+ports/
+
+# Meson files
+.wraplock

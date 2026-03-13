@@ -1,0 +1,62 @@
+---
+AlignAfterOpenBracket: BlockIndent
+BinPackArguments: false
+BinPackParameters: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowAllArgumentsOnNextLine: false
+BreakAfterReturnType: Automatic
+PenaltyReturnTypeOnItsOwnLine: 1000
+AlignArrayOfStructures: None
+IndentWidth: 4
+InsertNewlineAtEOF: true
+IntegerLiteralSeparator:
+  HexMinDigits: 8
+IndentCaseBlocks: false
+IndentCaseLabels: false
+IndentPPDirectives: None
+IndentGotoLabels: false
+TabWidth: 4
+Standard: Latest
+Language: Cpp
+LineEnding: LF
+AlignOperands: DontAlign
+BitFieldColonSpacing: None
+ColumnLimit: 120
+MaxEmptyLinesToKeep: 1
+PointerAlignment: Left
+QualifierAlignment: Leave
+SpaceAfterLogicalNot: false
+SpaceAfterCStyleCast: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortBlocksOnASingleLine: Empty
+AlwaysBreakBeforeMultilineStrings: true
+BreakAfterAttributes: Always
+BreakConstructorInitializers: BeforeComma
+BreakBeforeBraces: Attach
+AllowShortLoopsOnASingleLine: false
+SpacesInSquareBrackets: false
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+  AlignCompound: true
+  AlignFunctionPointers: false
+AlignEscapedNewlines: DontAlign
+BreakBeforeInlineASMColon: OnlyMultiline
+AccessModifierOffset: -4
+SpacesInParens: Never
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBlock: false
+SpacesBeforeTrailingComments: 1
+IncludeBlocks: Merge
+IncludeCategories:
+- Regex: "^<kernel/.*>"
+  Priority: 1
+- Regex: "^<uapi/.*>"
+  Priority: 2
+- Regex: '^<.*\.h>'
+  Priority: 3
+- Regex: '^".*\.h"'
+  Priority: 4
+SortIncludes: CaseInsensitive
