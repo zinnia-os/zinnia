@@ -27,6 +27,8 @@ pte_t pte_build(phys_t addr, enum pte_flags flags, enum cache_mode cache) {
 
     if (flags & PTE_USER)
         result |= ARCH_FLAG_USER_MODE;
+    else
+        result |= ARCH_FLAG_GLOBAL;
 
     if (flags & PTE_DIR)
         result |= ARCH_FLAG_READ_WRITE;

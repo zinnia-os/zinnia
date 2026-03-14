@@ -4,7 +4,7 @@
 #include <kernel/spin.h>
 #include <kernel/utils.h>
 #include <uapi/errno.h>
-#include <bits/mmu.h>
+#include <bits/pmap.h>
 
 ASSERT_TYPE(pte_t);
 
