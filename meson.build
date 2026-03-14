@@ -47,6 +47,8 @@ uacpi = subproject('uacpi')
 uacpi_sources = uacpi.get_variable('sources')
 uacpi_includes = uacpi.get_variable('includes')
 
+install_dir = get_option('libdir') / 'zinnia'
+
 subdir('kernel')
 subdir('drivers')
 
@@ -65,5 +67,5 @@ executable(
         uacpi_sources,
     ],
     install: true,
-    install_dir: '/boot',
+    install_dir: install_dir,
 )
