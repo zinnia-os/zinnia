@@ -49,7 +49,7 @@ void sched_init(struct sched_percpu* sched) {
 
     TAILQ_INIT(&sched->run_queue);
 
-    kprintf("Scheduler initialized\n");
+    kprintf("sched: Scheduler initialized\n");
 }
 
 void sched_add_task(struct sched_percpu* sched, struct task* task) {

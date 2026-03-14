@@ -24,7 +24,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
 
     const size_t pgsz = arch_mem_page_size();
 
-    kprintf("Memory map:\n");
+    kprintf("mem: Memory map:\n");
     for (size_t i = 0; i < map_len; i++) {
         if (map[i].length == 0)
             continue;
@@ -45,7 +45,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
             break;
         }
 
-        kprintf("[%p - %p] %s\n", (void*)map[i].address, (void*)(map[i].address + map[i].length - 1), label);
+        kprintf("mem: [%p - %p] %s\n", (void*)map[i].address, (void*)(map[i].address + map[i].length - 1), label);
     }
 
     // Set up the bootstrap allocator.
@@ -56,7 +56,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
     }
     mem_phys_bootstrap(largest);
     kprintf(
-        "Using region [%p - %p] for bootstrap allocator\n",
+        "mem: Using region [%p - %p] for bootstrap allocator\n",
         (void*)largest->address,
         (void*)(largest->address + largest->length - 1)
     );
@@ -69,7 +69,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
     ASSERT(pmap_new_kernel(&kernel_space.pmap, 0) == 0, "Unable to allocate the kernel page table\n");
 
     // text
-    kprintf("Mapping text segment at %p\n", __ld_text_start);
+    kprintf("mem: Mapping text segment at %p\n", __ld_text_start);
     for (uint8_t* p = __ld_text_start; p <= __ld_text_end; p += pgsz) {
         errno_t status = pmap_map(
             &kernel_space.pmap,
@@ -82,7 +82,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
     }
 
     // rodata
-    kprintf("Mapping rodata segment at %p\n", __ld_rodata_start);
+    kprintf("mem: Mapping rodata segment at %p\n", __ld_rodata_start);
     for (uint8_t* p = __ld_rodata_start; p < __ld_rodata_end; p += pgsz) {
         errno_t status = pmap_map(
             &kernel_space.pmap,
@@ -95,7 +95,7 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
     }
 
     // data
-    kprintf("Mapping data segment at %p\n", __ld_data_start);
+    kprintf("mem: Mapping data segment at %p\n", __ld_data_start);
     for (uint8_t* p = __ld_data_start; p < __ld_data_end; p += pgsz) {
         errno_t status = pmap_map(
             &kernel_space.pmap,
@@ -162,5 +162,5 @@ void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_
 
     slab_init();
 
-    kprintf("Memory initialization complete\n");
+    kprintf("mem: Memory initialization complete\n");
 }

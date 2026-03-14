@@ -150,5 +150,5 @@ void mem_phys_init(struct phys_mem* map, size_t length) {
     }
 
     const size_t free_bytes = (pmm_total_free * arch_mem_page_size());
-    kprintf("Total available memory: %zu MiB\n", free_bytes / 1024 / 1024);
+    kprintf("mem: Total available memory: %zu MiB\n", free_bytes / 1024 / 1024);
 }

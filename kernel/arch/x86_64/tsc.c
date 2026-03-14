@@ -11,7 +11,7 @@ void tsc_init() {
         return;
 
     if (!(asm_cpuid(1, 0).edx & CPUID_1D_TSC) || !(asm_cpuid(0x8000'0007, 0).edx & (1 << 8))) {
-        kprintf("No invariant TSC detected!\n");
+        kprintf("tsc: No invariant TSC detected!\n");
         return;
     }
 
@@ -34,18 +34,18 @@ void tsc_init() {
         // On a normal system, this should usually never be called and is a last resort
         // since at this point we have at least the HPET timer.
         if (tsc_leaf.ecx != 0 && tsc_leaf.ebx != 0 && tsc_leaf.eax != 0) {
-            kprintf("Calibrating TSC using CPUID 0x15");
+            kprintf("tsc: Calibrating TSC using CPUID 0x15");
             freq = tsc_leaf.ecx * tsc_leaf.ebx / tsc_leaf.eax;
         } else {
-            kprintf("Unable to calibrate TSC using CPUID frequency information");
+            kprintf("tsc: Unable to calibrate TSC using CPUID frequency information");
             return;
         }
     } else {
-        kprintf("Unable to calibrate the TSC without a clock or static frequency info!\n");
+        kprintf("tsc: Unable to calibrate the TSC without a clock or static frequency info!\n");
         return;
     }
 
-    kprintf("Timer frequency is %lu MHz\n", freq / 1'000'000);
+    kprintf("tsc: Timer frequency is %lu MHz\n", freq / 1'000'000);
 }
 
 static void tsc_option(bool opt) {

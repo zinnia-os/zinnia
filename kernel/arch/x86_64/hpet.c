@@ -58,7 +58,7 @@ void hpet_init() {
     struct acpi_hpet* hpet = table.ptr;
     hpet_clock.regs = mmio_new(hpet->address.address, 0x1000);
     uacpi_table_unref(&table);
-    kprintf("HPET regs at %p\n", hpet_clock.regs);
+    kprintf("hpet: HPET regs at %p\n", hpet_clock.regs);
 
     hpet_clock.regs[HPET_CFG] = hpet_clock.regs[HPET_CFG] | 1;
 

@@ -31,7 +31,7 @@ bool clock_switch(struct clock* clock) {
         }
     }
 
-    kprintf("Switching to clock source \"%s\"\n", clock->name);
+    kprintf("clock: Switching to clock source \"%s\"\n", clock->name);
 
     uint64_t elapsed = clock_get_elapsed_ns();
     counter_base += elapsed;
@@ -43,7 +43,7 @@ bool clock_switch(struct clock* clock) {
 
 void clock_spin_ns(uint64_t ns) {
     if (active_clock == nullptr) {
-        kprintf("Unable to sleep for %lu ns, no clock available!\n", ns);
+        kprintf("clock: Unable to sleep for %lu ns, no clock available!\n", ns);
         return;
     }
 

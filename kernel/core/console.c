@@ -39,6 +39,6 @@ void console_init() {
         if (active->init(active) == false)
             active = nullptr;
         else
-            kprintf("Logging on console \"%s\"\n", active->name);
+            kprintf("console: Logging on console \"%s\"\n", active->name);
     }
 }
