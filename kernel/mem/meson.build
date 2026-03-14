@@ -6,6 +6,6 @@ kernel_sources += files(
     'slab.c',
     'usercopy.c',
     'virt.c',
-    'vmo.c',
-    'vmspace.c',
+    'vm_object.c',
+    'vm_space.c',
 )

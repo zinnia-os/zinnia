@@ -11,8 +11,8 @@
 #include <kernel/percpu.h>
 #include <kernel/print.h>
 #include <kernel/sched.h>
-#include <kernel/vmobject.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_object.h>
+#include <kernel/vm_space.h>
 #include <config.h>
 #include <stdint.h>
 

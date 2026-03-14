@@ -1,41 +1,41 @@
 #include <kernel/alloc.h>
 #include <kernel/assert.h>
 #include <kernel/utils.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <uapi/errno.h>
 
 // Try to create a new, empty virtual address space.
-struct vmspace* vmspace_new() {
-    struct vmspace* vmspace = mem_alloc(sizeof(struct vmspace), 0);
-    if (!vmspace)
+struct vm_space* vm_space_new() {
+    struct vm_space* vm_space = mem_alloc(sizeof(struct vm_space), 0);
+    if (!vm_space)
         return nullptr;
 
-    errno_t res = pmap_new_user(&vmspace->pmap, 0);
+    errno_t res = pmap_new_user(&vm_space->pmap, 0);
     if (res)
         goto err1;
 
-    return vmspace;
+    return vm_space;
 
 err1:
-    mem_free(vmspace);
+    mem_free(vm_space);
     return nullptr;
 }
 
-void vmspace_delete(struct vmspace* vm) {}
+void vm_space_delete(struct vm_space* vm) {}
 
-errno_t vmspace_unmap(struct vmspace* vm, uintptr_t vaddr, size_t size);
+errno_t vm_space_unmap(struct vm_space* vm, uintptr_t vaddr, size_t size);
 
-errno_t vmspace_map(
-    struct vmspace* vas,
-    struct vmobject* vmobject,
+errno_t vm_space_map(
+    struct vm_space* vas,
+    struct vm_object* vm_object,
     uintptr_t addr,
     size_t len,
     enum prot_flags prot,
-    uintptr_t vmobject_offset
+    uintptr_t vm_object_offset
 ) {
     const size_t page_size = arch_mem_page_size();
 
-    if (addr % page_size != vmobject_offset % page_size)
+    if (addr % page_size != vm_object_offset % page_size)
         return EINVAL;
 
     size_t start_page = addr / page_size;
@@ -43,15 +43,15 @@ errno_t vmspace_map(
     const size_t pages = ALIGN_UP(addr_offset + len, page_size) / page_size;
     size_t end_page = start_page + pages;
 
-    if (!vas || !vmobject)
+    if (!vas || !vm_object)
         return EINVAL;
 
-    const size_t first_vmobject_page = vmobject_offset / page_size;
+    const size_t first_vm_object_page = vm_object_offset / page_size;
 
     for (size_t p = start_page; p < end_page; ++p) {
         const size_t page_index = p - start_page;
         struct page* page_obj;
-        errno_t status = vmobject->get_page(vmobject, first_vmobject_page + page_index, &page_obj);
+        errno_t status = vm_object->get_page(vm_object, first_vm_object_page + page_index, &page_obj);
         if (status != 0)
             return status;
 

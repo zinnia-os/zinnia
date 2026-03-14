@@ -5,7 +5,7 @@
 #include <kernel/print.h>
 #include <kernel/utils.h>
 #include <kernel/virt.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <string.h>
 
 extern uint8_t __ld_text_start[];
@@ -16,7 +16,7 @@ extern uint8_t __ld_data_start[];
 extern uint8_t __ld_data_end[];
 extern uint8_t __ld_kernel_start[];
 
-struct vmspace kernel_space = {0};
+struct vm_space kernel_space = {0};
 
 [[__init]]
 void mem_init(struct phys_mem* map, size_t map_len, uintptr_t kernel_virt, phys_t kernel_phys, uintptr_t tmp_hhdm) {

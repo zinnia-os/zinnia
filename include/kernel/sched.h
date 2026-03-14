@@ -27,7 +27,7 @@ enum task_state {
 struct task {
     size_t id;
     char name[TASK_NAME_MAX];
-    struct vmspace* space;
+    struct vm_space* space;
     enum task_state state;
     struct arch_task_context context;
     uintptr_t kernel_stack;
@@ -58,7 +58,7 @@ void sched_wake_all(struct sched_percpu* sched, struct wait_queue* wq);
 
 typedef void (*task_fn_t)(uintptr_t arg0);
 
-errno_t task_create(const char* name, struct vmspace* space, task_fn_t entry, uintptr_t arg0, struct task** out);
+errno_t task_create(const char* name, struct vm_space* space, task_fn_t entry, uintptr_t arg0, struct task** out);
 [[noreturn]]
 void task_entry(task_fn_t entry, uintptr_t arg0);
 

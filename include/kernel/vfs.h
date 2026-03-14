@@ -1,7 +1,7 @@
 #pragma once
 
 #include <kernel/iovec.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <uapi/errno.h>
 #include <uapi/time.h>
 #include <uapi/types.h>
@@ -21,7 +21,7 @@ struct file_ops {
     errno_t (*poll)(struct file* self, int16_t mask, int16_t* out_mask); // TODO: This is not correct.
     errno_t (*mmap)(
         struct file* self,
-        struct vmspace* space,
+        struct vm_space* space,
         void* addr,
         size_t len,
         int prot,

@@ -2,11 +2,11 @@
 #include <kernel/list.h>
 #include <kernel/utils.h>
 #include <kernel/virt.h>
-#include <kernel/vmobject.h>
+#include <kernel/vm_object.h>
 #include <uapi/errno.h>
 #include <string.h>
 
-errno_t vmobject_read(struct vmobject* obj, uintptr_t offset, void* buf, size_t len, size_t* actual_read) {
+errno_t vm_object_read(struct vm_object* obj, uintptr_t offset, void* buf, size_t len, size_t* actual_read) {
     const size_t page_size = arch_mem_page_size();
     size_t progress = 0;
     errno_t status = 0;
@@ -32,7 +32,7 @@ errno_t vmobject_read(struct vmobject* obj, uintptr_t offset, void* buf, size_t 
     return status;
 }
 
-errno_t vmobject_write(struct vmobject* obj, uintptr_t offset, const void* buf, size_t len, size_t* actual_written) {
+errno_t vm_object_write(struct vm_object* obj, uintptr_t offset, const void* buf, size_t len, size_t* actual_written) {
     const size_t page_size = arch_mem_page_size();
     size_t progress = 0;
     errno_t status = 0;
@@ -58,10 +58,10 @@ errno_t vmobject_write(struct vmobject* obj, uintptr_t offset, const void* buf, 
     return status;
 }
 
-errno_t vmobject_copy(
-    struct vmobject* target,
+errno_t vm_object_copy(
+    struct vm_object* target,
     uintptr_t target_offset,
-    struct vmobject* src,
+    struct vm_object* src,
     uintptr_t src_offset,
     size_t len,
     size_t* actual_copied
@@ -100,8 +100,8 @@ errno_t vmobject_copy(
     return status;
 }
 
-static errno_t paged_get_page(struct vmobject* vmobject, uintptr_t offset_idx, struct page** out) {
-    struct paged_vmo* paged = CONTAINER_OF(vmobject, struct paged_vmo, object);
+static errno_t paged_get_page(struct vm_object* vm_object, uintptr_t offset_idx, struct page** out) {
+    struct paged_vmo* paged = CONTAINER_OF(vm_object, struct paged_vmo, object);
 
     // Try to find the requested page in the cache.
     struct page_list* iter;
@@ -134,7 +134,7 @@ static errno_t paged_get_page(struct vmobject* vmobject, uintptr_t offset_idx, s
     return 0;
 }
 
-errno_t vmobject_new_paged(struct pager_ops pager, struct paged_vmo** out) {
+errno_t vm_object_new_paged(struct pager_ops pager, struct paged_vmo** out) {
     struct paged_vmo* result = mem_alloc(sizeof(struct paged_vmo), 0);
     if (!result)
         return ENOMEM;
@@ -166,31 +166,31 @@ static const struct pager_ops phys_pager = {
     .put_page = phys_put_page,
 };
 
-errno_t vmobject_new_phys(struct paged_vmo** out) {
-    return vmobject_new_paged(phys_pager, out);
+errno_t vm_object_new_phys(struct paged_vmo** out) {
+    return vm_object_new_paged(phys_pager, out);
 }
 
 struct phys_range_vmo {
-    struct vmobject object;
+    struct vm_object object;
     uintptr_t start;
     size_t len;
 };
 
-static errno_t phys_range_get_page(struct vmobject* vmobject, uintptr_t offset_idx, struct page** out) {
-    struct phys_range_vmo* p = CONTAINER_OF(vmobject, struct phys_range_vmo, object);
+static errno_t phys_range_get_page(struct vm_object* vm_object, uintptr_t offset_idx, struct page** out) {
+    struct phys_range_vmo* p = CONTAINER_OF(vm_object, struct phys_range_vmo, object);
     *out = &vm_pfndb[(p->start / arch_mem_page_size()) + offset_idx];
     return 0;
 }
 
-errno_t vmobject_new_phys_range(uintptr_t addr, size_t length, struct vmobject** out) {
-    struct phys_range_vmo* vmobject = mem_alloc(sizeof(struct phys_range_vmo), 0);
-    if (!vmobject)
+errno_t vm_object_new_phys_range(uintptr_t addr, size_t length, struct vm_object** out) {
+    struct phys_range_vmo* vm_object = mem_alloc(sizeof(struct phys_range_vmo), 0);
+    if (!vm_object)
         return ENOMEM;
 
-    vmobject->object.get_page = phys_range_get_page;
-    vmobject->start = ALIGN_DOWN(addr, arch_mem_page_size());
-    vmobject->len = ALIGN_UP(length, arch_mem_page_size());
+    vm_object->object.get_page = phys_range_get_page;
+    vm_object->start = ALIGN_DOWN(addr, arch_mem_page_size());
+    vm_object->len = ALIGN_UP(length, arch_mem_page_size());
 
-    *out = &vmobject->object;
+    *out = &vm_object->object;
     return 0;
 }

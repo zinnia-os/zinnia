@@ -1,7 +1,7 @@
 #include <kernel/mmio.h>
 #include <kernel/pmap.h>
 #include <kernel/virt.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <bits/mem.h>
 
 void* mmio_new(phys_t addr, size_t length) {

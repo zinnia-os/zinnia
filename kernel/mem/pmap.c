@@ -1,7 +1,7 @@
 #include <kernel/alloc.h>
 #include <kernel/pmap.h>
 #include <kernel/spin.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <uapi/errno.h>
 #include <string.h>
 

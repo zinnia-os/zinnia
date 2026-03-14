@@ -7,8 +7,8 @@
 #include <kernel/print.h>
 #include <kernel/sched.h>
 #include <kernel/utils.h>
-#include <kernel/vmobject.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_object.h>
+#include <kernel/vm_space.h>
 #include <uapi/errno.h>
 #include <string.h>
 
@@ -17,7 +17,7 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
 
     size_t read;
     struct elf_ehdr ehdr = {};
-    vmobject_read(info->file_obj, 0, &ehdr, sizeof(ehdr), &read);
+    vm_object_read(info->file_obj, 0, &ehdr, sizeof(ehdr), &read);
 
     // Check if the file is an ELF.
     if (memcmp(ehdr.e_ident, ELF_MAG, sizeof(ELF_MAG)) != 0)
@@ -37,7 +37,7 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
 
     for (size_t i = 0; i < ehdr.e_phnum; i++) {
         struct elf_phdr phdr = {};
-        vmobject_read(info->file_obj, (ehdr.e_phoff + (i * ehdr.e_phentsize)), &phdr, sizeof(phdr), &read);
+        vm_object_read(info->file_obj, (ehdr.e_phoff + (i * ehdr.e_phentsize)), &phdr, sizeof(phdr), &read);
         if (phdr.p_type == PT_LOAD) {
             enum prot_flags prot = 0;
             if (phdr.p_flags & PF_R)
@@ -56,17 +56,17 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
 
             // Copy the file data into its own mapping.
             struct paged_vmo* phdr_obj;
-            status = vmobject_new_phys(&phdr_obj);
+            status = vm_object_new_phys(&phdr_obj);
             if (status)
                 return status;
 
             status =
-                vmobject_copy(&phdr_obj->object, phdr.p_offset, info->file_obj, phdr.p_offset, phdr.p_filesz, nullptr);
+                vm_object_copy(&phdr_obj->object, phdr.p_offset, info->file_obj, phdr.p_offset, phdr.p_filesz, nullptr);
             if (status)
                 return status;
 
             // We map more than we copied so the rest is filled with zeroed pages.
-            status = vmspace_map(info->space, &phdr_obj->object, phdr.p_vaddr, phdr.p_memsz, prot, phdr.p_offset);
+            status = vm_space_map(info->space, &phdr_obj->object, phdr.p_vaddr, phdr.p_memsz, prot, phdr.p_offset);
             if (status)
                 return status;
         }
@@ -78,7 +78,7 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
 
     // Allocate stack.
     struct paged_vmo* stack;
-    status = vmobject_new_phys(&stack);
+    status = vm_object_new_phys(&stack);
     if (status)
         return status;
 
@@ -100,11 +100,11 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
     for (size_t env = 0; env < num_envp; env++) {
         const char nul = 0;
         stack_off -= 1;
-        vmobject_write(&stack->object, stack_off, &nul, sizeof(nul), nullptr);
+        vm_object_write(&stack->object, stack_off, &nul, sizeof(nul), nullptr);
 
         const size_t len = strlen(info->envp[env]);
         stack_off -= len;
-        vmobject_write(&stack->object, stack_off, info->envp[env], len, nullptr);
+        vm_object_write(&stack->object, stack_off, info->envp[env], len, nullptr);
 
         envp_offsets[env] = stack_start + stack_off;
     }
@@ -112,11 +112,11 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
     for (size_t arg = 0; arg < num_argv; arg++) {
         const char nul = 0;
         stack_off -= 1;
-        vmobject_write(&stack->object, stack_off, &nul, sizeof(nul), nullptr);
+        vm_object_write(&stack->object, stack_off, &nul, sizeof(nul), nullptr);
 
         const size_t len = strlen(info->argv[arg]);
         stack_off -= len;
-        vmobject_write(&stack->object, stack_off, info->argv[arg], len, nullptr);
+        vm_object_write(&stack->object, stack_off, info->argv[arg], len, nullptr);
 
         argv_offsets[arg] = stack_start + stack_off;
     }
@@ -127,17 +127,17 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
     if ((1 + num_argv + num_envp) & 1) {
         stack_off -= sizeof(uintptr_t);
         uintptr_t zero = 0;
-        vmobject_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
+        vm_object_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
     }
 
 #define WRITE_AUXV(auxv, value) \
     do { \
         stack_off -= sizeof(uintptr_t); \
         uintptr_t auxv_val = value; \
-        vmobject_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
+        vm_object_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
         stack_off -= sizeof(uintptr_t); \
         auxv_val = auxv; \
-        vmobject_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
+        vm_object_write(&stack->object, stack_off, &auxv_val, sizeof(uintptr_t), nullptr); \
     } while (0)
 
     // Write auxiliary values.
@@ -150,18 +150,18 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
     // envp pointers.
     stack_off -= sizeof(uintptr_t);
     const uintptr_t zero = 0;
-    vmobject_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
+    vm_object_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
     for (size_t env = 0; env < num_envp; env++) {
         stack_off -= sizeof(uintptr_t);
-        vmobject_write(&stack->object, stack_off, &envp_offsets[env], sizeof(envp_offsets[env]), nullptr);
+        vm_object_write(&stack->object, stack_off, &envp_offsets[env], sizeof(envp_offsets[env]), nullptr);
     }
 
     // argv pointers.
     stack_off -= sizeof(uintptr_t);
-    vmobject_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
+    vm_object_write(&stack->object, stack_off, &zero, sizeof(zero), nullptr);
     for (size_t arg = 0; arg < num_argv; arg++) {
         stack_off -= sizeof(uintptr_t);
-        vmobject_write(&stack->object, stack_off, &argv_offsets[arg], sizeof(argv_offsets[arg]), nullptr);
+        vm_object_write(&stack->object, stack_off, &argv_offsets[arg], sizeof(argv_offsets[arg]), nullptr);
     }
 
     mem_free(envp_offsets);
@@ -170,9 +170,9 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
     // argc
     stack_off -= sizeof(uintptr_t);
     uintptr_t argc = num_argv;
-    vmobject_write(&stack->object, stack_off, &argc, sizeof(argc), nullptr);
+    vm_object_write(&stack->object, stack_off, &argc, sizeof(argc), nullptr);
 
-    status = vmspace_map(info->space, &stack->object, stack_start, stack_size, PROT_READ | PROT_WRITE, 0);
+    status = vm_space_map(info->space, &stack->object, stack_start, stack_size, PROT_READ | PROT_WRITE, 0);
     if (status)
         return status;
 

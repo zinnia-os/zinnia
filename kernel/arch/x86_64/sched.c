@@ -4,7 +4,7 @@
 #include <kernel/pmap.h>
 #include <kernel/sched.h>
 #include <kernel/virt.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <uapi/errno.h>
 #include <bits/sched.h>
 #include <stddef.h>

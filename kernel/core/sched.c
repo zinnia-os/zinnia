@@ -7,7 +7,7 @@
 #include <kernel/sched.h>
 #include <kernel/spin.h>
 #include <kernel/tailq.h>
-#include <kernel/vmspace.h>
+#include <kernel/vm_space.h>
 #include <uapi/errno.h>
 #include <bits/irq.h>
 #include <stdatomic.h>
@@ -102,7 +102,7 @@ void sched_yield(struct sched_percpu* sched) {
     do_reschedule(sched);
 }
 
-errno_t task_create(const char* name, struct vmspace* space, task_fn_t entry, uintptr_t arg0, struct task** out) {
+errno_t task_create(const char* name, struct vm_space* space, task_fn_t entry, uintptr_t arg0, struct task** out) {
     if (!out)
         return EINVAL;
 
