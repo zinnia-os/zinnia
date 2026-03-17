@@ -4,6 +4,7 @@
 #include <kernel/list.h>
 #include <kernel/percpu.h>
 #include <kernel/print.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/spin.h>
 #include <kernel/tailq.h>
@@ -39,12 +40,15 @@ void sched_to_user_context(uintptr_t ctx) {
 }
 
 void sched_init(struct sched_percpu* sched) {
+    // Setup kernel process.
+    process_new(&kernel_process, nullptr, &kernel_space);
+
     struct task* idle_task;
-    ASSERT(task_create("idle", &kernel_space, idle_func, 0, &idle_task) == 0, "Unable to create idle task!\n");
+    ASSERT(task_create("idle", &kernel_process, idle_func, 0, &idle_task) == 0, "Unable to create idle task!\n");
     sched->idle_task = idle_task;
 
     struct task* bootstrap_task;
-    ASSERT(task_create("dummy", &kernel_space, dummy, 0, &bootstrap_task) == 0, "Unable to create dummy task!\n");
+    ASSERT(task_create("dummy", &kernel_process, dummy, 0, &bootstrap_task) == 0, "Unable to create dummy task!\n");
     sched->current = bootstrap_task;
 
     TAILQ_INIT(&sched->run_queue);
@@ -79,7 +83,7 @@ static void do_reschedule(struct sched_percpu* sched) {
 
     atomic_store_explicit(&sched->current, to, memory_order_relaxed);
 
-    pmap_set(&to->space->pmap);
+    pmap_set(&to->parent->address_space->pmap);
 
     struct percpu* cpu = percpu_get();
     from->kernel_stack = cpu->kernel_stack;
@@ -102,7 +106,7 @@ void sched_yield(struct sched_percpu* sched) {
     do_reschedule(sched);
 }
 
-errno_t task_create(const char* name, struct vm_space* space, task_fn_t entry, uintptr_t arg0, struct task** out) {
+errno_t task_create(const char* name, struct process* parent, task_fn_t entry, uintptr_t arg0, struct task** out) {
     if (!out)
         return EINVAL;
 
@@ -112,7 +116,7 @@ errno_t task_create(const char* name, struct vm_space* space, task_fn_t entry, u
 
     static size_t last_tid = 0;
     new_task->id = atomic_fetch_add(&last_tid, 1);
-    new_task->space = space;
+    new_task->parent = parent;
     strncpy(new_task->name, name, sizeof(new_task->name));
 
     // Allocate a kernel stack.

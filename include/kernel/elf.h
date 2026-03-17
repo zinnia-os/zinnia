@@ -339,3 +339,5 @@ static inline uint32_t ELF64_R_SYM(uint64_t info) {
 static inline uint32_t ELF64_R_TYPE(uint64_t info) {
     return info & 0xFFFFFFFF;
 }
+
+void elf_init();

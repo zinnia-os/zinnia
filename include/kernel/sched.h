@@ -27,7 +27,7 @@ enum task_state {
 struct task {
     size_t id;
     char name[TASK_NAME_MAX];
-    struct vm_space* space;
+    struct process* parent;
     enum task_state state;
     struct arch_task_context context;
     uintptr_t kernel_stack;
@@ -37,6 +37,13 @@ struct task {
 
     TAILQ_LINK(struct task) next;
 };
+
+typedef void (*task_fn_t)(uintptr_t arg0);
+
+errno_t task_create(const char* name, struct process* parent, task_fn_t entry, uintptr_t arg0, struct task** out);
+
+[[noreturn]]
+void task_entry(task_fn_t entry, uintptr_t arg0);
 
 // Per-CPU data for scheduling.
 struct sched_percpu {
@@ -55,12 +62,6 @@ void sched_wake(struct sched_percpu* sched, struct wait_queue* wq);
 
 // Wakes all tasks blocked on the given wait queue.
 void sched_wake_all(struct sched_percpu* sched, struct wait_queue* wq);
-
-typedef void (*task_fn_t)(uintptr_t arg0);
-
-errno_t task_create(const char* name, struct vm_space* space, task_fn_t entry, uintptr_t arg0, struct task** out);
-[[noreturn]]
-void task_entry(task_fn_t entry, uintptr_t arg0);
 
 void sched_init(struct sched_percpu* sched);
 void sched_reschedule(struct sched_percpu* sched);

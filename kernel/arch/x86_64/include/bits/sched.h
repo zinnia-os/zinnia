@@ -46,3 +46,5 @@ struct arch_context {
 #define ARCH_CTX_A7   r13
 #define ARCH_CTX_RET0 rax
 #define ARCH_CTX_RET1 rdx
+#define ARCH_CTX_IP   rip
+#define ARCH_CTX_SP   rsp
