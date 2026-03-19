@@ -14,7 +14,7 @@ typedef uintptr_t gid_t;
 typedef uintptr_t ino_t;
 typedef uint32_t mode_t;
 typedef uintptr_t nlink_t;
-typedef uintptr_t pid_t;
+typedef intptr_t pid_t;
 typedef uintptr_t rlim_t;
 typedef uintptr_t uid_t;
 typedef uintptr_t fsblkcnt_t;

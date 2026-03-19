@@ -10,6 +10,8 @@ struct vm_space* vm_space_new() {
     if (!vm_space)
         return nullptr;
 
+    vm_space->refcount = 1;
+
     errno_t res = pmap_new_user(&vm_space->pmap, 0);
     if (res)
         goto err1;

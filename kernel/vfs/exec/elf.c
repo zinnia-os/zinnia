@@ -7,37 +7,41 @@
 #include <kernel/print.h>
 #include <kernel/sched.h>
 #include <kernel/utils.h>
+#include <kernel/vfs.h>
 #include <kernel/vm_object.h>
 #include <kernel/vm_space.h>
 #include <uapi/errno.h>
+#include <uapi/limits.h>
+#include <uapi/mman.h>
 #include <string.h>
 
-errno_t elf_load(struct exec_info* info, struct task** out) {
+struct elf_info {
+    uintptr_t at_phdr;
+    size_t at_phnum;
+    size_t at_phent;
+    uintptr_t at_entry;
+};
+
+static errno_t elf_load_file(
+    struct file* file,
+    struct process* proc,
+    struct exec_info* info,
+    uintptr_t base,
+    struct elf_info* out_info
+) {
     errno_t status;
-
-    size_t read;
+    ssize_t read;
     struct elf_ehdr ehdr = {};
-    vm_object_read(info->file_obj, 0, &ehdr, sizeof(ehdr), &read);
-
-    // Check if the file is an ELF.
-    if (memcmp(ehdr.e_ident, ELF_MAG, sizeof(ELF_MAG)) != 0)
-        return EINVAL;
-    if (ehdr.e_ident[EI_VERSION] != EV_CURRENT)
-        return EINVAL;
-    if (ehdr.e_ident[EI_CLASS] != ELF_ARCH_CLASS)
-        return EINVAL;
-    if (ehdr.e_ident[EI_DATA] != ELF_ARCH_DATA)
-        return EINVAL;
-    if (ehdr.e_machine != ELF_ARCH_MACHINE)
-        return EINVAL;
-    if (ehdr.e_type != ET_EXEC)
-        return EINVAL;
+    status = file_read(file, &ehdr, sizeof(ehdr), 0, &read);
+    if (status)
+        return status;
 
     const size_t page_size = arch_mem_page_size();
+    const uintptr_t base_addr = ehdr.e_type == ET_DYN ? base : 0;
 
     for (size_t i = 0; i < ehdr.e_phnum; i++) {
         struct elf_phdr phdr = {};
-        vm_object_read(info->file_obj, (ehdr.e_phoff + (i * ehdr.e_phentsize)), &phdr, sizeof(phdr), &read);
+        file_read(file, &phdr, sizeof(phdr), (ehdr.e_phoff + (i * ehdr.e_phentsize)), &read);
         if (phdr.p_type == PT_LOAD) {
             enum prot_flags prot = 0;
             if (phdr.p_flags & PF_R)
@@ -47,33 +51,63 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
             if (phdr.p_flags & PF_X)
                 prot |= PROT_EXEC;
 
-            ASSERT(phdr.p_offset % phdr.p_align == phdr.p_vaddr % phdr.p_align, "");
-
-            const uintptr_t misalign = phdr.p_vaddr & (page_size - 1);
-            const uintptr_t map_address = phdr.p_vaddr - misalign;
-            const size_t backed_map_size = (phdr.p_filesz + misalign + page_size - 1) & ~(page_size - 1);
-            const size_t total_map_size = (phdr.p_memsz + misalign + page_size - 1) & ~(page_size - 1);
+            if (phdr.p_offset % phdr.p_align != phdr.p_vaddr % phdr.p_align)
+                return ENOEXEC;
 
             // Copy the file data into its own mapping.
-            struct paged_vmo* phdr_obj;
-            status = vm_object_new_phys(&phdr_obj);
-            if (status)
-                return status;
-
             status =
-                vm_object_copy(&phdr_obj->object, phdr.p_offset, info->file_obj, phdr.p_offset, phdr.p_filesz, nullptr);
+                file_mmap(file, info->space, base_addr + phdr.p_vaddr, phdr.p_memsz, prot, MAP_PRIVATE, phdr.p_offset);
             if (status)
                 return status;
+        } else if (phdr.p_type == PT_INTERP) {
+            const size_t interp_len = MIN(phdr.p_filesz, PATH_MAX);
+            char* interp_buf = mem_alloc(interp_len, 0);
+            if (!interp_buf)
+                return ENOMEM;
 
-            // We map more than we copied so the rest is filled with zeroed pages.
-            status = vm_space_map(info->space, &phdr_obj->object, phdr.p_vaddr, phdr.p_memsz, prot, phdr.p_offset);
+            ssize_t read;
+            status = file_read(file, interp_buf, interp_len, phdr.p_offset, &read);
             if (status)
                 return status;
+            if ((size_t)read != interp_len)
+                return ENOEXEC;
         }
     }
 
+    out_info->at_entry = ehdr.e_entry;
+    out_info->at_phdr = base + ehdr.e_phoff;
+    out_info->at_phent = ehdr.e_phentsize;
+    out_info->at_phnum = ehdr.e_phnum;
+
+    return 0;
+}
+
+static errno_t elf_load(
+    struct exec_format* format,
+    struct process* proc,
+    struct exec_info* info,
+    struct task** result
+) {
+    const size_t page_size = arch_mem_page_size();
+
+    struct elf_info elf_info;
+    errno_t status = elf_load_file(info->executable, proc, info, 0x10000, &elf_info);
+    if (status)
+        return status;
+
+    // Load an interpreter if one was requested and override the entry point.
+    uintptr_t entry = elf_info.at_entry;
+    if (info->interpreter != nullptr) {
+        struct elf_info interp_info;
+        status = elf_load_file(info->interpreter, proc, info, ((uintptr_t)1 << (mem_high_shift() - 1)), &interp_info);
+        if (status)
+            return status;
+
+        entry = interp_info.at_entry;
+    }
+
     const uintptr_t highest = ((uintptr_t)1 << (mem_high_shift() - 1)) - page_size;
-    const size_t stack_size = 2 * 1024 * 1024; // 2MiB
+    const size_t stack_size = 2 * 1024 * 1024; // 2MiB stack by default.
     const uintptr_t stack_start = highest - stack_size;
 
     // Allocate stack.
@@ -141,11 +175,12 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
     } while (0)
 
     // Write auxiliary values.
-    WRITE_AUXV(AT_NULL, 0);
-    WRITE_AUXV(AT_SECURE, 0);
-    WRITE_AUXV(AT_PHNUM, ehdr.e_phnum);
-    WRITE_AUXV(AT_PHENT, ehdr.e_phentsize);
-    WRITE_AUXV(AT_ENTRY, ehdr.e_entry);
+    WRITE_AUXV(AT_NULL, 0);   // Terminator, always last.
+    WRITE_AUXV(AT_SECURE, 0); // Never secure
+    WRITE_AUXV(AT_PHDR, elf_info.at_phdr);
+    WRITE_AUXV(AT_PHNUM, elf_info.at_phnum);
+    WRITE_AUXV(AT_PHENT, elf_info.at_phent);
+    WRITE_AUXV(AT_ENTRY, elf_info.at_entry);
 
     // envp pointers.
     stack_off -= sizeof(uintptr_t);
@@ -177,15 +212,51 @@ errno_t elf_load(struct exec_info* info, struct task** out) {
         return status;
 
     struct task_start_info* start_info = mem_alloc(sizeof(struct task_start_info), 0);
-    start_info->ip = ehdr.e_entry;
+    start_info->ip = entry;
     start_info->sp = highest - stack_size + stack_off;
     start_info->arg = 0;
 
-    struct task* result;
-    status = task_create(info->argv[0], info->space, sched_to_user, (uintptr_t)start_info, &result);
+    struct task* new_task;
+    status = task_create(info->argv[0], proc, sched_to_user, (uintptr_t)start_info, &new_task);
     if (status)
         return status;
 
-    *out = result;
+    *result = new_task;
     return 0;
+}
+
+static bool elf_identify(struct exec_format* format, struct file* file) {
+    struct elf_ehdr ehdr;
+    ssize_t read;
+    errno_t status = file_read(file, &ehdr, sizeof(ehdr), 0, &read);
+    if (status)
+        return false;
+    if (read != sizeof(ehdr))
+        return false;
+
+    // Check if the file is an ELF for this machine.
+    if (memcmp(ehdr.e_ident, ELF_MAG, sizeof(ELF_MAG)) != 0)
+        return false;
+    if (ehdr.e_ident[EI_VERSION] != EV_CURRENT)
+        return false;
+    if (ehdr.e_ident[EI_CLASS] != ELF_ARCH_CLASS)
+        return false;
+    if (ehdr.e_ident[EI_DATA] != ELF_ARCH_DATA)
+        return false;
+    if (ehdr.e_machine != ELF_ARCH_MACHINE)
+        return false;
+    if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN)
+        return false;
+
+    return true;
+}
+
+static const struct exec_format elf_format = {
+    .identify = elf_identify,
+    .load = elf_load,
+};
+
+[[__init]]
+void elf_init() {
+    exec_register("elf", &elf_format);
 }

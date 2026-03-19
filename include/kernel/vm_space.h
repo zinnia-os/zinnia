@@ -12,6 +12,7 @@ struct vmap {
 
 // Virtual address space.
 struct vm_space {
+    size_t refcount;
     struct pmap pmap;
     struct vmap map;
 };

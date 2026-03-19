@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kernel/alloc.h>
+#include <kernel/print.h>
 #include <uapi/errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -17,9 +18,20 @@ static inline uint64_t hashmap_hash_default(const void* key, size_t len) {
     return hash;
 }
 
+static inline uint64_t hashmap_hash_string(const void* key, size_t) {
+    const char* buf = *(const char**)key;
+    return hashmap_hash_default(buf, strlen(buf));
+}
+
 // Byte-wise equality.
 static inline bool hashmap_eq_default(const void* a, const void* b, size_t len) {
     return memcmp(a, b, len) == 0;
+}
+
+static inline bool hashmap_eq_string(const void* a, const void* b, size_t) {
+    const char* buf_a = *(const char**)a;
+    const char* buf_b = *(const char**)b;
+    return strcmp(buf_a, buf_b) == 0;
 }
 
 // Ensure a hash is never zero (zero is the empty sentinel).
