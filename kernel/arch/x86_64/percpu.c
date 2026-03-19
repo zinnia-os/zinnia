@@ -10,7 +10,7 @@
 #include <x86_64/syscall.h>
 #include <x86_64/tsc.h>
 
-void arch_percpu_bsp_init() {
+void percpu_bsp_init() {
     asm_wrmsr(MSR_GS_BASE, (uint64_t)&percpu_bsp);
     asm_wrmsr(MSR_FS_BASE, 0);
     asm_wrmsr(MSR_KERNEL_GS_BASE, 0);
@@ -105,7 +105,7 @@ static void setup_cpu(struct percpu* cpu) {
     cpu->online = true;
 }
 
-void arch_percpu_init() {
+void percpu_init() {
     hpet_init();
     tsc_init();
 
@@ -113,4 +113,10 @@ void arch_percpu_init() {
     setup_cpu(&percpu_bsp);
 
     // Init any APs.
+}
+
+struct percpu* percpu_get() {
+    struct percpu* result;
+    asm volatile("mov %0, gs:0" : "=r"(result)::"memory");
+    return result;
 }

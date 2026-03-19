@@ -20,12 +20,12 @@
 static const char zinnia_banner[] =
     "Zinnia " ZINNIA_VERSION " (" ZINNIA_ARCH ", " ZINNIA_COMPILER_ID ", " ZINNIA_LINKER_ID ")";
 
-static struct process init_proc = {0};
+static struct process* init_proc = nullptr;
 
-static char* init_path = "/init";
-
-static void init_opt(const char* path) {}
-
+static const char* init_path = nullptr;
+static void init_opt(const char* path) {
+    init_path = path;
+}
 CMDLINE_OPTION("init", init_opt);
 
 static void kernel_main_task(uintptr_t arg0) {
@@ -43,9 +43,9 @@ static void kernel_main_task(uintptr_t arg0) {
     };
 
     struct vm_space* space = vm_space_new();
-    errno_t e = process_new(&init_proc, nullptr, space);
+    errno_t e = process_new(nullptr, space, &init_proc);
     ASSERT(e == 0, "Failed to create init: %i\n", e);
-    e = process_exec(&init_proc, nullptr, init_argv, init_envp);
+    e = process_exec(init_proc, nullptr, init_argv, init_envp);
     ASSERT(e == 0, "Failed to run init: %i\n", e);
 
     ASSERT(info->num_files >= 1, "No init executable provided\n");
@@ -65,7 +65,7 @@ void kernel_main(struct boot_info* info) {
     futex_init();
 
     struct task* main_task;
-    task_create("main", &kernel_process, kernel_main_task, (uintptr_t)info, &main_task);
+    task_create("main", kernel_process, kernel_main_task, (uintptr_t)info, &main_task);
     sched_add_task(&percpu_get()->sched, main_task);
 
     irq_unlock();

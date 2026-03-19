@@ -1,7 +1,7 @@
 #pragma once
 
+#include <kernel/types.h>
 #include <uapi/errno.h>
-#include <bits/mem.h>
 #include <stddef.h>
 
 enum alloc_flags {

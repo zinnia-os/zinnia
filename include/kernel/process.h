@@ -20,10 +20,10 @@ struct process {
     struct identity identity;
 };
 
-extern struct process kernel_process;
+extern struct process* kernel_process;
 
 // Creates a new process.
-errno_t process_new(struct process* proc, struct process* parent, struct vm_space* space);
+errno_t process_new(struct process* parent, struct vm_space* space, struct process** out);
 
 errno_t process_fork(struct process* proc, struct arch_context* context);
 

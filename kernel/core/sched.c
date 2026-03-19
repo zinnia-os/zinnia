@@ -40,15 +40,14 @@ void sched_to_user_context(uintptr_t ctx) {
 }
 
 void sched_init(struct sched_percpu* sched) {
-    // Setup kernel process.
-    process_new(&kernel_process, nullptr, &kernel_space);
+    ASSERT(process_new(nullptr, &kernel_space, &kernel_process) == 0, "Failed to create kernel process!\n");
 
     struct task* idle_task;
-    ASSERT(task_create("idle", &kernel_process, idle_func, 0, &idle_task) == 0, "Unable to create idle task!\n");
+    ASSERT(task_create("idle", kernel_process, idle_func, 0, &idle_task) == 0, "Unable to create idle task!\n");
     sched->idle_task = idle_task;
 
     struct task* bootstrap_task;
-    ASSERT(task_create("dummy", &kernel_process, dummy, 0, &bootstrap_task) == 0, "Unable to create dummy task!\n");
+    ASSERT(task_create("dummy", kernel_process, dummy, 0, &bootstrap_task) == 0, "Unable to create dummy task!\n");
     sched->current = bootstrap_task;
 
     TAILQ_INIT(&sched->run_queue);

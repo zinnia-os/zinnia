@@ -1,3 +1,4 @@
+#include <kernel/alloc.h>
 #include <kernel/assert.h>
 #include <kernel/compiler.h>
 #include <kernel/exec.h>
@@ -11,11 +12,14 @@
 #include <uapi/errno.h>
 #include <stdatomic.h>
 
-struct process kernel_process = {0};
+struct process* kernel_process = nullptr;
 
 static pid_t next_pid = 0;
 
-errno_t process_new(struct process* proc, struct process* parent, struct vm_space* space) {
+errno_t process_new(struct process* parent, struct vm_space* space, struct process** out) {
+    struct process* proc = mem_alloc(sizeof(*proc), 0);
+    if (proc == nullptr)
+        return ENOMEM;
 
     proc->refcount = 1;
     proc->id = atomic_fetch_add_explicit(&next_pid, 1, memory_order_relaxed);
@@ -35,6 +39,8 @@ errno_t process_new(struct process* proc, struct process* parent, struct vm_spac
         proc->root_dir = parent->root_dir;
         proc->working_dir = parent->working_dir;
     }
+
+    *out = proc;
 
     return 0;
 }
@@ -58,6 +64,4 @@ errno_t process_exec(struct process* proc, struct file* executable, const char**
 }
 
 [[__init]]
-void process_init() {
-    ASSERT(process_new(&kernel_process, nullptr, &kernel_space) == 0, "Failed to create kernel process!\n");
-}
+void process_init() {}

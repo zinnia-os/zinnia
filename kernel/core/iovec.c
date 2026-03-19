@@ -9,13 +9,17 @@ size_t iovec_len(iovec_t* iovec, size_t num) {
     return size;
 }
 
-void iovec_iter_init(iovec_iter_t* iter, iovec_t* iovec, size_t count) {
-    iter->base = iovec;
-    iter->count = count;
+iovec_iter_t iovec_iter_new(iovec_t* iovec, size_t count) {
+    iovec_iter_t iter = {
+        .base = iovec,
+        .count = count,
 
-    iter->current = iovec;
-    iter->current_offset = 0;
+        .current = iovec,
+        .current_offset = 0,
 
-    iter->total_offset = 0;
-    iter->total_size = iovec_len(iovec, count);
+        .total_offset = 0,
+        .total_size = iovec_len(iovec, count),
+    };
+
+    return iter;
 }

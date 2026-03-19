@@ -1,18 +1,33 @@
 #include <kernel/iovec.h>
 #include <kernel/vfs.h>
 
-errno_t file_readv(struct file* file, iovec_iter_t* iter, size_t nbyte, off_t offset, ssize_t* out_read) {
+errno_t file_readv(
+    struct file* file,
+    size_t nbyte,
+    off_t offset,
+    iovec_iter_t* iter,
+    struct identity* identity,
+    ssize_t* out_read
+) {
+    if (!file)
+        return EBADF;
+
+    if (file->ops->read)
+        return file->ops->read(file, nbyte, offset, iter, identity, out_read);
+
+    // Fall back to reading from the page cache.
+    // TODO
+
     return ENOSYS;
 }
 
-errno_t file_read(struct file* file, void* buf, size_t nbyte, off_t offset, ssize_t* out_read) {
+errno_t file_read(struct file* file, void* buf, size_t nbyte, off_t offset, struct identity* ident, ssize_t* out_read) {
     iovec_t iovec = {
         .base = buf,
         .len = nbyte,
     };
-    iovec_iter_t iter;
-    iovec_iter_init(&iter, &iovec, 1);
-    return file_readv(file, &iter, nbyte, offset, out_read);
+    iovec_iter_t iter = iovec_iter_new(&iovec, 1);
+    return file_readv(file, nbyte, offset, &iter, ident, out_read);
 }
 
 errno_t file_mmap(

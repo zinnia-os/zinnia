@@ -19,4 +19,4 @@ typedef struct {
 } iovec_iter_t;
 
 // Initializes a new iterator.
-void iovec_iter_init(iovec_iter_t* iter, iovec_t* iovec, size_t count);
+iovec_iter_t iovec_iter_new(iovec_t* iovec, size_t count);

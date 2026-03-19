@@ -9,6 +9,7 @@ kernel_sources += files(
     'gdt.c',
     'hpet.c',
     'idt.c',
+    'mem.c',
     'percpu.c',
     'pmap.c',
     'sched.c',

@@ -2,6 +2,7 @@
 #include <kernel/assert.h>
 #include <kernel/elf.h>
 #include <kernel/exec.h>
+#include <kernel/identity.h>
 #include <kernel/percpu.h>
 #include <kernel/pmap.h>
 #include <kernel/print.h>
@@ -32,7 +33,7 @@ static errno_t elf_load_file(
     errno_t status;
     ssize_t read;
     struct elf_ehdr ehdr = {};
-    status = file_read(file, &ehdr, sizeof(ehdr), 0, &read);
+    status = file_read(file, &ehdr, sizeof(ehdr), 0, &kernel_identity, &read);
     if (status)
         return status;
 
@@ -41,7 +42,7 @@ static errno_t elf_load_file(
 
     for (size_t i = 0; i < ehdr.e_phnum; i++) {
         struct elf_phdr phdr = {};
-        file_read(file, &phdr, sizeof(phdr), (ehdr.e_phoff + (i * ehdr.e_phentsize)), &read);
+        file_read(file, &phdr, sizeof(phdr), (ehdr.e_phoff + (i * ehdr.e_phentsize)), &kernel_identity, &read);
         if (phdr.p_type == PT_LOAD) {
             enum prot_flags prot = 0;
             if (phdr.p_flags & PF_R)
@@ -66,7 +67,7 @@ static errno_t elf_load_file(
                 return ENOMEM;
 
             ssize_t read;
-            status = file_read(file, interp_buf, interp_len, phdr.p_offset, &read);
+            status = file_read(file, interp_buf, interp_len, phdr.p_offset, &kernel_identity, &read);
             if (status)
                 return status;
             if ((size_t)read != interp_len)
@@ -83,7 +84,7 @@ static errno_t elf_load_file(
 }
 
 static errno_t elf_load(
-    struct exec_format* format,
+    const struct exec_format* format,
     struct process* proc,
     struct exec_info* info,
     struct task** result
@@ -225,10 +226,10 @@ static errno_t elf_load(
     return 0;
 }
 
-static bool elf_identify(struct exec_format* format, struct file* file) {
+static bool elf_identify(const struct exec_format* format, struct file* file) {
     struct elf_ehdr ehdr;
     ssize_t read;
-    errno_t status = file_read(file, &ehdr, sizeof(ehdr), 0, &read);
+    errno_t status = file_read(file, &ehdr, sizeof(ehdr), 0, &kernel_identity, &read);
     if (status)
         return false;
     if (read != sizeof(ehdr))

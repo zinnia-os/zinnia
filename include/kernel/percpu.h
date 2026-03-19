@@ -29,16 +29,10 @@ extern struct percpu percpu_bsp;
 struct percpu* percpu_new();
 
 // Gets the per-CPU data on the current CPU.
-static inline struct percpu* percpu_get() {
-    return arch_percpu_get();
-}
+struct percpu* percpu_get();
 
 // Initializes the bootstrap processor.
-static inline void percpu_bsp_init() {
-    arch_percpu_bsp_init();
-}
+void percpu_bsp_init();
 
 // Initializes all processors.
-static inline void percpu_init() {
-    arch_percpu_init();
-}
+void percpu_init();

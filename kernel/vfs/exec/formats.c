@@ -2,6 +2,7 @@
 #include <kernel/exec.h>
 #include <kernel/hashmap.h>
 #include <kernel/print.h>
+#include <kernel/process.h>
 #include <kernel/spin.h>
 #include <uapi/errno.h>
 #include <string.h>
@@ -14,7 +15,7 @@ errno_t exec_register(const char* name, const struct exec_format* format) {
 
     const size_t name_len = strlen(name) + 1;
     char* cloned_name = mem_alloc(name_len, 0);
-    if (!cloned_name) {
+    if (cloned_name == nullptr) {
         spin_unlock(&formats_lock);
         return ENOMEM;
     }
@@ -26,16 +27,23 @@ errno_t exec_register(const char* name, const struct exec_format* format) {
 }
 
 errno_t exec_file(struct exec_info* info, struct task** result) {
-    const struct exec_format** fmt = HASHMAP_GET(&formats, "elf", hashmap_hash_string, hashmap_eq_string);
-    if (!fmt)
-        kprintf("Format not found!\n");
-    else {
-        kprintf("%p\n", (*fmt)->identify);
+    const struct exec_format* format = nullptr;
+    HASHMAP_FOREACH(&formats, f) {
+        auto fmt = formats.values[f];
+        if (fmt->identify(fmt, nullptr)) {
+            format = fmt;
+            break;
+        }
     }
 
-    HASHMAP_FOREACH(&formats, f) {
-        auto name = formats.keys[f];
-        kprintf("Format: %s\n", name);
-    }
+    if (format == nullptr)
+        return ENOEXEC;
+
+    struct process* new;
+    process_new(nullptr, info->space, &new);
+
+    struct task* out;
+    errno_t status = format->load(format, new, info, &out);
+
     return 0;
 }

@@ -15,10 +15,15 @@ struct exec_info {
 
 struct exec_format {
     // Determines if a file is a valid executable of this format.
-    bool (*identify)(struct exec_format* format, struct file* file);
+    bool (*identify)(const struct exec_format* format, struct file* file);
 
     // Loads the executable and returns a new initial thread.
-    errno_t (*load)(struct exec_format* format, struct process* proc, struct exec_info* info, struct task** result);
+    errno_t (*load)(
+        const struct exec_format* format,
+        struct process* proc,
+        struct exec_info* info,
+        struct task** result
+    );
 };
 
 errno_t exec_file(struct exec_info* info, struct task** result);

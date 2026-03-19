@@ -59,9 +59,16 @@ struct file {
     uint32_t flags;
 };
 
-errno_t file_read(struct file* file, void* buf, size_t nbyte, off_t offset, ssize_t* out_read);
+errno_t file_read(struct file* file, void* buf, size_t nbyte, off_t offset, struct identity* ident, ssize_t* out_read);
 
-errno_t file_readv(struct file* file, iovec_iter_t* iter, size_t nbyte, off_t offset, ssize_t* out_read);
+errno_t file_readv(
+    struct file* file,
+    size_t nbyte,
+    off_t offset,
+    iovec_iter_t* iter,
+    struct identity* identity,
+    ssize_t* out_read
+);
 
 errno_t file_mmap(
     struct file* file,
@@ -105,6 +112,7 @@ struct inode_attr {
 };
 
 struct inode {
+    size_t refcount;
     const struct inode_ops* ops;
     struct inode_attr attr;
 };

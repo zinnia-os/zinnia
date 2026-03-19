@@ -7,4 +7,4 @@ struct identity {
     gid_t gid, egid, sgid;
 };
 
-extern const struct identity kernel_identity;
+extern struct identity kernel_identity;
