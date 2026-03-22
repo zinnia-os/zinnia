@@ -1,6 +1,6 @@
 # Expected machine state after `_start`
 
-Upon entry in `main()`, Menix expects the following machine state:
+Upon entry in `main()`, Zinnia expects the following machine state:
 
 ## System state
 - Interrupts should be turned off.
@@ -24,5 +24,3 @@ This means that for KASLR, the highest address for `LD_KERNEL_END` can be `0xfff
 Additionally, there should be an HHDM mapping from physical address `0` up until the highest usable memory address.
 The virtual start address depends on the paging mode used, e.g. on 48-bit paging, the base address should be
 `0xffff_8000_0000_0000` or higher and it should encompass all usable physical memory.
-
-Menix' memory manager ignores all memory below 2^16 bytes.
