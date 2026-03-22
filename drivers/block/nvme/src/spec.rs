@@ -1,10 +1,10 @@
 #![allow(unused)]
 
-use menix::static_assert;
+use zinnia::static_assert;
 
 /// Submission queue entry.
 pub mod sq_entry {
-    use menix::memory::{Field, Register};
+    use zinnia::memory::{Field, Register};
 
     pub const SIZE: usize = 0x40;
 
@@ -36,7 +36,7 @@ pub mod sq_entry {
     pub const CDW15: Register<u32> = Register::new(60).with_le();
 
     pub mod create_cq {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         pub const OPCODE: u8 = 0x05;
 
@@ -54,7 +54,7 @@ pub mod sq_entry {
     }
 
     pub mod create_sq {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         pub const OPCODE: u8 = 0x01;
 
@@ -72,7 +72,7 @@ pub mod sq_entry {
     }
 
     pub mod identify {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// Controller Identifier
         pub const CNTID: Field<u32, u16> = Field::new_bits(super::CDW10, 16..=31);
@@ -81,7 +81,7 @@ pub mod sq_entry {
     }
 
     pub mod rw {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// Starting LBA Lower Bits
         pub const SLBA_LOW: Field<u32, u32> = Field::new_bits(super::CDW10, 0..=31);
@@ -100,7 +100,7 @@ pub mod sq_entry {
 }
 
 pub mod cq_entry {
-    use menix::memory::{Field, Register};
+    use zinnia::memory::{Field, Register};
 
     pub const SIZE: usize = 0x10;
 
@@ -118,13 +118,13 @@ pub mod cq_entry {
 }
 
 pub mod regs {
-    use menix::memory::Register;
+    use zinnia::memory::Register;
 
     /// Controller Capabilities
     pub const CAP: Register<u64> = Register::new(0x00).with_le();
 
     pub mod cap {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// Memory Page Size Maximum
         pub const MPSMAX: Field<u64, u8> = Field::new_bits(super::CAP, 52..=55);
@@ -152,7 +152,7 @@ pub mod regs {
     pub const VS: Register<u32> = Register::new(0x08).with_le();
 
     pub mod vs {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// Major Version Number
         pub const MJR: Field<u32, u16> = Field::new_bits(super::VS, 16..=31);
@@ -171,7 +171,7 @@ pub mod regs {
     pub const CC: Register<u32> = Register::new(0x14).with_le();
 
     pub mod cc {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// I/O Completion Queue Entry Size
         pub const IOCQES: Field<u32, u8> = Field::new_bits(super::CC, 20..=23);
@@ -193,7 +193,7 @@ pub mod regs {
     pub const CSTS: Register<u32> = Register::new(0x1C).with_le();
 
     pub mod csts {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// Processing Paused
         pub const PP: Field<u32, u8> = Field::new_bits(super::CSTS, 5..=5);
@@ -211,7 +211,7 @@ pub mod regs {
     pub const AQA: Register<u32> = Register::new(0x24).with_le();
 
     pub mod aqa {
-        use menix::memory::Field;
+        use zinnia::memory::Field;
 
         /// Admin Completion Queue Size
         pub const ACQS: Field<u32, u16> = Field::new_bits(super::AQA, 0..=11);

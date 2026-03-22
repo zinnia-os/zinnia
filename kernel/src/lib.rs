@@ -68,7 +68,7 @@ pub fn init() -> ! {
     }
 
     CpuData::get().scheduler.do_yield();
-    unreachable!("The scheduler got back to menix::init?");
+    unreachable!("The scheduler got back to zinnia::init?");
 }
 
 static INIT: Once<Arc<Process>> = Once::new();
@@ -76,7 +76,7 @@ static INIT: Once<Arc<Process>> = Once::new();
 /// The high-level kernel entry point.
 pub extern "C" fn main(_: usize, _: usize) {
     // Say hello to the console.
-    log!("Menix {}", env!("CARGO_PKG_VERSION"));
+    log!("Zinnia {}", env!("CARGO_PKG_VERSION"));
     log!("Command line: {}", BootInfo::get().command_line.inner());
 
     // Load all initramfs files.

@@ -1,5 +1,5 @@
 use crate::{command::ReadWriteCommand, controller::Controller};
-use menix::{
+use zinnia::{
     alloc::sync::Arc,
     device::BlockDevice,
     log,

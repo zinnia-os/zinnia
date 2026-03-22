@@ -8,4 +8,4 @@ build = "../../build.rs"
 crate-type = ["dylib"]
 
 [dependencies]
-menix = { workspace = true }
+zinnia = { workspace = true }

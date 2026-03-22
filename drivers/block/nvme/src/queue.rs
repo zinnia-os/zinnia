@@ -3,7 +3,7 @@ use crate::{
     error::NvmeError,
     spec::{self, CompletionEntry, CompletionStatus},
 };
-use menix::{
+use zinnia::{
     alloc::sync::Arc,
     log,
     memory::{

@@ -1,7 +1,7 @@
 #![no_std]
 
 use crate::device::VirtioGpuDevice;
-use menix::{
+use zinnia::{
     alloc::sync::Arc,
     arch,
     device::drm::DrmFile,
@@ -68,7 +68,7 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
     // Initialize DRM objects (CRTCs, encoders, connectors)
     gpu_device.initialize_drm_objects(&drm_file)?;
 
-    menix::device::drm::register(drm_file)?;
+    zinnia::device::drm::register(drm_file)?;
 
     Ok(())
 }
@@ -104,7 +104,7 @@ static DRIVER: Driver = Driver {
     variants: &[PciVariant::new().vendor(0x1AF4).device(0x1050)],
 };
 
-menix::module!("VirtIO GPU driver", "Marvin Friedrich", main);
+zinnia::module!("VirtIO GPU driver", "Marvin Friedrich", main);
 
 pub fn main() {
     match DRIVER.register() {

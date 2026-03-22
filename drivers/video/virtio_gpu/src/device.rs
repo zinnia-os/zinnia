@@ -1,10 +1,10 @@
 use core::any::Any;
 
 use crate::spec::*;
-use menix::alloc::vec;
-use menix::device::drm::DeviceState;
-use menix::uapi::drm::drm_mode_connector_type;
-use menix::{
+use zinnia::alloc::vec;
+use zinnia::device::drm::DeviceState;
+use zinnia::uapi::drm::drm_mode_connector_type;
+use zinnia::{
     alloc::{sync::Arc, vec::Vec},
     arch,
     core::sync::atomic::{AtomicU32, Ordering},
@@ -371,7 +371,7 @@ impl VirtioGpuDevice {
                 typ: 0,
                 name: {
                     let mut name = [0u8; 32];
-                    let mode_name = menix::alloc::format!("{}x{}", scanout.width, scanout.height);
+                    let mode_name = zinnia::alloc::format!("{}x{}", scanout.width, scanout.height);
                     let bytes = mode_name.as_bytes();
                     let len = bytes.len().min(31);
                     name[..len].copy_from_slice(&bytes[..len]);
@@ -556,7 +556,7 @@ pub struct VirtioGpuBuffer {
     height: u32,
 }
 
-impl menix::memory::MemoryObject for VirtioGpuBuffer {
+impl zinnia::memory::MemoryObject for VirtioGpuBuffer {
     fn try_get_page(&self, page_index: usize) -> Option<PhysAddr> {
         const PAGE_SIZE: usize = 4096;
         let offset = page_index * PAGE_SIZE;

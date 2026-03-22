@@ -6,7 +6,7 @@ use crate::{
     spec::{self},
 };
 use core::{cmp::min, slice, sync::atomic::AtomicU32};
-use menix::{
+use zinnia::{
     alloc::{
         string::{String, ToString},
         sync::Arc,
@@ -62,7 +62,7 @@ impl Controller {
         // Check if our host page size is supported.
         let mps_max = 1usize << (cap.read_field(spec::regs::cap::MPSMAX).value() + 12);
         let mps_min = 1usize << (cap.read_field(spec::regs::cap::MPSMIN).value() + 12);
-        let page_size = menix::arch::virt::get_page_size();
+        let page_size = zinnia::arch::virt::get_page_size();
         if mps_min > page_size && mps_max < page_size {
             error!("Host page size is not supported on this NVMe!");
             return Err(NvmeError::UnsupportedPageSize);

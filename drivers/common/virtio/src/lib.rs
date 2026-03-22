@@ -1,6 +1,6 @@
 #![no_std]
 
-use menix::{
+use zinnia::{
     core::sync::atomic::{self, Ordering},
     log,
     memory::{MmioView, PhysAddr, Register, UnsafeMemoryView},
@@ -22,7 +22,7 @@ pub const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 pub const VIRTIO_PCI_CAP_PCI_CFG: u8 = 5;
 
 mod common_cfg {
-    use menix::memory::Register;
+    use zinnia::memory::Register;
 
     pub const DEVICE_FEATURE_SELECT: Register<u32> = Register::new(0x00).with_le();
     pub const DEVICE_FEATURE: Register<u32> = Register::new(0x04).with_le();
@@ -43,7 +43,7 @@ mod common_cfg {
 }
 
 mod virtq_desc {
-    use menix::memory::Register;
+    use zinnia::memory::Register;
 
     pub const SIZE: usize = 16;
     pub const ADDR: Register<u64> = Register::new(0x00).with_le();
@@ -53,7 +53,7 @@ mod virtq_desc {
 }
 
 mod virtq_avail {
-    use menix::memory::Register;
+    use zinnia::memory::Register;
 
     pub const FLAGS: Register<u16> = Register::new(0x00).with_le();
     pub const IDX: Register<u16> = Register::new(0x02).with_le();
@@ -61,7 +61,7 @@ mod virtq_avail {
 }
 
 mod virtq_used {
-    use menix::memory::Register;
+    use zinnia::memory::Register;
 
     pub const FLAGS: Register<u16> = Register::new(0x00).with_le();
     pub const IDX: Register<u16> = Register::new(0x02).with_le();
@@ -69,7 +69,7 @@ mod virtq_used {
 }
 
 mod virtq_used_elem {
-    use menix::memory::Register;
+    use zinnia::memory::Register;
 
     pub const SIZE: usize = 8;
     pub const ID: Register<u32> = Register::new(0x00).with_le();
@@ -543,7 +543,7 @@ impl VirtioDevice {
             size
         );
         if size > max_size || max_size == 0 {
-            menix::error!(
+            zinnia::error!(
                 "Invalid queue size for queue {}: max={}, requested={}",
                 queue_idx,
                 max_size,

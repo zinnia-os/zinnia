@@ -3,7 +3,7 @@ use crate::{
     queue::Queue,
     spec::{self},
 };
-use menix::memory::{BitValue, PhysAddr, UnsafeMemoryView};
+use zinnia::memory::{BitValue, PhysAddr, UnsafeMemoryView};
 
 pub trait Command {
     unsafe fn write_command(&self, view: &impl UnsafeMemoryView) -> Result<(), NvmeError>;

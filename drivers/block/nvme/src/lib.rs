@@ -2,7 +2,7 @@
 
 use crate::controller::Controller;
 use core::sync::atomic::AtomicUsize;
-use menix::{
+use zinnia::{
     alloc::format,
     core::sync::atomic::Ordering,
     error, log,
@@ -91,4 +91,4 @@ fn main() {
     _ = DRIVER.register();
 }
 
-menix::module!("NVMe block devices", "Marvin Friedrich", main);
+zinnia::module!("NVMe block devices", "Marvin Friedrich", main);

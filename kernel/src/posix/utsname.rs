@@ -1,9 +1,9 @@
 use crate::{uapi::utsname::utsname, util::mutex::spin::SpinMutex};
 
-const SYSNAME: &[u8] = b"Menix";
+const SYSNAME: &[u8] = b"Zinnia";
 const NODENAME: &[u8] = b"localhost";
 const RELEASE: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
-const VERSION: &[u8] = b"Menix is not Minix";
+const VERSION: &[u8] = b"DEFAULT";
 const DOMAINNAME: &[u8] = b"(none)";
 
 #[cfg(target_arch = "x86_64")]

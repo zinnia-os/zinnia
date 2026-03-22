@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.dependencies]
-menix = { path = "kernel" }
+zinnia = { path = "kernel" }
 
 [profile.dev]
 panic = "abort"

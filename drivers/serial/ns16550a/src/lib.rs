@@ -1,13 +1,13 @@
 #![no_std]
 
-use menix::{
+use zinnia::{
     alloc::string::String,
     log,
     posix::errno::EResult,
     system::dt::{Node, driver::Driver},
 };
 
-menix::module!("NS16550a serial driver", "Marvin Friedrich", main);
+zinnia::module!("NS16550a serial driver", "Marvin Friedrich", main);
 
 static DRIVER: Driver = Driver {
     name: "ns16550a",
@@ -24,6 +24,6 @@ fn probe(node: &Node) -> EResult<()> {
 pub fn main() {
     match DRIVER.register() {
         Ok(_) => (),
-        Err(e) => menix::error!("Unable to load driver: {:?}", e),
+        Err(e) => zinnia::error!("Unable to load driver: {:?}", e),
     }
 }

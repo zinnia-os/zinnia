@@ -290,8 +290,8 @@ pub fn load(data: &[u8]) -> EResult<()> {
                 .to_str()
                 .unwrap()
         })
-        // "menix.kso" is the kernel itself. We don't actually have to load that :)
-        .filter(|x| *x != "menix.kso")
+        // "zinnia.kso" is the kernel itself. We don't actually have to load that :)
+        .filter(|x| *x != "zinnia.kso")
         .collect::<Vec<_>>();
 
     // TODO: Load dependencies
