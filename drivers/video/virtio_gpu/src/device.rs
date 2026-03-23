@@ -1,6 +1,6 @@
-use core::any::Any;
-
 use crate::spec::*;
+use core::any::Any;
+use virtio::{VirtQueue, VirtioDevice};
 use zinnia::alloc::vec;
 use zinnia::device::drm::DeviceState;
 use zinnia::uapi::drm::drm_mode_connector_type;
@@ -18,7 +18,7 @@ use zinnia::{
     uapi::drm::{drm_mode_connector_state, drm_mode_modeinfo},
     util::mutex::spin::SpinMutex,
 };
-use virtio::{VirtQueue, VirtioDevice};
+
 pub struct VirtioGpuDevice {
     state: DeviceState,
     virtio: SpinMutex<VirtioDevice>,

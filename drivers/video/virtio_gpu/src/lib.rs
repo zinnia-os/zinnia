@@ -1,6 +1,7 @@
 #![no_std]
 
 use crate::device::VirtioGpuDevice;
+use virtio::{VirtQueue, VirtioDevice};
 use zinnia::{
     alloc::sync::Arc,
     arch,
@@ -11,7 +12,6 @@ use zinnia::{
     system::pci::{DeviceView, Driver, PciVariant},
     util::mutex::spin::SpinMutex,
 };
-use virtio::{VirtQueue, VirtioDevice};
 
 mod device;
 mod spec;
