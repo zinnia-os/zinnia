@@ -1,7 +1,7 @@
 use crate::{command::ReadWriteCommand, controller::Controller};
 use zinnia::{
     alloc::sync::Arc,
-    device::BlockDevice,
+    device::block::BlockDevice,
     log,
     memory::{PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
