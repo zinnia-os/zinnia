@@ -13,3 +13,4 @@ rustflags = [
 	"-C",
 	"metadata=",
 ]
+linker = "ld.lld"
