@@ -36,7 +36,7 @@ pub struct CpuData {
 impl CpuData {
     /// Gets the data for the current CPU.
     pub fn get() -> &'static CpuData {
-        return unsafe { arch::core::get_per_cpu().as_ref().unwrap() };
+        return unsafe { arch::cpu::get_per_cpu().as_ref().unwrap() };
     }
 
     /// Gets the data for a specified CPU.

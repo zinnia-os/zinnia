@@ -3,7 +3,7 @@ use ::core::sync::atomic::AtomicBool;
 
 mod asm;
 mod consts;
-pub mod core;
+pub mod cpu;
 pub mod irq;
 pub mod sched;
 pub mod system;

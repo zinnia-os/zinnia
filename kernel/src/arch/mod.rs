@@ -21,7 +21,7 @@ mod internal {
     pub use super::riscv64::*;
 }
 
-pub mod core;
+pub mod cpu;
 pub mod irq;
 pub mod sched;
 pub mod virt;

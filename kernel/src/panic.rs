@@ -32,7 +32,7 @@ macro_rules! log_panic {
 #[panic_handler]
 fn panic_handler(info: &PanicInfo) -> ! {
     unsafe { arch::irq::set_irq_state(false) };
-    arch::core::halt_others();
+    arch::cpu::halt_others();
     unsafe { GLOBAL_LOGGERS.force_unlock() };
 
     // We write directly to the loggers because something might've happened to the timers.
@@ -71,7 +71,7 @@ fn panic_handler(info: &PanicInfo) -> ! {
         log_panic!("----------");
         log_panic!("Stack trace (most recent call first):");
 
-        let mut fp = arch::core::get_frame_pointer() as *const StackFrame;
+        let mut fp = arch::cpu::get_frame_pointer() as *const StackFrame;
         let kernel_map = PageTable::get_kernel();
 
         while kernel_map.is_mapped(VirtAddr::from(fp)) {
@@ -100,5 +100,5 @@ fn panic_handler(info: &PanicInfo) -> ! {
     log_panic!("----------");
     log_panic!("End of panic message");
 
-    arch::core::halt();
+    arch::cpu::halt();
 }

@@ -2,7 +2,7 @@ use super::{consts, sched::Context};
 use crate::{
     arch::x86_64::{
         consts::CPL_USER,
-        core::halt,
+        cpu::halt,
         system::{apic::LAPIC, gdt::Gdt},
     },
     irq::{IrqLine, lock::IrqLock},

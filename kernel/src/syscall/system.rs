@@ -9,8 +9,9 @@ use crate::{
     uapi::{self, reboot::*, time::*, utsname::*},
 };
 use alloc::string::String;
+
 pub fn archctl(cmd: usize, arg: usize) -> EResult<usize> {
-    crate::arch::core::archctl(cmd, arg)
+    crate::arch::cpu::archctl(cmd, arg)
 }
 
 pub fn getuname(mut addr: UserPtr<utsname>) -> EResult<usize> {

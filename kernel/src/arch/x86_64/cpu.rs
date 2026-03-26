@@ -18,7 +18,7 @@ use core::{
     arch::{asm, naked_asm},
     mem::offset_of,
     ptr::null_mut,
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 unsafe extern "C" {
@@ -180,7 +180,7 @@ pub(super) fn setup_core(context: &'static CpuData) {
 
     // if cpuid7.ebx & consts::CPUID_7B_SMAP != 0 {
     //     cr4 |= consts::CR4_SMAP;
-    //     cpu.can_smap.store(true, Ordering::Relaxed);
+    //     cpu._can_smap.store(true, Ordering::Relaxed);
     // }
 
     if cpuid7.ebx & consts::CPUID_7B_FSGSBASE != 0 {
@@ -199,7 +199,13 @@ pub(super) fn setup_core(context: &'static CpuData) {
     context.online.store(true, Ordering::Release);
 }
 
+pub static IS_INIT: AtomicBool = AtomicBool::new(false);
+
 pub(in crate::arch) fn halt_others() {
+    if !IS_INIT.load(Ordering::Relaxed) {
+        return;
+    }
+
     LAPIC.get().send_ipi(
         apic::IpiTarget::AllButThisCpu,
         consts::IDT_IPI_PANIC,

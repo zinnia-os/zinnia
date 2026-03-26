@@ -54,7 +54,7 @@ static mut MEMMAP_BUF: [PhysMemory; 128] = [PhysMemory::empty(); _];
 static mut FILE_BUF: [BootFile; 32] = [BootFile::new(); _];
 
 pub fn entry() -> ! {
-    crate::arch::core::setup_bsp();
+    crate::arch::cpu::setup_bsp();
 
     // Start collecting boot info.
     let mut info = BootInfo::new();

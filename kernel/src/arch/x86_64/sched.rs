@@ -2,7 +2,7 @@ use super::{
     ARCH_DATA,
     asm::{rdmsr, wrmsr},
     consts::{self},
-    core::get_per_cpu,
+    cpu::get_per_cpu,
     system::{apic, gdt::Gdt},
     system::{apic::LAPIC, gdt::TSS},
 };
