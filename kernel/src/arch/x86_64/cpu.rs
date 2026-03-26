@@ -170,18 +170,18 @@ pub(super) fn setup_core(context: &'static CpuData) {
     }
 
     // TODO
-    // if cpuid7.ecx & consts::CPUID_7C_UMIP != 0 {
-    //     cr4 |= consts::CR4_UMIP;
-    // }
+    if cpuid7.ecx & consts::CPUID_7C_UMIP != 0 {
+        cr4 |= consts::CR4_UMIP;
+    }
 
-    // if cpuid7.ebx & consts::CPUID_7B_SMEP != 0 {
-    //     cr4 |= consts::CR4_SMEP;
-    // }
+    if cpuid7.ebx & consts::CPUID_7B_SMEP != 0 {
+        cr4 |= consts::CR4_SMEP;
+    }
 
-    // if cpuid7.ebx & consts::CPUID_7B_SMAP != 0 {
-    //     cr4 |= consts::CR4_SMAP;
-    //     cpu._can_smap.store(true, Ordering::Relaxed);
-    // }
+    unsafe { cpu.can_smap.init(cpuid7.ebx & consts::CPUID_7B_SMAP != 0) };
+    if *cpu.can_smap.get() {
+        cr4 |= consts::CR4_SMAP;
+    }
 
     if cpuid7.ebx & consts::CPUID_7B_FSGSBASE != 0 {
         cr4 |= consts::CR4_FSGSBASE;

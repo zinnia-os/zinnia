@@ -1,5 +1,5 @@
 use crate::memory::{
-    PhysAddr, VirtAddr,
+    PhysAddr, UserAccessRegion, VirtAddr,
     virt::{PteFlags, mmu::PageTable},
 };
 use bitflags::bitflags;
@@ -136,4 +136,43 @@ pub(in crate::arch) fn get_pfndb_base() -> VirtAddr {
 
 pub(in crate::arch) fn get_map_base() -> VirtAddr {
     VirtAddr::new(0xFFFF_C000_0000_0000)
+}
+
+pub(in crate::arch) fn is_user_addr(addr: VirtAddr) -> bool {
+    addr.value() < 0x0000_8000_0000_0000
+}
+
+pub(in crate::arch) unsafe extern "C" fn copy_from_user(
+    dest: *mut u8,
+    src: VirtAddr,
+    len: usize,
+    context: *mut *mut UserAccessRegion,
+) -> bool {
+    let _ = (dest, src, len, context);
+    todo!()
+}
+
+pub(in crate::arch) unsafe extern "C" fn copy_to_user(
+    dest: VirtAddr,
+    src: *const u8,
+    len: usize,
+    context: *mut *mut UserAccessRegion,
+) -> bool {
+    let _ = (dest, src, len, context);
+    todo!()
+}
+
+pub(in crate::arch) unsafe extern "C" fn cstr_len_user(
+    src: VirtAddr,
+    max_len: usize,
+    count: *mut usize,
+    context: *mut *mut UserAccessRegion,
+) -> bool {
+    let _ = (src, max_len, count, context);
+    todo!()
+}
+
+pub(in crate::arch) unsafe fn set_user_access(state: bool) {
+    let _ = state;
+    todo!()
 }

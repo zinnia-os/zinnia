@@ -1,13 +1,16 @@
 use super::Process;
 use crate::{
     arch::{self},
-    {memory::virt::KERNEL_STACK_SIZE, posix::errno::EResult, util::mutex::spin::SpinMutex},
+    memory::{UserAccessRegion, virt::KERNEL_STACK_SIZE},
+    posix::errno::EResult,
+    util::mutex::spin::SpinMutex,
 };
 use alloc::sync::{Arc, Weak};
 use core::{
     alloc::Layout,
     panic,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    ptr::null_mut,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +50,8 @@ pub struct Task {
     pub ticks: usize,
     /// A value between -20 and 19, where -20 is the highest priority and 0 is a neutral priority.
     pub priority: i8,
-    pub catch_fault: AtomicBool,
+    /// Used to handle [`UserPtr`] page faults.
+    pub uar: AtomicPtr<UserAccessRegion>,
 }
 
 const STACK_LAYOUT: Layout = match Layout::from_size_align(KERNEL_STACK_SIZE, 0x1000) {
@@ -71,7 +75,7 @@ impl Task {
             id: TASK_ID_COUNTER.fetch_add(1, Ordering::Acquire),
             is_user,
             process: Arc::downgrade(parent),
-            catch_fault: AtomicBool::new(false),
+            uar: AtomicPtr::new(null_mut()),
             state: SpinMutex::new(TaskState::Ready),
             task_context: SpinMutex::new(arch::sched::TaskContext::default()),
             kernel_stack,

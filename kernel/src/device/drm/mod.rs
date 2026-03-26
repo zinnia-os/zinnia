@@ -4,7 +4,6 @@ use crate::{
     },
     memory::{AddressSpace, UserPtr, VirtAddr, VmFlags},
     posix::errno::{EResult, Errno},
-    process::{Identity, Process},
     uapi::{
         self,
         drm::{self, DRM_FORMAT_XRGB8888, drm_mode_modeinfo},
@@ -12,8 +11,9 @@ use crate::{
     },
     util::mutex::spin::SpinMutex,
     vfs::{
-        self, File,
+        File,
         file::{FileOps, MmapFlags},
+        fs::devtmpfs::register_device,
         inode::Mode,
     },
 };
@@ -594,8 +594,7 @@ impl FileOps for DrmFile {
 
                     // Enum values for plane type
                     if val.enum_blob_ptr != 0 {
-                        let enum_ptr =
-                            UserPtr::<drm::drm_mode_property_enum>::new(val.enum_blob_ptr.into());
+                        let mut enum_ptr = UserPtr::new(val.enum_blob_ptr.into());
 
                         // Type 0: Overlay
                         let mut overlay = drm::drm_mode_property_enum {
@@ -603,7 +602,7 @@ impl FileOps for DrmFile {
                             name: [0; 32],
                         };
                         overlay.name[..7].copy_from_slice(b"Overlay");
-                        enum_ptr.offset(0).write(overlay).ok_or(Errno::EFAULT)?;
+                        enum_ptr.write(overlay).ok_or(Errno::EFAULT)?;
 
                         // Type 1: Primary
                         let mut primary = drm::drm_mode_property_enum {
@@ -674,13 +673,12 @@ impl FileOps for DrmFile {
                         // For now, we only expose the "type" property for planes
                         // Property ID 1 = "type", value = plane.plane_type
                         if val.props_ptr != 0 && val.prop_values_ptr != 0 {
-                            let props_ptr = UserPtr::<u32>::new(val.props_ptr.into());
-                            let values_ptr = UserPtr::<u64>::new(val.prop_values_ptr.into());
+                            let mut props_ptr = UserPtr::<u32>::new(val.props_ptr.into());
+                            let mut values_ptr = UserPtr::<u64>::new(val.prop_values_ptr.into());
 
                             // Return the "type" property
-                            props_ptr.offset(0).write(1).ok_or(Errno::EFAULT)?; // property ID for "type"
+                            props_ptr.write(1).ok_or(Errno::EFAULT)?; // property ID for "type"
                             values_ptr
-                                .offset(0)
                                 .write(plane.plane_type as u64)
                                 .ok_or(Errno::EFAULT)?;
                             log!("  -> prop_id=1, value={}", plane.plane_type);
@@ -795,21 +793,11 @@ impl FileOps for DrmFile {
 static CARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub fn register(card: Arc<DrmFile>) -> EResult<()> {
-    let proc = Process::get_kernel();
-    let root = proc.root_dir.lock();
-    let cwd = proc.working_dir.lock();
-
-    vfs::mknod(
-        root.clone(),
-        cwd.clone(),
-        format!(
-            "/dev/drmcard{}",
-            CARD_COUNTER.fetch_add(1, Ordering::SeqCst)
-        )
-        .as_bytes(),
-        vfs::inode::NodeType::CharacterDevice,
+    log!("Registering new DRM card");
+    register_device(
+        format!("drmcard{}", CARD_COUNTER.fetch_add(1, Ordering::SeqCst)).as_bytes(),
+        card,
         Mode::from_bits_truncate(0o660),
-        Some(card),
-        Identity::get_kernel(),
+        false,
     )
 }

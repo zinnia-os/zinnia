@@ -1,9 +1,12 @@
-use crate::memory::{
-    PhysAddr, VirtAddr,
-    virt::{PteFlags, mmu::PageTable},
+use crate::{
+    arch::x86_64::ARCH_DATA,
+    memory::{
+        PhysAddr, UserAccessRegion, VirtAddr,
+        virt::{PteFlags, mmu::PageTable},
+    },
 };
 use bitflags::bitflags;
-use core::arch::asm;
+use core::arch::{asm, naked_asm};
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -124,14 +127,176 @@ pub(in crate::arch) const fn get_num_levels() -> usize {
     4
 }
 
-pub(in crate::arch) fn get_hhdm_base() -> VirtAddr {
+pub(in crate::arch) const fn get_hhdm_base() -> VirtAddr {
     VirtAddr::new(0xFFFF_8000_0000_0000)
 }
 
-pub(in crate::arch) fn get_pfndb_base() -> VirtAddr {
+pub(in crate::arch) const fn get_pfndb_base() -> VirtAddr {
     VirtAddr::new(0xFFFF_A000_0000_0000)
 }
 
-pub(in crate::arch) fn get_map_base() -> VirtAddr {
+pub(in crate::arch) const fn get_map_base() -> VirtAddr {
     VirtAddr::new(0xFFFF_C000_0000_0000)
+}
+
+pub(in crate::arch) const fn is_user_addr(addr: VirtAddr) -> bool {
+    addr.value() < 0x0000_8000_0000_0000
+}
+
+#[unsafe(naked)]
+pub(in crate::arch) unsafe extern "C" fn copy_from_user(
+    dest: *mut u8,
+    src: VirtAddr,
+    len: usize,
+    context: *mut *mut UserAccessRegion,
+) -> bool {
+    unsafe extern "C" {
+        unsafe fn copy_from_user_start();
+        unsafe fn copy_from_user_end();
+        unsafe fn copy_from_user_fault();
+    }
+
+    static READ_UAR: UserAccessRegion = UserAccessRegion {
+        start_ip: &(copy_from_user_start as _),
+        end_ip: &(copy_from_user_end as _),
+        fault_ip: &(copy_from_user_fault as _),
+    };
+
+    naked_asm!("
+        xchg rcx, rdx
+        mov rax, [rip + {uar}]
+        mov [rdx], rax
+
+    .global {start}
+    {start}:
+        rep movsb
+
+    .global {end}
+    {end}:
+        xor rax, rax
+        mov [rdx], rax
+        mov rax, 1
+        ret
+
+    .global {fault}
+    {fault}:
+        xor rax, rax
+        mov [rdx], rax
+        ret",
+        uar = sym READ_UAR,
+        start = sym copy_from_user_start,
+        end = sym copy_from_user_end,
+        fault = sym copy_from_user_fault,
+    );
+}
+
+#[unsafe(naked)]
+pub(in crate::arch) unsafe extern "C" fn copy_to_user(
+    dest: VirtAddr,
+    src: *const u8,
+    len: usize,
+    context: *mut *mut UserAccessRegion,
+) -> bool {
+    unsafe extern "C" {
+        unsafe fn copy_to_user_start();
+        unsafe fn copy_to_user_end();
+        unsafe fn copy_to_user_fault();
+    }
+
+    static WRITE_UAR: UserAccessRegion = UserAccessRegion {
+        start_ip: &(copy_to_user_start as _),
+        end_ip: &(copy_to_user_end as _),
+        fault_ip: &(copy_to_user_fault as _),
+    };
+
+    naked_asm!("
+        xchg rcx, rdx
+        mov rax, [rip + {uar}]
+        mov [rdx], rax
+
+    .global {start}
+    {start}:
+        rep movsb
+
+    .global {end}
+    {end}:
+        xor rax, rax
+        mov [rdx], rax
+        mov rax, 1
+        ret
+
+    .global {fault}
+    {fault}:
+        xor rax, rax
+        mov [rdx], rax
+        ret",
+        uar = sym WRITE_UAR,
+        start = sym copy_to_user_start,
+        end = sym copy_to_user_end,
+        fault = sym copy_to_user_fault,
+    );
+}
+
+#[unsafe(naked)]
+pub(in crate::arch) unsafe extern "C" fn cstr_len_user(
+    src: VirtAddr,
+    max_len: usize,
+    count: *mut usize,
+    context: *mut *mut UserAccessRegion,
+) -> bool {
+    unsafe extern "C" {
+        unsafe fn cstr_len_user_start();
+        unsafe fn cstr_len_user_end();
+        unsafe fn cstr_len_user_fault();
+    }
+
+    static CSTR_UAR: UserAccessRegion = UserAccessRegion {
+        start_ip: &(cstr_len_user_start as _),
+        end_ip: &(cstr_len_user_end as _),
+        fault_ip: &(cstr_len_user_fault as _),
+    };
+
+    naked_asm!("
+        mov rax, [rip + {uar}]
+        mov [rcx], rax
+
+    .global {start}
+    {start}:
+        xor r8, r8
+    .Lloop:
+        cmp byte ptr [rdi + r8], 0
+        je .Lleave
+        inc r8
+        cmp rsi, r8
+        jne .Lloop
+    .Lleave:
+        mov [rdx], r8
+
+    .global {end}
+    {end}:
+        xor rax, rax
+        mov [rcx], rax
+        mov rax, 1
+        ret
+
+    .global {fault}
+    {fault}:
+        xor rax, rax
+        mov [rcx], rax
+        ret",
+        uar = sym CSTR_UAR,
+        start = sym cstr_len_user_start,
+        end = sym cstr_len_user_end,
+        fault = sym cstr_len_user_fault,
+    );
+}
+
+pub(in crate::arch) unsafe fn set_user_access(state: bool) {
+    if *ARCH_DATA.get().can_smap.get() {
+        if state == true {
+            unsafe { asm!("stac") };
+        } else {
+            unsafe { asm!("clac") };
+        }
+    }
 }

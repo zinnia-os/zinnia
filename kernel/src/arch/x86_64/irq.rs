@@ -8,12 +8,14 @@ use crate::{
     irq::{IrqLine, lock::IrqLock},
     memory::fault::PageFaultInfo,
     percpu::CpuData,
+    sched::Scheduler,
     util::mutex::spin::SpinMutex,
 };
 use alloc::sync::Arc;
 use core::{
     arch::{asm, naked_asm},
     mem::offset_of,
+    sync::atomic::Ordering,
 };
 use seq_macro::seq;
 
@@ -232,9 +234,9 @@ per_cpu! {
 }
 
 /// Invoked by an interrupt stub.
-unsafe extern "C" fn idt_handler(context: *const Context) {
+unsafe extern "C" fn idt_handler(context: *mut Context) {
     let old = IrqLock::set_interrupted(true);
-    let context = unsafe { context.as_ref().unwrap() };
+    let context = unsafe { context.as_mut().unwrap() };
     let isr = context.isr;
 
     match isr as u8 {
@@ -273,7 +275,7 @@ unsafe extern "C" fn idt_handler(context: *const Context) {
 // /// Try to send a signal to the user-space program or panic if the interrupt is caused by the kernel.
 // fn try_signal_or_die(context: &Context, signal: u32, code: u32) {}
 
-fn page_fault_handler(context: &Context) {
+fn page_fault_handler(context: &mut Context) {
     let mut cr2: usize;
     unsafe { asm!("mov {cr2}, cr2", cr2 = out(reg) cr2) };
 
@@ -287,5 +289,9 @@ fn page_fault_handler(context: &Context) {
         addr: cr2.into(),
     };
 
-    crate::memory::virt::fault::handler(&info);
+    if !crate::memory::virt::fault::handler(&info) {
+        let task = Scheduler::get_current();
+        let uar = task.uar.load(Ordering::Relaxed);
+        context.rip = unsafe { (*uar).fault_ip } as *const _ as u64;
+    }
 }

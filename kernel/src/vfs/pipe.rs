@@ -141,7 +141,7 @@ impl FileOps for PipeBuffer {
             uapi::ioctls::FIONREAD => {
                 let len = self.inner.lock().buffer.get_data_len() as i32;
                 let mut count_ptr = UserPtr::new(argp);
-                count_ptr.write(len);
+                count_ptr.write(len).ok_or(Errno::EFAULT)?;
             }
             _ => return Err(Errno::ENOTTY),
         }

@@ -1,5 +1,4 @@
 use crate::util::once::Once;
-use ::core::sync::atomic::AtomicBool;
 
 mod asm;
 mod consts;
@@ -17,7 +16,7 @@ pub struct ArchPerCpu {
     /// Function called to restore the FPU context.
     pub fpu_restore: Once<unsafe fn(*const u8)>,
     /// If this CPU supports the STAC/CLAC instructions.
-    pub _can_smap: AtomicBool,
+    pub can_smap: Once<bool>,
 }
 
 per_cpu!(
@@ -25,6 +24,6 @@ per_cpu!(
         fpu_size: Once::new(),
         fpu_save: Once::new(),
         fpu_restore: Once::new(),
-        _can_smap: AtomicBool::new(false),
+        can_smap: Once::new(),
     };
 );

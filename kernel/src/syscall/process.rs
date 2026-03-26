@@ -115,9 +115,9 @@ pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> 
     unreachable!("fexecve should never return on success");
 }
 
-pub fn waitpid(pid: uapi::pid_t, mut stat_loc: UserPtr<i32>, _options: i32) -> EResult<usize> {
+pub fn waitpid(pid: uapi::pid_t, stat_loc: VirtAddr, _options: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-
+    let mut stat_loc: UserPtr<i32> = UserPtr::new(stat_loc);
     loop {
         let mut inner = proc.children.lock();
         if inner.is_empty() {
@@ -133,7 +133,7 @@ pub fn waitpid(pid: uapi::pid_t, mut stat_loc: UserPtr<i32>, _options: i32) -> E
                 for (idx, child) in inner.iter().enumerate() {
                     let child_inner = child.status.lock();
                     if let ProcessState::Exited(code) = *child_inner {
-                        stat_loc.write((code as i32) << 8);
+                        stat_loc.write((code as i32) << 8).ok_or(Errno::EFAULT)?;
                         waitee = Some(idx);
                     }
                 }
@@ -151,7 +151,7 @@ pub fn waitpid(pid: uapi::pid_t, mut stat_loc: UserPtr<i32>, _options: i32) -> E
 
                     let child_inner = child.status.lock();
                     if let ProcessState::Exited(code) = *child_inner {
-                        stat_loc.write((code as i32) << 8);
+                        stat_loc.write((code as i32) << 8).ok_or(Errno::EFAULT)?;
                         waitee = Some(idx);
                     }
                 }

@@ -6,7 +6,7 @@ use crate::{
     sched::Scheduler,
 };
 use alloc::sync::Arc;
-use core::num::NonZeroUsize;
+use core::{num::NonZeroUsize, sync::atomic::Ordering};
 
 /// Abstract information about a page fault.
 #[derive(Debug)]
@@ -145,7 +145,17 @@ pub fn handler_inner(info: &PageFaultInfo, space: &mut AddressSpace) {
 }
 
 /// Generic page fault handler for MMU-generated faults.
-pub fn handler(info: &PageFaultInfo) {
-    let proc = Scheduler::get_current().get_process();
+#[must_use]
+pub fn handler(info: &PageFaultInfo) -> bool {
+    let task = Scheduler::get_current();
+
+    let uar = task.uar.load(Ordering::Relaxed);
+    if !uar.is_null() {
+        return false;
+    }
+
+    let proc = task.get_process();
     handler_inner(info, &mut proc.address_space.lock());
+
+    return true;
 }

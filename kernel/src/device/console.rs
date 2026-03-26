@@ -37,7 +37,7 @@ impl FileOps for Console {
                     ws_col: 80,
                     ..Default::default()
                 })
-                .ok_or(Errno::EINVAL)?;
+                .ok_or(Errno::EFAULT)?;
             }
             _ => return Err(Errno::ENOSYS),
         }

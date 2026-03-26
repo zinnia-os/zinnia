@@ -80,6 +80,11 @@ macro_rules! addr_impl {
             pub const fn value(&self) -> usize {
                 self.0
             }
+
+            #[inline]
+            pub const fn is_null(&self) -> bool {
+                self.0 == 0
+            }
         }
 
         impl From<usize> for $ty {
