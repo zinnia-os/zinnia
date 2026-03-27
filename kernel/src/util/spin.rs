@@ -1,31 +1,33 @@
 use core::{
     hint,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 /// A spin lock without a specific resource connected to it.
-#[derive(Debug)]
-pub struct SpinLock(AtomicBool);
+pub struct SpinLock {
+    next: AtomicU32,
+    owner: AtomicU32,
+}
 
 impl SpinLock {
     pub const fn new() -> Self {
-        Self(AtomicBool::new(false))
+        Self {
+            next: AtomicU32::new(0),
+            owner: AtomicU32::new(0),
+        }
     }
 
     #[inline(always)]
     pub fn lock(&mut self) {
-        while self.0.swap(true, Ordering::Acquire) {
+        let my = self.next.fetch_add(1, Ordering::Relaxed);
+        while self.owner.load(Ordering::Acquire) != my {
             hint::spin_loop();
         }
     }
 
     #[inline(always)]
     pub fn unlock(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-
-    #[inline(always)]
-    pub fn is_locked(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        let val = self.owner.load(Ordering::Relaxed);
+        self.owner.store(val + 1, Ordering::Release);
     }
 }

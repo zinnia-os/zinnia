@@ -42,19 +42,6 @@ impl<T: ?Sized> SpinMutex<T> {
         SpinMutexGuard { parent: self }
     }
 
-    pub fn try_lock(&self) -> Option<SpinMutexGuard<'_, T>> {
-        if self.is_locked() {
-            return None;
-        } else {
-            return Some(self.lock());
-        }
-    }
-
-    pub fn is_locked(&self) -> bool {
-        let inner = unsafe { &*self.inner.get() };
-        inner.spin.is_locked()
-    }
-
     /// Forcefully unlocks this [`SpinMutex`].
     /// # Safety
     /// The caller must ensure that unlocking the mutex at this point is safe.
@@ -87,7 +74,8 @@ unsafe impl<T> Sync for SpinMutex<T> {}
 
 impl<T: ?Sized + Debug> Debug for SpinMutex<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(&self.is_locked(), f)
+        let mut s = f.debug_struct("SpinMutex");
+        s.finish()
     }
 }
 
