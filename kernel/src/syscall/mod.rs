@@ -78,8 +78,8 @@ pub fn dispatch(
         numbers::IOCTL => vfs::ioctl(a0 as _, a1, a2.into()),
         numbers::OPENAT => vfs::openat(a0 as _, a1.into(), a2).map(|x| x as _),
         numbers::CLOSE => vfs::close(a0 as _),
-        numbers::FSTAT => vfs::fstat(a0 as _, a1.into()),
-        numbers::FSTATAT => vfs::fstatat(a0 as _, a1.into(), a2.into(), a3),
+        numbers::FSTAT => vfs::fstat(a0 as _, a1.into()).map(|_| 0),
+        numbers::FSTATAT => vfs::fstatat(a0 as _, a1.into(), a2.into(), a3).map(|_| 0),
         numbers::STATVFS => sys_unimp!("statvfs", Err(Errno::ENOSYS)),
         numbers::FSTATVFS => sys_unimp!("fstatvfs", Err(Errno::ENOSYS)),
         numbers::FACCESSAT => vfs::faccessat(a0 as _, a1.into(), a2, a3).map(|_| 0),
@@ -114,7 +114,7 @@ pub fn dispatch(
         numbers::CHROOT => sys_unimp!("chroot", Err(Errno::ENOSYS)),
         numbers::MOUNT => sys_unimp!("mount", Err(Errno::ENOSYS)),
         numbers::UMOUNT => sys_unimp!("umount", Err(Errno::ENOSYS)),
-        numbers::PIPE => vfs::pipe(a0.into()),
+        numbers::PIPE => vfs::pipe(a0.into()).map(|_| 0),
 
         // Sockets
         numbers::SOCKET => sys_unimp!("socket", Err(Errno::ENOSYS)),

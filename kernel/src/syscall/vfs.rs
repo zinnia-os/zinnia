@@ -404,7 +404,6 @@ pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
     match &node.node_ops {
         NodeOps::Directory(dir_ops) => {
             // TODO: VFS Probably need a getdents callback...
-            _ = (buf, dir_ops);
         }
         _ => return Err(Errno::ENOTDIR),
     }
