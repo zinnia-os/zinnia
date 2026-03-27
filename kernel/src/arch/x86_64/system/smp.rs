@@ -380,9 +380,9 @@ fn DISCOVER_APS_STAGE() {
 )]
 fn INIT_APS_STAGE() {
     // Prepare an identity mapped page table, with the root highter half tables mapped as well.
-    let temp_table = KernelAlloc::alloc(1, AllocFlags::Kernel32 | AllocFlags::Zeroed)
+    let temp_table = KernelAlloc::alloc(1, AllocFlags::Kernel32)
         .expect("Unable to allocate a page table in 32-bit physical memory");
-    let temp_l3 = KernelAlloc::alloc(1, AllocFlags::Kernel32 | AllocFlags::Zeroed)
+    let temp_l3 = KernelAlloc::alloc(1, AllocFlags::Kernel32)
         .expect("Unable to allocate a page level in 32-bit physical memory");
 
     unsafe {

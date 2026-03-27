@@ -57,7 +57,7 @@ impl Device for PlainDevice {
 
         // Allocate physical memory for the buffer
         let buffer_addr =
-            KernelAlloc::alloc_bytes(size, AllocFlags::Zeroed).map_err(|_| Errno::ENOMEM)?;
+            KernelAlloc::alloc_bytes(size, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
 
         Ok((
             Arc::new(PlainDumbBuffer {

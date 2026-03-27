@@ -75,7 +75,7 @@ impl VirtioGpuDevice {
         let cmd_phys = VirtAddr::from(cmd_ptr).as_hhdm().ok_or(Errno::EFAULT)?;
 
         // Allocate response buffer
-        let resp_phys = KernelAlloc::alloc(1, AllocFlags::Zeroed).map_err(|_| Errno::ENOMEM)?;
+        let resp_phys = KernelAlloc::alloc(1, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
         let resp_ptr = resp_phys.as_hhdm::<R>();
 
         let buffers = vec![
@@ -175,7 +175,7 @@ impl VirtioGpuDevice {
             + pages.len() * core::mem::size_of::<VirtioGpuMemEntry>();
         let cmd_pages = cmd_size.div_ceil(page_size);
         let cmd_phys =
-            KernelAlloc::alloc(cmd_pages, AllocFlags::Zeroed).map_err(|_| Errno::ENOMEM)?;
+            KernelAlloc::alloc(cmd_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
         let cmd_ptr = cmd_phys.as_hhdm::<u8>();
 
         unsafe {
@@ -195,7 +195,7 @@ impl VirtioGpuDevice {
         }
 
         // Allocate response buffer
-        let resp_phys = KernelAlloc::alloc(1, AllocFlags::Zeroed).map_err(|_| Errno::ENOMEM)?;
+        let resp_phys = KernelAlloc::alloc(1, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
         let resp_ptr = resp_phys.as_hhdm::<VirtioGpuCtrlHdr>();
 
         let buffers = vec![
@@ -430,7 +430,7 @@ impl Device for VirtioGpuDevice {
         let num_pages = size.div_ceil(page_size);
         log!("Allocating {} pages for buffer (size={})", num_pages, size);
         let base_addr =
-            KernelAlloc::alloc(num_pages, AllocFlags::Zeroed).map_err(|_| Errno::ENOMEM)?;
+            KernelAlloc::alloc(num_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
 
         let resource_id = self.alloc_resource_id();
         let format = match bpp {

@@ -162,7 +162,7 @@ impl Pager for PhysPager {
     }
 
     fn try_get_page(&self, _: usize) -> Result<PhysAddr, PagerError> {
-        KernelAlloc::alloc(1, AllocFlags::Zeroed).map_err(|_| PagerError::OutOfMemory)
+        KernelAlloc::alloc(1, AllocFlags::empty()).map_err(|_| PagerError::OutOfMemory)
     }
 
     fn try_put_page(&self, _: PhysAddr, _: usize) -> Result<(), PagerError> {

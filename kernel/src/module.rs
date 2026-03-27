@@ -154,7 +154,7 @@ pub fn load(data: &[u8]) -> EResult<()> {
                 }
 
                 // Allocate physical memory.
-                let phys = KernelAlloc::alloc_bytes(memsz, AllocFlags::Zeroed)?;
+                let phys = KernelAlloc::alloc_bytes(memsz, AllocFlags::empty())?;
 
                 let page_table = PageTable::get_kernel();
 

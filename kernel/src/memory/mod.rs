@@ -349,7 +349,7 @@ pub fn MEMORY_STAGE() {
                 table
                     .map_single::<BumpAllocator>(
                         (virt + page).into(),
-                        BumpAllocator::alloc(1, AllocFlags::Zeroed).unwrap(),
+                        BumpAllocator::alloc(1, AllocFlags::empty()).unwrap(),
                         VmFlags::Read | VmFlags::Write,
                     )
                     .unwrap();

@@ -24,7 +24,7 @@ impl PageAllocator for BumpAllocator {
             BUMP_LENGTH.store(new, Ordering::Relaxed);
             let mem = PhysAddr(BUMP_CURRENT.fetch_add(bytes, Ordering::Relaxed));
 
-            if flags.contains(AllocFlags::Zeroed) {
+            if !flags.contains(AllocFlags::NoZero) {
                 unsafe { (mem.as_hhdm() as *mut u8).write_bytes(0, bytes) };
             }
             return Ok(mem);

@@ -47,12 +47,12 @@ impl Queue {
         let sq_size = ((depth << 6) + align - 1) & !(align - 1);
         let cq_size = ((depth * (size_of::<CompletionEntry>())) + align - 1) & !(align - 1);
         // Allocate memory the completion queue.
-        let cq_addr = KernelAlloc::alloc_bytes(cq_size as _, AllocFlags::Zeroed)
+        let cq_addr = KernelAlloc::alloc_bytes(cq_size as _, AllocFlags::empty())
             .map_err(|_| NvmeError::AllocationFailed)?;
         let cq_view = unsafe { MmioView::new(cq_addr, cq_size as _) };
 
         // Allocate memory for the submission queue.
-        let sq_addr = KernelAlloc::alloc_bytes(sq_size as _, AllocFlags::Zeroed)
+        let sq_addr = KernelAlloc::alloc_bytes(sq_size as _, AllocFlags::empty())
             .map_err(|_| NvmeError::AllocationFailed)?;
         let sq_view = unsafe { MmioView::new(sq_addr, sq_size as _) };
 

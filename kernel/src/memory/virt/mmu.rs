@@ -27,7 +27,7 @@ impl PageTable {
     /// Creates a new page table for a user process.
     pub fn new_user<P: PageAllocator>(flags: AllocFlags) -> Self {
         // We need to have the higher half mapped in every user map for this to work.
-        let user_l1 = P::alloc(1, flags | AllocFlags::Zeroed).unwrap();
+        let user_l1 = P::alloc(1, flags).unwrap();
         unsafe {
             let user_l1_slice: &mut [u8] =
                 slice::from_raw_parts_mut(user_l1.as_hhdm(), arch::virt::get_page_size());
@@ -47,7 +47,7 @@ impl PageTable {
     /// Creates a new page table for a kernel process.
     pub fn new_kernel<P: PageAllocator>(root_level: usize, flags: AllocFlags) -> Self {
         Self {
-            head: SpinMutex::new(P::alloc(1, flags | AllocFlags::Zeroed).unwrap()),
+            head: SpinMutex::new(P::alloc(1, flags).unwrap()),
             root_level,
             is_user: false,
         }
@@ -153,7 +153,7 @@ impl PageTable {
                     }
 
                     // Allocate a new level.
-                    let next_head = P::alloc(1, AllocFlags::Zeroed)
+                    let next_head = P::alloc(1, AllocFlags::empty())
                         .map_err(|_| PageTableError::OutOfMemory)?
                         .as_hhdm();
 

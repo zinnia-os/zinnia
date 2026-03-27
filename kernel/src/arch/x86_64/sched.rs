@@ -216,7 +216,7 @@ pub(in crate::arch) fn init_task(
 
         if is_user {
             context.fpu_region =
-                KernelAlloc::alloc_bytes(*cpu.fpu_size.get(), AllocFlags::Zeroed)?.as_hhdm();
+                KernelAlloc::alloc_bytes(*cpu.fpu_size.get(), AllocFlags::empty())?.as_hhdm();
             cpu.fpu_save.get()(context.fpu_region);
 
             context.ds = super::asm::read_ds();

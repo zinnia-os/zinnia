@@ -22,8 +22,8 @@ bitflags! {
         const Kernel20 = 1 << 0;
         /// Only consider physical memory below 4GiB.
         const Kernel32 = 1 << 1;
-        /// Allocated memory has to be initialized to zero.
-        const Zeroed = 1 << 2;
+        /// Do not initialize allocated memory to zero.
+        const NoZero = 1 << 2;
     }
 }
 
@@ -123,7 +123,7 @@ impl PageAllocator for KernelAlloc {
 
         match addr {
             Some(x) => {
-                if flags.contains(AllocFlags::Zeroed) {
+                if !flags.contains(AllocFlags::NoZero) {
                     unsafe { write_bytes(addr.unwrap().as_hhdm() as *mut u8, 0, bytes) };
                 }
                 Ok(x)

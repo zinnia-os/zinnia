@@ -141,7 +141,7 @@ pub(crate) fn allocate_cpu() -> EResult<&'static CpuData> {
     let percpu_size = &raw const LD_PERCPU_END as usize - &raw const LD_PERCPU_START as usize;
     let percpu_new = &raw const LD_PERCPU_START as usize + (percpu_size * id);
 
-    let phys = memory::pmm::KernelAlloc::alloc_bytes(percpu_size, AllocFlags::Zeroed)
+    let phys = memory::pmm::KernelAlloc::alloc_bytes(percpu_size, AllocFlags::empty())
         .map_err(|_| Errno::ENOMEM)?;
 
     PageTable::get_kernel()
