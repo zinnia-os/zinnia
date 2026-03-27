@@ -2,7 +2,7 @@ use super::uio::iovec;
 use crate::memory::UserPtr;
 
 pub type socklen_t = u32;
-pub type sa_family_t = u32;
+pub type sa_family_t = u16;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -36,7 +36,11 @@ pub struct cmsghdr {
 pub struct sockaddr_storage {
     pub s_family: sa_family_t,
     padding: [u8; 128 - size_of::<sa_family_t>() - size_of::<usize>()],
+    alignment: usize,
 }
+
+static_assert!(size_of::<sockaddr_storage>() == 128);
+static_assert!(align_of::<sockaddr_storage>() == size_of::<usize>());
 
 #[repr(C)]
 #[derive(Clone, Copy)]

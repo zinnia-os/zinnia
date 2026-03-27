@@ -129,9 +129,7 @@ pub fn dispatch(
         numbers::GETSOCKOPT => sys_unimp!("getsockopt", Err(Errno::ENOSYS)),
         numbers::SETSOCKOPT => sys_unimp!("setsockopt", Err(Errno::ENOSYS)),
         numbers::SENDMSG => sys_unimp!("sendmsg", Err(Errno::ENOSYS)),
-        numbers::SENDTO => sys_unimp!("sendto", Err(Errno::ENOSYS)),
         numbers::RECVMSG => sys_unimp!("recvmsg", Err(Errno::ENOSYS)),
-        numbers::RECVFROM => sys_unimp!("recvfrom", Err(Errno::ENOSYS)),
 
         // Identity
         numbers::GETGROUPS => sys_unimp!("getgroups", Ok(0)),
