@@ -56,6 +56,7 @@ struct FbCon {
 /// # Safety
 /// Pointers are managed by flanterm
 unsafe impl Send for FbCon {}
+unsafe impl Sync for FbCon {}
 
 impl FbCon {
     pub fn new(fb: FrameBuffer) -> Self {

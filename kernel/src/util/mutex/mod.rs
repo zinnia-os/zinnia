@@ -34,7 +34,7 @@ pub struct MutexGuard<'m, T: ?Sized> {
 
 impl<T> Debug for Mutex<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Mutex").field("locked", &self.flag).finish()
+        f.debug_struct("Mutex").finish()
     }
 }
 

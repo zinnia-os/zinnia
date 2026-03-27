@@ -123,7 +123,11 @@ pub extern "C" fn main(_: usize, _: usize) {
         let console = File::open(
             init_proc.root_dir.lock().clone(),
             init_proc.working_dir.lock().clone(),
-            b"/dev/fbcon",
+            BootInfo::get()
+                .command_line
+                .get_string("console")
+                .unwrap_or("/dev/console")
+                .as_bytes(),
             OpenFlags::ReadWrite,
             Mode::empty(),
             Identity::get_kernel(),

@@ -216,7 +216,7 @@ pub(in crate::arch) fn halt_others() {
         apic::TriggerMode::Edge,
     );
 
-    clock::block_ns(10000).unwrap();
+    clock::block_ns(10000000).unwrap();
 }
 
 pub(in crate::arch) fn halt() -> ! {

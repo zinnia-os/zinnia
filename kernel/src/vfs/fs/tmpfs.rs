@@ -1,27 +1,23 @@
-#![allow(unused)]
-
 use super::{MountFlags, SuperBlock};
 use crate::{
     arch,
-    memory::{AddressSpace, PagedMemoryObject, PhysAddr, VirtAddr, VmFlags, cache::MemoryObject},
+    memory::{AddressSpace, PagedMemoryObject, VirtAddr, VmFlags, cache::MemoryObject},
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, statvfs::statvfs},
-    util::mutex::{Mutex, spin::SpinMutex},
+    util::mutex::spin::SpinMutex,
     vfs::{
         PathNode,
         cache::Entry,
-        file::{File, FileOps, MmapFlags, OpenFlags, SeekAnchor},
+        file::{File, FileOps, MmapFlags, OpenFlags},
         fs::{FileSystem, Mount},
         inode::{DirectoryOps, INode, Mode, NodeOps, NodeType, RegularOps, SymlinkOps},
     },
 };
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
-    any::Any,
     num::NonZeroUsize,
-    slice,
-    sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[derive(Debug)]
@@ -37,19 +33,18 @@ impl FileSystem for TmpFs {
             inode_counter: AtomicUsize::new(0),
         })?;
 
-        let dir = Arc::new(TmpDir);
-        let root_inode = super_block.clone().create_inode(
-            NodeOps::Directory(dir.clone()),
-            dir,
-            Mode::from_bits_truncate(0o755),
-        )?;
+        let dir = Arc::new(TmpDir::default());
 
-        Ok(Arc::try_new(Mount {
-            flags,
-            super_block,
-            root: Arc::try_new(Entry::new(b"", Some(root_inode), None))?,
-            mount_point: SpinMutex::default(),
-        })?)
+        let root_entry = Arc::new(Entry::new(
+            b"",
+            Some(super_block.clone().create_inode(
+                NodeOps::Directory(dir.clone()),
+                Mode::from_bits_truncate(0o755),
+            )?),
+            None,
+        ));
+
+        Ok(Arc::new(Mount::new(flags, root_entry)))
     }
 }
 
@@ -68,17 +63,11 @@ impl SuperBlock for TmpSuper {
         todo!()
     }
 
-    fn create_inode(
-        self: Arc<Self>,
-        node_ops: NodeOps,
-        file_ops: Arc<dyn FileOps>,
-        mode: Mode,
-    ) -> EResult<Arc<INode>> {
+    fn create_inode(self: Arc<Self>, node_ops: NodeOps, mode: Mode) -> EResult<Arc<INode>> {
         Ok(Arc::try_new(INode {
             id: self.inode_counter.fetch_add(1, Ordering::Acquire),
             node_ops,
-            file_ops,
-            sb: self,
+            sb: Some(self),
             mode: SpinMutex::new(mode),
             atime: SpinMutex::default(),
             mtime: SpinMutex::default(),
@@ -89,15 +78,15 @@ impl SuperBlock for TmpSuper {
         })?)
     }
 
-    fn destroy_inode(self: Arc<Self>, inode: INode) -> EResult<()> {
+    fn destroy_inode(self: Arc<Self>, _inode: INode) -> EResult<()> {
         match Arc::into_inner(self) {
-            Some(x) => Ok(()),
+            Some(_) => Ok(()),
             None => Err(Errno::EBUSY),
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct TmpDir;
 
 impl DirectoryOps for TmpDir {
@@ -111,24 +100,31 @@ impl DirectoryOps for TmpDir {
         node: &Arc<INode>,
         path: PathNode,
         flags: OpenFlags,
-        identity: &Identity,
+        _identity: &Identity,
     ) -> EResult<Arc<File>> {
         let file = File {
             path: Some(path),
-            ops: node.file_ops.clone(),
+            ops: node.file_ops(),
             inode: Some(node.clone()),
-            flags: Mutex::new(flags),
-            offset: Mutex::new(0),
+            flags: SpinMutex::new(flags),
+            offset: SpinMutex::new(0),
         };
         return Ok(Arc::try_new(file)?);
     }
 
-    fn link(&self, node: &Arc<INode>, path: &PathNode, target: &Arc<INode>) -> EResult<()> {
+    fn link(
+        &self,
+        _node: &Arc<INode>,
+        path: &PathNode,
+        target: &Arc<INode>,
+        _identity: &Identity,
+    ) -> EResult<()> {
         path.entry.set_inode(target.clone());
         Ok(())
     }
 
-    fn unlink(&self, node: &Arc<INode>, entry: &PathNode) -> EResult<()> {
+    fn unlink(&self, node: &Arc<INode>, entry: &PathNode, identity: &Identity) -> EResult<()> {
+        let _ = (node, entry, identity);
         todo!()
     }
 
@@ -138,7 +134,9 @@ impl DirectoryOps for TmpDir {
         entry: PathNode,
         target: &Arc<INode>,
         target_entry: PathNode,
+        identity: &Identity,
     ) -> EResult<()> {
+        let _ = (node, entry, target, target_entry, identity);
         todo!()
     }
 
@@ -151,41 +149,52 @@ impl DirectoryOps for TmpDir {
     ) -> EResult<()> {
         let _ = identity; // TODO
         let reg = Arc::new(TmpSymlink::default());
-        let node_ops = NodeOps::SymbolicLink(reg.clone());
 
-        let sym_inode =
-            node.sb
-                .clone()
-                .create_inode(node_ops, reg.clone(), Mode::from_bits_truncate(0o777))?;
+        let sym_inode = node.sb.clone().unwrap().create_inode(
+            NodeOps::SymbolicLink(reg.clone()),
+            Mode::from_bits_truncate(0o777),
+        )?;
 
         *reg.target.lock() = target_path.to_vec();
         *sym_inode.size.lock() = target_path.len();
-        path.entry.set_inode(sym_inode);
+        path.entry.set_inode(sym_inode.clone());
         Ok(())
     }
 
-    fn create(&self, self_node: &Arc<INode>, entry: Arc<Entry>, mode: Mode) -> EResult<()> {
-        let mut children = entry.children.lock();
+    fn create(
+        &self,
+        self_node: &Arc<INode>,
+        entry: Arc<Entry>,
+        mode: Mode,
+        _identity: &Identity,
+    ) -> EResult<()> {
         let new_file = Arc::new(TmpRegular::new());
-        let new_node = self_node.sb.clone().create_inode(
-            NodeOps::Regular(new_file.clone()),
-            new_file,
-            mode,
-        )?;
-        entry.set_inode(new_node);
+        let new_node = self_node
+            .sb
+            .clone()
+            .unwrap()
+            .create_inode(NodeOps::Regular(new_file), mode)?;
+        entry.set_inode(new_node.clone());
         Ok(())
     }
 
-    fn mkdir(&self, self_node: &Arc<INode>, entry: Arc<Entry>, mode: Mode) -> EResult<Arc<Entry>> {
-        let mut children = entry.children.lock();
-        let new_dir = Arc::new(TmpDir);
-        let new_dir_node = self_node.sb.clone().create_inode(
-            NodeOps::Directory(new_dir.clone()),
-            new_dir,
-            mode,
-        )?;
-        entry.set_inode(new_dir_node);
-        Ok(entry.clone()) // TODO: This is wrong. Return the child entry instead.
+    fn mkdir(
+        &self,
+        self_node: &Arc<INode>,
+        path: PathNode,
+        mode: Mode,
+        _identity: &Identity,
+    ) -> EResult<()> {
+        let result_dir = Arc::new(TmpDir);
+        let result_inode = self_node
+            .sb
+            .clone()
+            .unwrap()
+            .create_inode(NodeOps::Directory(result_dir.clone()), mode)?;
+
+        path.entry.set_inode(result_inode.clone());
+
+        Ok(())
     }
 
     fn mknod(
@@ -194,15 +203,15 @@ impl DirectoryOps for TmpDir {
         node_type: NodeType,
         mode: Mode,
         dev: Option<Arc<dyn FileOps>>,
+        _identity: &Identity,
     ) -> EResult<Arc<INode>> {
         let new_node = dev.ok_or(Errno::ENODEV)?;
-        self_node.sb.clone().create_inode(
+        self_node.sb.clone().unwrap().create_inode(
             match node_type {
-                NodeType::BlockDevice => NodeOps::BlockDevice,
-                NodeType::CharacterDevice => NodeOps::CharacterDevice,
+                NodeType::BlockDevice => NodeOps::BlockDevice(new_node),
+                NodeType::CharacterDevice => NodeOps::CharacterDevice(new_node),
                 _ => return Err(Errno::ENODEV),
             },
-            new_node,
             mode,
         )
     }
@@ -214,7 +223,7 @@ struct TmpSymlink {
 }
 
 impl SymlinkOps for TmpSymlink {
-    fn read_link(&self, node: &INode, buf: &mut [u8]) -> EResult<u64> {
+    fn read_link(&self, _node: &INode, buf: &mut [u8]) -> EResult<u64> {
         let target = self.target.lock();
         let copy_size = buf.len().min(target.len());
         buf[0..copy_size].copy_from_slice(&target[0..copy_size]);
@@ -241,6 +250,7 @@ impl TmpRegular {
 
 impl RegularOps for TmpRegular {
     fn truncate(&self, node: &INode, length: u64) -> EResult<()> {
+        let _ = (node, length);
         todo!()
     }
 }
@@ -273,7 +283,7 @@ impl FileOps for TmpRegular {
 
     fn mmap(
         &self,
-        file: &File,
+        _file: &File,
         space: &mut AddressSpace,
         addr: VirtAddr,
         len: NonZeroUsize,

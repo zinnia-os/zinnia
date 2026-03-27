@@ -21,8 +21,9 @@ impl FileSystem for DevTmpFs {
         b"devtmpfs"
     }
 
-    fn mount(&self, _: Option<Arc<Entry>>, _: MountFlags) -> EResult<Arc<super::Mount>> {
-        Ok(DEV_MOUNT.get().clone())
+    fn mount(&self, _: Option<Arc<Entry>>, flags: MountFlags) -> EResult<Arc<Mount>> {
+        let mount = DEV_MOUNT.get();
+        Ok(Arc::new(Mount::new(flags, mount.root.clone())))
     }
 }
 
@@ -47,9 +48,11 @@ pub fn register_device(
     mode: Mode,
     is_block: bool,
 ) -> EResult<()> {
+    let mount = DEV_MOUNT.get();
+
     let parent = PathNode {
-        mount: DEV_MOUNT.get().clone(),
-        entry: DEV_MOUNT.get().root.clone(),
+        mount: mount.clone(),
+        entry: mount.root.clone(),
     };
 
     vfs::mknod(

@@ -97,13 +97,15 @@ pub fn dispatch(
         numbers::RMDIRAT => sys_unimp!("rmdirat", Err(Errno::ENOSYS)),
         numbers::GETDENTS => vfs::getdents(a0 as _, a1.into(), a2),
         numbers::RENAMEAT => sys_unimp!("renameat", Err(Errno::ENOSYS)),
-        numbers::FCHMOD => sys_unimp!("fchmod", Err(Errno::ENOSYS)),
+        numbers::FCHMOD => sys_unimp!("fchmod", Ok(0)),
         numbers::FCHMODAT => sys_unimp!("fchmodat", Err(Errno::ENOSYS)),
         numbers::FCHOWNAT => sys_unimp!("fchownat", Err(Errno::ENOSYS)),
         numbers::LINKAT => vfs::linkat(a0 as _, a1.into(), a2 as _, a3.into(), a4 as _).map(|_| 0),
         numbers::SYMLINKAT => sys_unimp!("symlinkat", Err(Errno::ENOSYS)),
         numbers::UNLINKAT => vfs::unlinkat(a0 as _, a1.into(), a2).map(|_| 0),
-        numbers::READLINKAT => sys_unimp!("readlinkat", Err(Errno::ENOSYS)),
+        numbers::READLINKAT => {
+            vfs::readlinkat(a0 as _, a1.into(), a2.into(), a3 as _).map(|x| x as _)
+        }
         numbers::FLOCK => sys_unimp!("flock", Err(Errno::ENOSYS)),
         numbers::PPOLL => vfs::ppoll(a0.into(), a1, a2.into(), a3.into()),
         numbers::DUP => vfs::dup(a0 as _).map(|x| x as _),

@@ -9,6 +9,7 @@ use crate::{
     module,
     posix::errno::{EResult, Errno},
     process::Identity,
+    uapi::time::timespec,
     util::{self},
     vfs::{
         self, PathNode,
@@ -63,7 +64,12 @@ fn oct2bin(str: &[u8]) -> usize {
 }
 
 /// Creates all directories in the given path and opens the last one. Also returns the final file name.
-pub fn create_dirs(root: PathNode, at: PathNode, path: &[u8]) -> EResult<(PathNode, &[u8])> {
+pub fn create_dirs<'a>(
+    root: PathNode,
+    at: PathNode,
+    path: &'a [u8],
+    mode: Mode,
+) -> EResult<(PathNode, &'a [u8])> {
     let mut current = at;
 
     // If there is a path to split off, do that. If there isn't, there are no directories to create.
@@ -77,7 +83,7 @@ pub fn create_dirs(root: PathNode, at: PathNode, path: &[u8]) -> EResult<(PathNo
             root.clone(),
             current.clone(),
             component,
-            Mode::from_bits_truncate(0o755),
+            mode.clone(),
             Identity::get_kernel(),
         ) && e != Errno::EEXIST
         {
@@ -113,8 +119,9 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
             break;
         }
 
-        let file_mode = oct2bin(&current_file.mode);
+        let file_mode = Mode::from_bits_truncate(oct2bin(&current_file.mode) as _);
         let file_size = oct2bin(&current_file.size);
+        let mtime = oct2bin(&current_file.mtime);
 
         let file_name = match name_override {
             Some(x) => {
@@ -129,17 +136,27 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
 
         match current_file.typ {
             REGULAR | NORMAL | CONTIGOUS => {
-                let (dir, file_name) = create_dirs(root.clone(), target.clone(), file_name)?;
+                let (dir, file_name) =
+                    create_dirs(root.clone(), target.clone(), file_name, file_mode.clone())?;
                 let file = File::open(
                     root.clone(),
                     dir,
                     file_name,
                     OpenFlags::Create,
-                    Mode::from_bits_truncate(file_mode as u32),
+                    file_mode,
                     Identity::get_kernel(),
                 )?;
                 file.pwrite(&data[offset + 512..][..file_size], 0)?;
                 files_loaded += 1;
+
+                let time = timespec {
+                    tv_sec: (mtime / 1000000) as _,
+                    tv_nsec: mtime as _,
+                };
+                file.inode
+                    .as_ref()
+                    .unwrap()
+                    .update_time(Some(time), Some(time), Some(time));
 
                 if BootInfo::get()
                     .command_line
@@ -151,7 +168,8 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
                 }
             }
             SYM_LINK => {
-                let (dir, file_name) = create_dirs(root.clone(), target.clone(), file_name)?;
+                let (dir, file_name) =
+                    create_dirs(root.clone(), target.clone(), file_name, file_mode)?;
                 let link_len = current_file
                     .linkname
                     .iter()
@@ -167,8 +185,9 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
                 files_loaded += 1;
             }
             DIRECTORY => {
-                let (dir, file_name) = create_dirs(root.clone(), target.clone(), file_name)?;
-                create_dirs(root.clone(), dir.clone(), file_name)?;
+                let (dir, file_name) =
+                    create_dirs(root.clone(), target.clone(), file_name, file_mode.clone())?;
+                create_dirs(root.clone(), dir.clone(), file_name, file_mode)?;
                 files_loaded += 1;
             }
             LONG_LINK => {

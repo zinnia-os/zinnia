@@ -4,7 +4,7 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi,
-    util::mutex::Mutex,
+    util::mutex::spin::SpinMutex,
     vfs::{
         cache::{LookupFlags, PathNode},
         inode::{Mode, NodeOps},
@@ -77,24 +77,23 @@ pub struct File {
     /// The opened inode.
     pub inode: Option<Arc<INode>>,
     /// File open flags.
-    pub flags: Mutex<OpenFlags>,
+    pub flags: SpinMutex<OpenFlags>,
     /// Byte offset into the file.
-    pub offset: Mutex<u64>,
+    pub offset: SpinMutex<u64>,
 }
 
-impl Debug for File {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("File")
-            .field("path", &self.path)
-            .field("flags", &self.flags)
-            .finish()
-    }
-}
-
-#[derive(Debug)]
 pub struct FileDescription {
     pub file: Arc<File>,
     pub close_on_exec: AtomicBool,
+}
+
+impl FileDescription {
+    pub fn new(file: Arc<File>) -> Self {
+        Self {
+            file,
+            close_on_exec: AtomicBool::new(false),
+        }
+    }
 }
 
 impl Clone for FileDescription {
@@ -109,7 +108,7 @@ impl Clone for FileDescription {
 /// Operations that can be performed on a file. Every trait function has a
 /// generic implementation, which treats it as unimplemented.
 /// Inputs have been sanitized when these functions are called.
-pub trait FileOps {
+pub trait FileOps: Sync + Send {
     /// Called when the file is being opened.
     fn acquire(&self, file: &File, flags: OpenFlags) -> EResult<()> {
         let _ = (file, flags);
@@ -195,7 +194,7 @@ impl File {
             lookup_flags |= LookupFlags::FollowSymlinks;
         }
 
-        let file_path = PathNode::lookup(root, cwd, path, identity, lookup_flags)?;
+        let file_path = PathNode::lookup(root.clone(), cwd, path, identity, lookup_flags)?;
         match file_path.entry.get_inode() {
             Some(x) => Self::do_open_inode(file_path, &x, flags, identity),
             None => {
@@ -213,7 +212,15 @@ impl File {
                 parent.try_access(identity, flags, false)?;
 
                 match &parent.node_ops {
-                    NodeOps::Directory(x) => x.create(&parent, file_path.entry.clone(), mode)?,
+                    NodeOps::Directory(x) => {
+                        x.create(&parent, file_path.entry.clone(), mode, identity)?;
+                        file_path
+                            .lookup_parent()?
+                            .entry
+                            .children
+                            .lock()
+                            .insert(file_path.entry.name.clone(), file_path.entry.clone())
+                    }
                     _ => return Err(Errno::ENOTDIR),
                 };
 
@@ -222,10 +229,10 @@ impl File {
 
                 let result = File {
                     path: Some(file_path.clone()),
-                    ops: file_node.file_ops.clone(),
+                    ops: file_node.file_ops(),
                     inode: Some(file_node),
-                    flags: Mutex::new(flags),
-                    offset: Mutex::new(0),
+                    flags: SpinMutex::new(flags),
+                    offset: SpinMutex::new(0),
                 };
                 result.ops.acquire(&result, flags)?;
                 Ok(Arc::try_new(result)?)
@@ -238,8 +245,8 @@ impl File {
             path: None,
             ops,
             inode: None,
-            flags: Mutex::new(flags),
-            offset: Mutex::new(0),
+            flags: SpinMutex::new(flags),
+            offset: SpinMutex::new(0),
         };
 
         file.ops.acquire(&file, flags)?;
@@ -262,38 +269,38 @@ impl File {
 
         inode.try_access(identity, flags, false)?;
         let file = match &inode.node_ops {
-            NodeOps::Regular(_) => {
+            NodeOps::Regular(x) => {
                 let result = File {
                     path: Some(file_path),
-                    ops: inode.file_ops.clone(),
+                    ops: x.clone(),
                     inode: Some(inode.clone()),
-                    flags: Mutex::new(flags),
-                    offset: Mutex::new(0),
+                    flags: SpinMutex::new(flags),
+                    offset: SpinMutex::new(0),
                 };
                 Arc::try_new(result)?
             }
             NodeOps::Directory(dir) => dir.open(inode, file_path, flags, identity)?,
-            NodeOps::BlockDevice => {
+            NodeOps::BlockDevice(x) => {
                 let result = File {
                     path: Some(file_path),
-                    ops: inode.file_ops.clone(),
+                    ops: x.clone(),
                     inode: Some(inode.clone()),
-                    flags: Mutex::new(flags),
-                    offset: Mutex::new(0),
+                    flags: SpinMutex::new(flags),
+                    offset: SpinMutex::new(0),
                 };
                 Arc::try_new(result)?
             }
-            NodeOps::CharacterDevice => {
+            NodeOps::CharacterDevice(x) => {
                 let result = File {
                     path: Some(file_path),
-                    ops: inode.file_ops.clone(),
+                    ops: x.clone(),
                     inode: Some(inode.clone()),
-                    flags: Mutex::new(flags),
-                    offset: Mutex::new(0),
+                    flags: SpinMutex::new(flags),
+                    offset: SpinMutex::new(0),
                 };
                 Arc::try_new(result)?
             }
-            NodeOps::FIFO => todo!(),
+            NodeOps::FIFO(_) => todo!(),
             NodeOps::SymbolicLink(_) => return Err(Errno::ELOOP),
             // Doesn't make sense to call open() on anything else.
             _ => return Err(Errno::ENOTSUP),
@@ -359,7 +366,7 @@ impl File {
         let mut position = self.offset.lock();
 
         match self.inode.as_ref().ok_or(Errno::ESPIPE)?.node_ops {
-            NodeOps::CharacterDevice | NodeOps::Socket | NodeOps::FIFO => {
+            NodeOps::CharacterDevice(_) | NodeOps::Socket(_) | NodeOps::FIFO(_) => {
                 return Err(Errno::ESPIPE);
             }
             _ => (),

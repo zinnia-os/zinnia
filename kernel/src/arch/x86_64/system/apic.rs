@@ -335,7 +335,7 @@ impl IoApic {
             if let Some((cpu, idx)) = slot {
                 system::acpi::GLOBAL_IRQS.lock().insert(
                     gsi_base + i,
-                    Box::new(IoApicLine {
+                    SpinMutex::new(Box::new(IoApicLine {
                         state: IrqLineState::new(),
                         ioapic: ioapic.clone(),
                         index: i,
@@ -343,7 +343,7 @@ impl IoApic {
                         vector: idx as u8,
                         level_triggered: AtomicBool::new(false),
                         active_low: AtomicBool::new(false),
-                    }),
+                    })),
                 );
             }
         }

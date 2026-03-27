@@ -61,13 +61,23 @@ pub struct Page {
     pub count: usize,
 }
 
+unsafe impl Send for Page {}
+unsafe impl Sync for Page {}
+
 // If this assert fails, the PFNDB can't properly allocate data.
 static_assert!(0x1000 % size_of::<Page>() == 0);
 
 pub static PAGE_DB: SpinMutex<&'static mut [Page]> = SpinMutex::new(&mut []);
 pub static PAGE_DB_START: AtomicPtr<()> = AtomicPtr::new(null_mut());
 
-pub static PMM: SpinMutex<Option<NonNull<Page>>> = SpinMutex::new(None);
+struct Pmm {
+    head: Option<NonNull<Page>>,
+}
+
+unsafe impl Send for Pmm {}
+unsafe impl Sync for Pmm {}
+
+static PMM: SpinMutex<Pmm> = SpinMutex::new(Pmm { head: None });
 
 pub struct KernelAlloc;
 impl PageAllocator for KernelAlloc {
@@ -84,8 +94,8 @@ impl PageAllocator for KernelAlloc {
         };
 
         let mut addr = None;
-        let mut it = *head;
-        let mut prev_it = None;
+        let mut it = head.head;
+        let mut prev_it: Option<NonNull<Page>> = None;
         while let Some(mut x) = it {
             let page = unsafe { x.as_mut() };
 
@@ -107,7 +117,7 @@ impl PageAllocator for KernelAlloc {
                     let prev_page = unsafe { prev.as_mut() };
                     prev_page.next = page.next;
                 } else {
-                    *head = page.next;
+                    head.head = page.next;
                 }
                 page.next = None;
                 page.count = 0;
@@ -146,8 +156,8 @@ impl PageAllocator for KernelAlloc {
         debug_assert!(page.next.is_none());
 
         page.count = pages;
-        page.next = *head;
-        *head = NonNull::new(page);
+        page.next = head.head;
+        head.head = NonNull::new(page);
     }
 }
 
@@ -189,8 +199,8 @@ pub fn init(memory_map: &[PhysMemory], pages: (*mut Page, usize)) {
         let mut page_db = PAGE_DB.lock();
         let page = page_db.get_mut(Page::idx_from_addr(entry.address)).unwrap();
         page.count = entry.length / arch::virt::get_page_size();
-        page.next = *pmm;
-        *pmm = NonNull::new(page);
+        page.next = pmm.head;
+        pmm.head = NonNull::new(page);
 
         total_memory += entry.length;
     }

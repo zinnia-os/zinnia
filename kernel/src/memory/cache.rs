@@ -11,7 +11,7 @@ use crate::{
 use alloc::{collections::btree_map::BTreeMap, sync::Arc};
 use core::{fmt::Debug, num::NonZeroUsize, slice};
 
-pub trait MemoryObject {
+pub trait MemoryObject: Sync + Send {
     /// Attempts to get the physical address of a page with a relative index into this object.
     /// Returns [`None`] if the page is out of bounds for this object.
     fn try_get_page(&self, page_index: usize) -> Option<PhysAddr>;
@@ -134,7 +134,7 @@ impl Drop for PagedMemoryObject {
 
 /// Used to get new data for a memory object.
 // TODO: Vectorized IO.
-pub trait Pager: Debug {
+pub trait Pager: Sync + Send + Debug {
     /// Checks to see if the pager has data at the given offset.
     fn has_page(&self, page_index: usize) -> bool;
     /// Attempts to get a page at an index.

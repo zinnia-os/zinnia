@@ -32,7 +32,7 @@ pub struct ExecInfo {
 }
 
 /// An executable format.
-pub trait ExecFormat: Debug {
+pub trait ExecFormat: Sync + Send + Debug {
     /// Identifies whether a file is a valid executable of this format.
     fn identify(&self, file: &File) -> bool;
 

@@ -22,7 +22,8 @@ struct StackFrame {
 macro_rules! log_panic {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        let mut writer = GLOBAL_LOGGERS.lock();
+        #[allow(unused)]
+        let writer = unsafe { GLOBAL_LOGGERS.raw_inner().as_mut().unwrap() };
         _ = writer.write_fmt(format_args!("[    !!!!    ] \x1b[31m"));
         _ = writer.write_fmt(format_args!($($arg)*));
         _ = writer.write_fmt(format_args!("\x1b[0m\n"));
@@ -33,7 +34,6 @@ macro_rules! log_panic {
 fn panic_handler(info: &PanicInfo) -> ! {
     unsafe { arch::irq::set_irq_state(false) };
     arch::cpu::halt_others();
-    unsafe { GLOBAL_LOGGERS.force_unlock() };
 
     // We write directly to the loggers because something might've happened to the timers.
     log_panic!(
@@ -47,7 +47,7 @@ fn panic_handler(info: &PanicInfo) -> ! {
 
     {
         log_panic!("----------");
-        let modules = super::module::MODULE_TABLE.lock();
+        let modules = unsafe { super::module::MODULE_TABLE.raw_inner().as_mut().unwrap() };
         log_panic!("{} linked module(s):", modules.len());
         for (name, module) in modules.iter() {
             log_panic!(
@@ -64,9 +64,7 @@ fn panic_handler(info: &PanicInfo) -> ! {
 
     // Do a stack trace.
     unsafe {
-        super::module::SYMBOL_TABLE.force_unlock();
-
-        let table = &*super::module::SYMBOL_TABLE.lock();
+        let table = super::module::SYMBOL_TABLE.raw_inner().as_mut().unwrap();
 
         log_panic!("----------");
         log_panic!("Stack trace (most recent call first):");

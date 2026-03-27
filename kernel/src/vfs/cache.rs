@@ -29,8 +29,7 @@ pub struct Entry {
     /// The parent of this [`Entry`].
     /// A [`None`] value indicates that this entry is a root.
     pub parent: Option<Arc<Entry>>,
-    /// If the [`Self::present`] is set to `true`,
-    /// then this contains a map of all children of this entry.
+    /// Contains a map of all children of this entry.
     pub children: SpinMutex<BTreeMap<Vec<u8>, Arc<Entry>>>,
     /// A list of mounts on this entry.
     pub mounts: SpinMutex<Vec<Arc<Mount>>>,
@@ -76,13 +75,23 @@ impl Debug for Entry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct PathNode {
     pub mount: Arc<Mount>,
     pub entry: Arc<Entry>,
 }
 
 impl PathNode {
+    pub fn mount(&self, mount: Arc<Mount>) -> EResult<()> {
+        self.entry.mounts.lock().push(mount.clone());
+
+        *mount.mount_point.lock() = Some(PathNode {
+            mount: self.mount.clone(),
+            entry: self.entry.clone(),
+        });
+        Ok(())
+    }
+
     pub fn lookup(
         root: Self,
         start: Self,
@@ -175,6 +184,17 @@ impl PathNode {
             return Err(Errno::ENOTDIR);
         };
 
+        if name == b"." {
+            return Ok(self);
+        }
+
+        if name == b".." {
+            return match self.lookup_parent() {
+                Err(e) if e == Errno::ENOENT => Ok(self),
+                x => x,
+            };
+        }
+
         let child = PathNode {
             mount,
             entry: Arc::try_new(Entry {
@@ -259,7 +279,7 @@ impl PathNode {
         let mut current = self;
 
         loop {
-            let root = match &*current.mount.mount_point.lock() {
+            let root = match current.mount.mount_point.lock().as_ref() {
                 Some(x) => x.clone(),
                 None => break,
             };

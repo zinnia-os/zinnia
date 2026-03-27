@@ -45,11 +45,11 @@ impl SignalSet {
         Self { inner: 0 }
     }
 
-    pub fn set_signal(&mut self, idx: usize, state: bool) {
+    pub fn set_signal(&mut self, idx: Signal, state: bool) {
         if state {
-            self.inner |= 1 << idx;
+            self.inner |= 1 << idx as u32;
         } else {
-            self.inner &= !(1 << idx);
+            self.inner &= !(1 << idx as u32);
         }
     }
 }

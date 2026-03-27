@@ -220,7 +220,7 @@ impl Process {
 }
 
 #[repr(transparent)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FdTable {
     inner: BTreeMap<i32, FileDescription>,
 }

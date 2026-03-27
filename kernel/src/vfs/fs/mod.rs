@@ -10,7 +10,6 @@ use crate::{
     vfs::{
         PathNode,
         cache::Entry,
-        file::FileOps,
         inode::{Mode, NodeOps},
     },
 };
@@ -21,13 +20,22 @@ use core::fmt::Debug;
 #[derive(Debug)]
 pub struct Mount {
     pub flags: MountFlags,
-    pub super_block: Arc<dyn SuperBlock>,
     pub root: Arc<Entry>,
     pub mount_point: SpinMutex<Option<PathNode>>,
 }
 
+impl Mount {
+    pub fn new(flags: MountFlags, root: Arc<Entry>) -> Mount {
+        Self {
+            flags,
+            root,
+            mount_point: SpinMutex::new(None),
+        }
+    }
+}
+
 bitflags::bitflags! {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct MountFlags: u32 {
         const ReadOnly = MNT_RDONLY;
         const NoSetUid = MNT_NOSUID;
@@ -39,7 +47,7 @@ bitflags::bitflags! {
     }
 }
 
-pub trait FileSystem: Debug {
+pub trait FileSystem: Sync + Send + Debug {
     /// Returns an identifier which can be used to determine this file system.
     fn get_name(&self) -> &'static [u8];
 
@@ -51,7 +59,7 @@ pub trait FileSystem: Debug {
 
 /// A super block is the control structure of a file system instance.
 /// It manages inodes.
-pub trait SuperBlock: Debug {
+pub trait SuperBlock: Sync + Send {
     /// Synchronizes the entire file system.
     fn sync(self: Arc<Self>) -> EResult<()>;
 
@@ -60,12 +68,7 @@ pub trait SuperBlock: Debug {
 
     /// Allocates a new inode on this super block.
     /// If `node_type` is a character or block device, a `device` must also be passed.
-    fn create_inode(
-        self: Arc<Self>,
-        node_ops: NodeOps,
-        file_ops: Arc<dyn FileOps>,
-        mode: Mode,
-    ) -> EResult<Arc<INode>>;
+    fn create_inode(self: Arc<Self>, node_ops: NodeOps, mode: Mode) -> EResult<Arc<INode>>;
 
     /// Deletes the inode.
     fn destroy_inode(self: Arc<Self>, inode: INode) -> EResult<()>;
@@ -89,5 +92,8 @@ pub fn register_fs(fs: &'static dyn FileSystem) {
 pub fn mount(source: Option<Arc<Entry>>, fs_name: &[u8], flags: MountFlags) -> EResult<Arc<Mount>> {
     let table = FS_TABLE.lock();
     let fs = table.get(fs_name).ok_or(Errno::ENODEV)?;
-    fs.mount(source, flags)
+
+    let mount = fs.mount(source, flags)?;
+
+    Ok(mount)
 }

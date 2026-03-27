@@ -1,6 +1,7 @@
 // We don't want to use the bump allocator anywhere after initial setup.
 mod bump;
 pub mod cache;
+pub mod iovec;
 pub mod pmm;
 pub mod slab;
 pub mod user;
@@ -8,6 +9,7 @@ pub mod view;
 pub mod virt;
 
 pub use cache::*;
+pub use iovec::*;
 pub use pmm::*;
 pub use slab::*;
 pub use user::*;

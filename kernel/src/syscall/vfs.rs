@@ -4,6 +4,7 @@ use crate::{
     posix::errno::{EResult, Errno},
     sched::Scheduler,
     uapi::{
+        dirent::dirent,
         fcntl::*,
         limits::PATH_MAX,
         mode_t,
@@ -227,10 +228,10 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
                     NodeOps::Regular(_) => S_IFREG,
                     NodeOps::Directory(_) => S_IFDIR,
                     NodeOps::SymbolicLink(_) => S_IFLNK,
-                    NodeOps::FIFO => S_IFIFO,
-                    NodeOps::BlockDevice => S_IFBLK,
-                    NodeOps::CharacterDevice => S_IFCHR,
-                    NodeOps::Socket => S_IFSOCK,
+                    NodeOps::FIFO(_) => S_IFIFO,
+                    NodeOps::BlockDevice(_) => S_IFBLK,
+                    NodeOps::CharacterDevice(_) => S_IFCHR,
+                    NodeOps::Socket(_) => S_IFSOCK,
                 },
             st_nlink: Arc::strong_count(inode) as _,
             st_uid: *inode.uid.lock(),
@@ -397,18 +398,25 @@ pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
     let flags = *dir.flags.lock();
     if !flags.contains(OpenFlags::Read | OpenFlags::Directory) {
         return Err(Errno::EBADF);
-    }
+    };
 
-    // fd must be a directory.
-    let node = dir.inode.clone().ok_or(Errno::EBADF)?;
-    match &node.node_ops {
-        NodeOps::Directory(dir_ops) => {
-            // TODO: VFS Probably need a getdents callback...
-        }
-        _ => return Err(Errno::ENOTDIR),
-    }
+    let mut buffer = vec![
+        dirent {
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
+            d_name: [0u8; _]
+        };
+        len / size_of::<dirent>()
+    ];
 
-    Ok(0) // TODO
+    let to_write = vfs::get_dir_entries(dir, &mut buffer, &proc.identity.lock())?;
+    let mut addr = UserPtr::new(addr);
+    addr.write_slice(&buffer[0..to_write])
+        .ok_or(Errno::EFAULT)?;
+
+    Ok(to_write * size_of::<dirent>())
 }
 
 pub fn fcntl(fd: i32, cmd: usize, arg: usize) -> EResult<usize> {
@@ -694,4 +702,48 @@ pub fn linkat(
     );
 
     Ok(())
+}
+
+pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> EResult<isize> {
+    if path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+    let at = if at == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(at)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EINVAL)?;
+    let node = PathNode::lookup(
+        proc.root_dir.lock().clone(),
+        at,
+        &path,
+        &proc.identity.lock(),
+        LookupFlags::MustExist,
+    )?;
+    let inode = node.entry.get_inode().ok_or(Errno::EBADF)?;
+    let ops = match &inode.node_ops {
+        NodeOps::SymbolicLink(x) => x,
+        _ => return Err(Errno::EINVAL)?,
+    };
+
+    let mut result = vec![0u8; buf_len];
+    let read = ops.read_link(&inode, &mut result)?;
+
+    let mut buf = UserPtr::new(buf);
+    buf.write_slice(&result[0..(read as usize)])
+        .ok_or(Errno::EFAULT)?;
+
+    Ok(read as _)
 }

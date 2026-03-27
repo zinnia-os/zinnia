@@ -41,17 +41,9 @@ impl<T: ?Sized> SpinMutex<T> {
         inner.spin.lock();
         SpinMutexGuard { parent: self }
     }
-
-    /// Forcefully unlocks this [`SpinMutex`].
-    /// # Safety
-    /// The caller must ensure that unlocking the mutex at this point is safe.
-    pub unsafe fn force_unlock(&self) {
-        let inner = unsafe { &mut (*self.inner.get()) };
-        inner.spin.unlock();
-    }
 }
 
-impl<T> SpinMutex<T> {
+impl<T: ?Sized> SpinMutex<T> {
     /// Returns a pointer to the contained value.
     ///
     /// # Safety
@@ -60,7 +52,9 @@ impl<T> SpinMutex<T> {
         let inner = unsafe { &mut *self.inner.get() };
         &mut inner.data
     }
+}
 
+impl<T> SpinMutex<T> {
     pub fn into_inner(self) -> T {
         let inner = unsafe { &mut *self.inner.get() };
         inner.spin.lock();
@@ -68,19 +62,17 @@ impl<T> SpinMutex<T> {
     }
 }
 
-/// # Safety
-/// We can guarantee that types encapuslated by a [`SpinMutex`] are thread safe.
-unsafe impl<T> Sync for SpinMutex<T> {}
+unsafe impl<T: ?Sized + Send> Send for SpinMutex<T> {}
+unsafe impl<T: ?Sized + Send> Sync for SpinMutex<T> {}
 
-impl<T: ?Sized + Debug> Debug for SpinMutex<T> {
+impl<T: ?Sized> Debug for SpinMutex<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut s = f.debug_struct("SpinMutex");
-        s.finish()
+        f.debug_struct("SpinMutex").finish()
     }
 }
 
 /// This struct is returned by [`SpinMutex::lock`] and is used to safely control mutex locking state.
-pub struct SpinMutexGuard<'m, T: ?Sized> {
+pub struct SpinMutexGuard<'m, T: 'm + ?Sized> {
     parent: &'m SpinMutex<T>,
 }
 
@@ -102,7 +94,7 @@ impl<T: ?Sized> DerefMut for SpinMutexGuard<'_, T> {
 impl<T: ?Sized> !Send for SpinMutexGuard<'_, T> {}
 
 /// # Safety
-/// We can guarantee that an acquired mutex context will never be accessed by two callers at the same time.
+/// We can guarantee that types encapuslated by a [`SpinMutex`] are thread safe.
 unsafe impl<T: ?Sized + Sync> Sync for SpinMutexGuard<'_, T> {}
 
 impl<T: ?Sized + Debug> Debug for SpinMutexGuard<'_, T> {
@@ -114,7 +106,7 @@ impl<T: ?Sized + Debug> Debug for SpinMutexGuard<'_, T> {
 impl<T: ?Sized> Drop for SpinMutexGuard<'_, T> {
     fn drop(&mut self) {
         unsafe {
-            self.parent.force_unlock();
+            (*self.parent.inner.get()).spin.unlock();
         }
     }
 }

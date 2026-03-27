@@ -41,7 +41,7 @@ bitflags! {
 
 pub struct IrqConfig {}
 
-pub trait IrqHandler {
+pub trait IrqHandler: Send {
     /// Handles an interrupt when it happens.
     fn raise(&mut self) -> Status;
 }
@@ -63,7 +63,7 @@ impl IrqLineState {
 }
 
 /// Represents an interrupt line of an interrupt controller.
-pub trait IrqLine {
+pub trait IrqLine: Sync + Send {
     /// Returns a reference to internal state of this line.
     fn state(&self) -> &IrqLineState;
 

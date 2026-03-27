@@ -13,7 +13,7 @@ mod uacpi;
 
 static RSDP_ADDRESS: Once<PhysAddr> = Once::new();
 
-pub static GLOBAL_IRQS: SpinMutex<BTreeMap<u32, Box<dyn IrqLine>>> =
+pub static GLOBAL_IRQS: SpinMutex<BTreeMap<u32, SpinMutex<Box<dyn IrqLine>>>> =
     SpinMutex::new(BTreeMap::new());
 
 #[initgraph::task(

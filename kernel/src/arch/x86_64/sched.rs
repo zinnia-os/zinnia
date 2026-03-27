@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use super::{
     ARCH_DATA,
     asm::{rdmsr, wrmsr},
@@ -9,11 +11,7 @@ use super::{
 use crate::{
     arch,
     irq::lock::{IrqGuard, IrqLock},
-    memory::{
-        VirtAddr,
-        pmm::{AllocFlags, KernelAlloc, PageAllocator},
-        virt::KERNEL_STACK_SIZE,
-    },
+    memory::{VirtAddr, virt::KERNEL_STACK_SIZE},
     percpu::CpuData,
     posix::errno::EResult,
     process::task::Task,
@@ -30,7 +28,7 @@ use core::{
 #[derive(Default, Debug, Clone)]
 pub struct TaskContext {
     pub rsp: u64,
-    pub fpu_region: *mut u8,
+    pub fpu_region: Box<[u8]>,
     pub ds: u16,
     pub es: u16,
     pub fs: u16,
@@ -131,7 +129,7 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task, irq_gua
         TSS.get().lock().rsp0 = (to.kernel_stack.load(Ordering::Relaxed) + KERNEL_STACK_SIZE) as _;
 
         if from.is_user() {
-            cpu.fpu_save.get()(from_context.fpu_region);
+            cpu.fpu_save.get()(from_context.fpu_region.as_mut_ptr());
             from_context.ds = super::asm::read_ds();
             from_context.es = super::asm::read_es();
             from_context.fs = super::asm::read_fs();
@@ -141,7 +139,7 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task, irq_gua
         }
 
         if to.is_user() {
-            cpu.fpu_restore.get()(to_context.fpu_region);
+            cpu.fpu_restore.get()(to_context.fpu_region.as_ptr());
             super::asm::write_ds(to_context.ds);
             super::asm::write_es(to_context.es);
             super::asm::write_fs(to_context.fs);
@@ -215,9 +213,8 @@ pub(in crate::arch) fn init_task(
         context.rsp = frame as u64;
 
         if is_user {
-            context.fpu_region =
-                KernelAlloc::alloc_bytes(*cpu.fpu_size.get(), AllocFlags::empty())?.as_hhdm();
-            cpu.fpu_save.get()(context.fpu_region);
+            context.fpu_region = vec![0u8; *cpu.fpu_size.get()].into_boxed_slice();
+            cpu.fpu_save.get()(context.fpu_region.as_mut_ptr());
 
             context.ds = super::asm::read_ds();
             context.es = super::asm::read_es();
