@@ -220,28 +220,28 @@ pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
 fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
     statbuf
         .write(stat {
-        st_dev: 0,
-        st_ino: inode.id,
-        st_mode: inode.mode.lock().bits()
-            | match inode.node_ops {
-                NodeOps::Regular(_) => S_IFREG,
-                NodeOps::Directory(_) => S_IFDIR,
-                NodeOps::SymbolicLink(_) => S_IFLNK,
-                NodeOps::FIFO => S_IFIFO,
-                NodeOps::BlockDevice => S_IFBLK,
-                NodeOps::CharacterDevice => S_IFCHR,
-                NodeOps::Socket => S_IFSOCK,
-            },
-        st_nlink: Arc::strong_count(inode) as _,
-        st_uid: *inode.uid.lock(),
-        st_gid: *inode.gid.lock(),
-        st_rdev: 0,
-        st_size: *inode.size.lock() as _,
-        st_atim: *inode.atime.lock(),
-        st_mtim: *inode.mtime.lock(),
-        st_ctim: *inode.ctime.lock(),
-        st_blksize: 0,
-        st_blocks: 0,
+            st_dev: 0,
+            st_ino: inode.id,
+            st_mode: inode.mode.lock().bits()
+                | match inode.node_ops {
+                    NodeOps::Regular(_) => S_IFREG,
+                    NodeOps::Directory(_) => S_IFDIR,
+                    NodeOps::SymbolicLink(_) => S_IFLNK,
+                    NodeOps::FIFO => S_IFIFO,
+                    NodeOps::BlockDevice => S_IFBLK,
+                    NodeOps::CharacterDevice => S_IFCHR,
+                    NodeOps::Socket => S_IFSOCK,
+                },
+            st_nlink: Arc::strong_count(inode) as _,
+            st_uid: *inode.uid.lock(),
+            st_gid: *inode.gid.lock(),
+            st_rdev: 0,
+            st_size: *inode.size.lock() as _,
+            st_atim: *inode.atime.lock(),
+            st_mtim: *inode.mtime.lock(),
+            st_ctim: *inode.ctime.lock(),
+            st_blksize: 0,
+            st_blocks: 0,
         })
         .ok_or(Errno::EFAULT)
 }
