@@ -67,6 +67,9 @@ pub fn is_user_addr(addr: VirtAddr) -> bool {
     internal::virt::is_user_addr(addr)
 }
 
+/// Enables or disables access of user memory.
+/// # Safety
+/// Leaving user accesses enabled is an error. This function should not be used directly.
 pub unsafe fn set_user_access(state: bool) {
     unsafe { internal::virt::set_user_access(state) }
 }
