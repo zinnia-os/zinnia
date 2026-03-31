@@ -7,7 +7,8 @@
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/zinnia-os/zinnia/ci.yml)
 ![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/zinnia-os/zinnia?style=flat)
 
-Zinnia is a modular 64-bit POSIX kernel written in Rust.
+Zinnia is a modular 64-bit BSD-like kernel written in Rust.
+It aims for full compatibility with POSIX 2024.
 
 > [!NOTE]
 > This repository contains only the kernel and drivers.
