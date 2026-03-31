@@ -12,7 +12,7 @@ struct ShebangFormat;
 impl ExecFormat for ShebangFormat {
     fn identify(&self, file: &File) -> bool {
         let mut buffer = [0u8; 2];
-        match file.pread(&mut buffer, 0) {
+        match file.pread_kernel(&mut buffer, 0) {
             Ok(x) => {
                 if x != buffer.len() as _ {
                     return false;
@@ -28,7 +28,7 @@ impl ExecFormat for ShebangFormat {
         let mut interp = vec![];
         for i in 0..(PATH_MAX as _) {
             let mut buf = [0u8];
-            info.executable.pread(&mut buf, i + 2)?; // Skip the #!
+            info.executable.pread_kernel(&mut buf, i + 2)?; // Skip the #!
             if buf[0] == b'\n' {
                 break;
             }

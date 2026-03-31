@@ -1,5 +1,5 @@
 use crate::{
-    memory::{VirtAddr, user::UserPtr},
+    memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     uapi,
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
@@ -72,7 +72,7 @@ impl FileOps for PipeBuffer {
         Ok(())
     }
 
-    fn read(&self, file: &File, buf: &mut [u8], _off: u64) -> EResult<isize> {
+    fn read(&self, file: &File, buf: &mut IovecIter, _off: u64) -> EResult<isize> {
         if unlikely(buf.is_empty()) {
             return Ok(0);
         }
@@ -80,7 +80,9 @@ impl FileOps for PipeBuffer {
         let read = self.rd_queue.guard();
         loop {
             let mut inner = self.inner.lock();
-            let len = inner.buffer.read(buf);
+            let mut v = vec![0u8; buf.len()];
+            let len = inner.buffer.read(&mut v);
+            buf.copy_from_slice(&v)?;
 
             // If there was at least one byte written to the pipe
             if len > 0 {
@@ -101,7 +103,7 @@ impl FileOps for PipeBuffer {
         }
     }
 
-    fn write(&self, file: &File, buf: &[u8], _off: u64) -> EResult<isize> {
+    fn write(&self, file: &File, buf: &mut IovecIter, _off: u64) -> EResult<isize> {
         if unlikely(buf.is_empty()) {
             return Ok(0);
         }
@@ -116,7 +118,9 @@ impl FileOps for PipeBuffer {
                     return Err(Errno::EPIPE);
                 }
 
-                inner.buffer.write(buf)
+                let mut v = vec![0u8; buf.len()];
+                buf.copy_to_slice(&mut v)?;
+                inner.buffer.write(&v)
             };
             if len > 0 {
                 self.rd_queue.wake_one();

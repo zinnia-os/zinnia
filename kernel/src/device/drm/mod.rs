@@ -2,7 +2,7 @@ use crate::{
     device::drm::object::{
         AtomicState, BufferObject, Connector, Crtc, Encoder, Framebuffer, ModeObject, Plane,
     },
-    memory::{AddressSpace, UserPtr, VirtAddr, VmFlags},
+    memory::{AddressSpace, IovecIter, UserPtr, VirtAddr, VmFlags},
     posix::errno::{EResult, Errno},
     uapi::{
         self,
@@ -146,7 +146,7 @@ impl DrmFile {
 }
 
 impl FileOps for DrmFile {
-    fn read(&self, _file: &File, buf: &mut [u8], _offset: u64) -> EResult<isize> {
+    fn read(&self, _file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
         let mut events = self.events.lock();
         if events.is_empty() {
             return Err(Errno::EAGAIN);
@@ -161,7 +161,7 @@ impl FileOps for DrmFile {
         };
 
         let copy_len = event_bytes.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&event_bytes[..copy_len]);
+        buf.copy_from_slice(&event_bytes[..copy_len])?;
         Ok(copy_len as isize)
     }
 

@@ -1,7 +1,7 @@
 use super::{MountFlags, SuperBlock};
 use crate::{
     arch,
-    memory::{AddressSpace, PagedMemoryObject, VirtAddr, VmFlags, cache::MemoryObject},
+    memory::{AddressSpace, IovecIter, PagedMemoryObject, VirtAddr, VmFlags, cache::MemoryObject},
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, statvfs::statvfs},
@@ -256,7 +256,7 @@ impl RegularOps for TmpRegular {
 }
 
 impl FileOps for TmpRegular {
-    fn read(&self, file: &File, buffer: &mut [u8], offset: u64) -> EResult<isize> {
+    fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
         let start = offset;
 
@@ -265,17 +265,21 @@ impl FileOps for TmpRegular {
         }
 
         let copy_size = buffer.len().min(inode.len() - start as usize);
-        let actual = (self.cache.as_ref() as &dyn MemoryObject)
-            .read(&mut buffer[0..copy_size], start as usize);
+        let mut v = vec![0u8; copy_size];
+        let actual = (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, start as usize);
+        buffer.copy_from_slice(&v)?;
 
         Ok(actual as _)
     }
 
-    fn write(&self, file: &File, buffer: &[u8], offset: u64) -> EResult<isize> {
+    fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
         let mut size_lock = inode.size.lock();
         let start = offset;
-        let actual = (self.cache.as_ref() as &dyn MemoryObject).write(buffer, start as usize);
+
+        let mut v = vec![0u8; buffer.len()];
+        buffer.copy_to_slice(&mut v)?;
+        let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, start as usize);
         *size_lock = actual;
 
         Ok(actual as _)

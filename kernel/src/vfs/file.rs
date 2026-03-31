@@ -1,6 +1,6 @@
 use super::inode::INode;
 use crate::{
-    memory::{AddressSpace, VirtAddr, VmFlags},
+    memory::{AddressSpace, IovecIter, VirtAddr, VmFlags},
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi,
@@ -123,14 +123,14 @@ pub trait FileOps: Sync + Send {
 
     /// Reads from the file into a buffer.
     /// Returns actual bytes read and the new offset.
-    fn read(&self, file: &File, buffer: &mut [u8], offset: u64) -> EResult<isize> {
+    fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         let _ = (offset, buffer, file);
         Ok(0)
     }
 
     /// Writes a buffer to the file.
     /// Returns actual bytes written.
-    fn write(&self, file: &File, buffer: &[u8], offset: u64) -> EResult<isize> {
+    fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         let _ = (offset, buffer, file);
         Ok(0)
     }
@@ -312,7 +312,7 @@ impl File {
 
     /// Reads into a buffer from a file.
     /// Returns actual bytes read.
-    pub fn read(&self, buf: &mut [u8]) -> EResult<isize> {
+    pub fn read(&self, buf: &mut IovecIter) -> EResult<isize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -326,7 +326,7 @@ impl File {
 
     /// Reads into a buffer from a file at a specified offset.
     /// Returns actual bytes read.
-    pub fn pread(&self, buf: &mut [u8], offset: u64) -> EResult<isize> {
+    pub fn pread(&self, buf: &mut IovecIter, offset: u64) -> EResult<isize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -334,9 +334,15 @@ impl File {
         self.ops.read(self, buf, offset)
     }
 
+    pub fn pread_kernel(&self, buf: &mut [u8], offset: u64) -> EResult<isize> {
+        let iovecs = [unsafe { IovecIter::iovec_from_mut_ptr(buf) }];
+        let mut iter = unsafe { IovecIter::new_kernel(&iovecs) };
+        self.pread(&mut iter, offset)
+    }
+
     /// Writes a buffer to a file.
     /// Returns actual bytes written.
-    pub fn write(&self, buf: &[u8]) -> EResult<isize> {
+    pub fn write(&self, buf: &mut IovecIter) -> EResult<isize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -350,12 +356,18 @@ impl File {
 
     /// Writes a buffer to a file at a specified offset.
     /// Returns actual bytes written.
-    pub fn pwrite(&self, buf: &[u8], offset: u64) -> EResult<isize> {
+    pub fn pwrite(&self, buf: &mut IovecIter, offset: u64) -> EResult<isize> {
         if buf.is_empty() {
             return Ok(0);
         }
 
         self.ops.write(self, buf, offset)
+    }
+
+    pub fn pwrite_kernel(&self, buf: &[u8], offset: u64) -> EResult<isize> {
+        let iovecs = [unsafe { IovecIter::iovec_from_ptr(buf) }];
+        let mut iter = unsafe { IovecIter::new_kernel(&iovecs) };
+        self.pwrite(&mut iter, offset)
     }
 
     pub fn poll(&self, mask: i16) -> EResult<i16> {

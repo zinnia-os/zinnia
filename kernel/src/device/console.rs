@@ -1,6 +1,6 @@
 use crate::{
     log::GLOBAL_LOGGERS,
-    memory::{VirtAddr, user::UserPtr},
+    memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::PROCESS_STAGE,
     uapi::{self, termios::winsize},
@@ -11,20 +11,24 @@ use crate::{
         inode::Mode,
     },
 };
-use alloc::{string::String, sync::Arc};
+use alloc::sync::Arc;
 use core::fmt::Write;
 
 #[derive(Debug)]
 struct Console;
 
 impl FileOps for Console {
-    fn read(&self, _: &File, _: &mut [u8], _: u64) -> EResult<isize> {
+    fn read(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
         Ok(0)
     }
 
-    fn write(&self, _: &File, buffer: &[u8], _: u64) -> EResult<isize> {
+    fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
         let mut writer = GLOBAL_LOGGERS.lock();
-        _ = writer.write_str(&String::from_utf8_lossy(buffer));
+        for _ in 0..buffer.len() {
+            let mut ch = [0u8];
+            buffer.copy_to_slice(&mut ch)?;
+            _ = writer.write_char(ch[0] as char);
+        }
         Ok(buffer.len() as _)
     }
 

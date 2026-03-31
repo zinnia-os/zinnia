@@ -146,7 +146,7 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
                     file_mode,
                     Identity::get_kernel(),
                 )?;
-                file.pwrite(&data[offset + 512..][..file_size], 0)?;
+                file.pwrite_kernel(&data[offset + 512..][..file_size], 0)?;
                 files_loaded += 1;
 
                 let time = timespec {

@@ -347,7 +347,7 @@ impl ElfFormat {
     ) -> EResult<ElfInfo> {
         // Read the header.
         let mut hdr_data = [0u8; size_of::<ElfHdr>()];
-        file.pread(&mut hdr_data, 0)?;
+        file.pread_kernel(&mut hdr_data, 0)?;
         let elf_hdr = bytemuck::pod_read_unaligned::<ElfHdr>(&hdr_data);
 
         // TODO: Do the rest of IDENT checks.
@@ -368,7 +368,7 @@ impl ElfFormat {
         // Iterate all PHDRs.
         for i in 0..elf_hdr.e_phnum {
             let mut phdr_data = vec![0u8; elf_hdr.e_phentsize as usize];
-            file.pread(
+            file.pread_kernel(
                 &mut phdr_data,
                 elf_hdr.e_phoff + (elf_hdr.e_phentsize as u64 * i as u64),
             )?;
@@ -426,7 +426,7 @@ impl ElfFormat {
                 }
                 PT_INTERP => {
                     let mut interp_name = vec![0u8; phdr.p_filesz as usize - 1]; // Minus the trailing NUL.
-                    file.pread(&mut interp_name, phdr.p_offset as _)?;
+                    file.pread_kernel(&mut interp_name, phdr.p_offset as _)?;
                     // Open the interpreter and save it in the info.
                     info.interpreter = Some(File::open(
                         proc.root_dir.lock().clone(),
@@ -453,7 +453,7 @@ impl ElfFormat {
 impl ExecFormat for ElfFormat {
     fn identify(&self, file: &File) -> bool {
         let mut buffer = [0u8; size_of::<ElfHdr>()];
-        match file.pread(&mut buffer, 0) {
+        match file.pread_kernel(&mut buffer, 0) {
             Ok(x) => {
                 if x != buffer.len() as _ {
                     return false;

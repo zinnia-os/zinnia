@@ -3,7 +3,7 @@
 use crate::{
     boot::BootInfo,
     memory::{
-        PhysAddr, UserPtr, VirtAddr, free, malloc,
+        IovecIter, PhysAddr, UserPtr, VirtAddr, free, malloc,
         pmm::KernelAlloc,
         virt::{VmFlags, mmu::PageTable},
     },
@@ -134,14 +134,18 @@ impl Drop for FbCon {
 }
 
 impl FileOps for FbCon {
-    fn read(&self, file: &File, buffer: &mut [u8], offset: u64) -> EResult<isize> {
+    fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         let _ = (offset, buffer, file);
         // TODO: Get multiplexed input from event devices.
         Ok(0)
     }
 
-    fn write(&self, _file: &File, buffer: &[u8], _offset: u64) -> EResult<isize> {
-        unsafe { flanterm_write(self.ctx, buffer.as_ptr() as *const c_char, buffer.len()) };
+    fn write(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
+        for _ in 0..buffer.len() {
+            let mut c = [0u8];
+            buffer.copy_to_slice(&mut c)?;
+            unsafe { flanterm_write(self.ctx, c.as_ptr() as *const c_char, c.len()) };
+        }
         Ok(buffer.len() as _)
     }
 

@@ -1,6 +1,5 @@
 use crate::{
-    arch,
-    memory::{UserCStr, VirtAddr, user::UserPtr},
+    memory::{IovecIter, UserCStr, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     sched::Scheduler,
     uapi::{
@@ -10,6 +9,7 @@ use crate::{
         mode_t,
         poll::{POLLERR, POLLNVAL, pollfd},
         stat::*,
+        uio::iovec,
     },
     vfs::{
         self, File, PathNode,
@@ -21,10 +21,7 @@ use crate::{
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-// TODO: Use IoVecList
-
-pub fn read(fd: i32, addr: VirtAddr, len: usize) -> EResult<isize> {
-    let mut user_ptr = UserPtr::new(addr);
+pub fn read(fd: i32, base: VirtAddr, len: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
         let proc_inner = proc.open_files.lock();
@@ -36,16 +33,12 @@ pub fn read(fd: i32, addr: VirtAddr, len: usize) -> EResult<isize> {
         return Err(Errno::EBADF);
     }
 
-    let mut slice = vec![0u8; len];
-    let read = file.read(&mut slice)?;
-    user_ptr
-        .write_slice(&mut (slice[0..(read as usize)]))
-        .ok_or(Errno::EFAULT)?;
-    Ok(read)
+    let iovec = &[iovec { base, len }];
+    let mut iter = IovecIter::new(iovec)?;
+    file.read(&mut iter)
 }
 
-pub fn pread(fd: i32, addr: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
-    let mut user_ptr = UserPtr::new(addr);
+pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
         let proc_inner = proc.open_files.lock();
@@ -57,15 +50,12 @@ pub fn pread(fd: i32, addr: VirtAddr, len: usize, offset: usize) -> EResult<isiz
         return Err(Errno::EBADF);
     }
 
-    let mut slice = vec![0u8; len];
-    let read = file.pread(&mut slice, offset as _)?;
-    user_ptr
-        .write_slice(&mut (slice[0..(read as usize)]))
-        .ok_or(Errno::EFAULT)?;
-    Ok(read)
+    let iovec = &[iovec { base, len }];
+    let mut iter = IovecIter::new(iovec)?;
+    file.pread(&mut iter, offset as _)
 }
 
-pub fn write(fd: i32, addr: VirtAddr, len: usize) -> EResult<isize> {
+pub fn write(fd: i32, base: VirtAddr, len: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
         let proc_inner = proc.open_files.lock();
@@ -77,12 +67,12 @@ pub fn write(fd: i32, addr: VirtAddr, len: usize) -> EResult<isize> {
         return Err(Errno::EBADF);
     }
 
-    let mut slice = vec![0u8; len];
-    arch::virt::copy_from_user(&mut slice, addr).ok_or(Errno::EFAULT)?;
-    file.write(&slice)
+    let iovec = &[iovec { base, len }];
+    let mut iter = IovecIter::new(iovec)?;
+    file.write(&mut iter)
 }
 
-pub fn pwrite(fd: i32, addr: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
+pub fn pwrite(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
         let proc_inner = proc.open_files.lock();
@@ -94,13 +84,12 @@ pub fn pwrite(fd: i32, addr: VirtAddr, len: usize, offset: usize) -> EResult<isi
         return Err(Errno::EBADF);
     }
 
-    let mut slice = vec![0u8; len];
-    arch::virt::copy_from_user(&mut slice, addr).ok_or(Errno::EFAULT)?;
-    file.pwrite(&slice, offset as _)
+    let iovec = &[iovec { base, len }];
+    let mut iter = IovecIter::new(iovec)?;
+    file.pwrite(&mut iter, offset as _)
 }
 
 pub fn openat(fd: i32, path: VirtAddr, oflag: usize /* mode */) -> EResult<i32> {
-    // TODO: This should really be using UserPtr/a CStr abstraction.
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
     }

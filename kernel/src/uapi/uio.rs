@@ -1,8 +1,8 @@
-use crate::memory::UserPtr;
+use crate::memory::VirtAddr;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct iovec {
-    pub base: UserPtr<()>,
+    pub base: VirtAddr,
     pub len: usize,
 }

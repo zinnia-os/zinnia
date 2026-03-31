@@ -1,5 +1,5 @@
 use crate::{
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
+    memory::{AllocFlags, IovecIter, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
     vfs::{File, file::FileOps},
 };
@@ -19,7 +19,7 @@ pub trait BlockDevice: FileOps {
 }
 
 impl<T: BlockDevice> FileOps for T {
-    fn read(&self, _: &File, buffer: &mut [u8], offset: u64) -> EResult<isize> {
+    fn read(&self, _: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -74,8 +74,8 @@ impl<T: BlockDevice> FileOps for T {
                 break 'a Ok(progress as isize);
             }
 
-            buffer[progress as usize..][..copy_len]
-                .copy_from_slice(&chunk_slice[start..][..copy_len]);
+            buffer.set_offset(progress as _);
+            buffer.copy_from_slice(&chunk_slice[start..][..copy_len])?;
             progress += copy_len as u64;
         };
 
@@ -84,7 +84,7 @@ impl<T: BlockDevice> FileOps for T {
         result
     }
 
-    fn write(&self, _: &File, buffer: &[u8], offset: u64) -> EResult<isize> {
+    fn write(&self, _: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -117,8 +117,8 @@ impl<T: BlockDevice> FileOps for T {
             {
                 let page_slice: &mut [u8] =
                     unsafe { slice::from_raw_parts_mut(tmp_phys.as_hhdm(), sector_size as _) };
-                page_slice[misalign as usize..][..copy_size as usize]
-                    .copy_from_slice(&buffer[progress as usize..][..copy_size as usize]);
+                buffer.set_offset(progress as _);
+                buffer.copy_to_slice(&mut page_slice[misalign as usize..][..copy_size as usize])?;
             }
 
             // Write the new LBA data.

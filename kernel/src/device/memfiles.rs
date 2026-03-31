@@ -1,4 +1,5 @@
 use crate::{
+    memory::IovecIter,
     posix::errno::{EResult, Errno},
     process::PROCESS_STAGE,
     vfs::{
@@ -14,11 +15,11 @@ use alloc::sync::Arc;
 pub struct NullFile;
 
 impl FileOps for NullFile {
-    fn read(&self, _: &File, _: &mut [u8], _: u64) -> EResult<isize> {
+    fn read(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
         Ok(0)
     }
 
-    fn write(&self, _: &File, buffer: &[u8], _: u64) -> EResult<isize> {
+    fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
         Ok(buffer.len() as _)
     }
 }
@@ -27,12 +28,12 @@ impl FileOps for NullFile {
 pub struct ZeroFile;
 
 impl FileOps for ZeroFile {
-    fn read(&self, _: &File, buffer: &mut [u8], _: u64) -> EResult<isize> {
-        buffer.fill(0);
+    fn read(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
+        buffer.fill(0)?;
         Ok(buffer.len() as _)
     }
 
-    fn write(&self, _: &File, buffer: &[u8], _: u64) -> EResult<isize> {
+    fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
         Ok(buffer.len() as _)
     }
 }
@@ -41,12 +42,12 @@ impl FileOps for ZeroFile {
 pub struct FullFile;
 
 impl FileOps for FullFile {
-    fn read(&self, _: &File, buffer: &mut [u8], _: u64) -> EResult<isize> {
-        buffer.fill(0);
+    fn read(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
+        buffer.fill(0)?;
         Ok(buffer.len() as _)
     }
 
-    fn write(&self, _: &File, _: &[u8], _: u64) -> EResult<isize> {
+    fn write(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
         Err(Errno::ENOSPC)
     }
 }
