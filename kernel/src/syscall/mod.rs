@@ -87,7 +87,6 @@ pub fn dispatch(
         numbers::FTRUNCATE => sys_unimp!("ftruncate", Err(Errno::ENOSYS)),
         numbers::FALLOCATE => sys_unimp!("fallocate", Err(Errno::ENOSYS)),
         numbers::UTIMENSAT => sys_unimp!("utimensat", Err(Errno::ENOSYS)),
-        numbers::PSELECT => vfs::pselect(a0, a1.into(), a2.into(), a3.into(), a4.into(), a5.into()),
         numbers::MKNODAT => sys_unimp!("mknodat", Err(Errno::ENOSYS)),
         numbers::READDIR => sys_unimp!("readdir", Err(Errno::ENOSYS)),
         numbers::GETCWD => vfs::getcwd(a0.into(), a1),

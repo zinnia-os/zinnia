@@ -556,20 +556,6 @@ pub fn ppoll(
     Ok(ready_count)
 }
 
-pub fn pselect(
-    nfds: usize,
-    read_fds: VirtAddr,
-    write_fds: VirtAddr,
-    except_fds: VirtAddr,
-    timeout: VirtAddr,
-    sigmask: VirtAddr,
-) -> EResult<usize> {
-    let _ = (except_fds, sigmask, timeout, write_fds, read_fds, nfds);
-    // TODO
-    warn!("pselect is a stub!");
-    Ok(0)
-}
-
 pub fn pipe(filedes: VirtAddr) -> EResult<()> {
     let mut filedes = UserPtr::<[i32; 2]>::new(filedes);
     let fds = {
