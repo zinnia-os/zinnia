@@ -5,7 +5,7 @@ use crate::{
         cpu::halt,
         system::{apic::LAPIC, gdt::Gdt},
     },
-    irq::{IrqLine, lock::IrqLock},
+    irq::{IrqLine, MsiLine, lock::IrqLock},
     memory::fault::PageFaultInfo,
     percpu::CpuData,
     sched::Scheduler,
@@ -80,6 +80,7 @@ pub unsafe extern "C" fn amd64_syscall_stub() {
         "push r15",
         "xor rbp, rbp",
         "mov rdi, rsp",               // Put the trap frame struct as first argument.
+        "sti",
         "call {syscall_handler}",     // Call syscall handler
         "cli",
         "pop r15",
@@ -237,9 +238,9 @@ per_cpu! {
 unsafe extern "C" fn idt_handler(context: *mut Context) {
     let old = IrqLock::set_interrupted(true);
     let context = unsafe { context.as_mut().unwrap() };
-    let isr = context.isr;
+    let isr = context.isr as u8;
 
-    match isr as u8 {
+    match isr {
         // Exceptions.
         consts::IDT_PF => {
             page_fault_handler(context);
@@ -294,4 +295,8 @@ fn page_fault_handler(context: &mut Context) {
         let uar = task.uar.load(Ordering::Relaxed);
         context.rip = unsafe { (*uar).fault_ip } as *const _ as u64;
     }
+}
+
+pub(in crate::arch) fn allocate_msi() -> Option<Arc<dyn MsiLine>> {
+    LAPIC.get().allocate_msi().map(|x| x as Arc<dyn MsiLine>)
 }

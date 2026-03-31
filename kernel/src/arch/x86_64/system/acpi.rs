@@ -1,13 +1,9 @@
 use super::super::asm;
-use crate::{
-    arch::x86_64::system::apic::IoApic,
-    memory::PhysAddr,
-    system::pci::{Access, Address},
-};
+use crate::system::pci::{Access, Address};
 use alloc::boxed::Box;
 use uacpi_sys::{
-    UACPI_STATUS_OK, uacpi_handle, uacpi_io_addr, uacpi_size, uacpi_status, uacpi_table,
-    uacpi_table_find_by_signature, uacpi_table_unref, uacpi_u8, uacpi_u16, uacpi_u32,
+    UACPI_STATUS_OK, uacpi_handle, uacpi_io_addr, uacpi_size, uacpi_status, uacpi_u8, uacpi_u16,
+    uacpi_u32,
 };
 
 #[unsafe(no_mangle)]
@@ -147,41 +143,4 @@ impl Access for PortIoAccess {
 )]
 fn ACPI_STAGE() {
     unsafe { crate::system::pci::ACCESS.init(vec![Box::new(PortIoAccess)]) };
-}
-
-#[initgraph::task(
-    name = "arch.x86_64.find-ioapics",
-    depends = [crate::system::acpi::INIT_STAGE],
-)]
-fn IOAPIC_STAGE() {
-    unsafe {
-        let mut table = uacpi_table::default();
-        let status = uacpi_table_find_by_signature(c"APIC".as_ptr(), &raw mut table);
-        if status != UACPI_STATUS_OK {
-            return;
-        }
-
-        let madt_ptr = table.__bindgen_anon_1.ptr as *const uacpi_sys::acpi_madt;
-        let madt = madt_ptr.read_unaligned();
-
-        let mut offset = size_of::<uacpi_sys::acpi_madt>();
-
-        while offset < madt.hdr.length as usize {
-            let entry_ptr = madt_ptr.byte_add(offset) as *const uacpi_sys::acpi_entry_hdr;
-            let entry = entry_ptr.read_unaligned();
-
-            if entry.type_ as u32 == uacpi_sys::ACPI_MADT_ENTRY_TYPE_IOAPIC {
-                let entry = (entry_ptr as *const uacpi_sys::acpi_madt_ioapic).read_unaligned();
-                IoApic::setup(
-                    entry.id,
-                    entry.gsi_base,
-                    PhysAddr::from(entry.address as usize),
-                );
-            }
-
-            offset += entry.length as usize;
-        }
-
-        uacpi_table_unref(&mut table);
-    }
 }

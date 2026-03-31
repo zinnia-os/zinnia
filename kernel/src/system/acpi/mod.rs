@@ -1,20 +1,11 @@
-use crate::{
-    boot::BootInfo,
-    irq::IrqLine,
-    memory::PhysAddr,
-    util::{mutex::spin::SpinMutex, once::Once},
-};
-use alloc::{boxed::Box, collections::btree_map::BTreeMap};
+use crate::{boot::BootInfo, memory::PhysAddr, util::once::Once};
+use alloc::boxed::Box;
 use core::ffi::c_void;
 
-mod madt;
 mod mcfg;
 mod uacpi;
 
 static RSDP_ADDRESS: Once<PhysAddr> = Once::new();
-
-pub static GLOBAL_IRQS: SpinMutex<BTreeMap<u32, SpinMutex<Box<dyn IrqLine>>>> =
-    SpinMutex::new(BTreeMap::new());
 
 #[initgraph::task(
     name = "system.acpi.tables",

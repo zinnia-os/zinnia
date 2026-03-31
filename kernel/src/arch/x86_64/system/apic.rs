@@ -11,11 +11,11 @@ use crate::{
         view::{MmioView, Register},
     },
     percpu::CpuData,
-    system,
     util::mutex::spin::SpinMutex,
 };
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use uacpi_sys::{UACPI_STATUS_OK, uacpi_table, uacpi_table_find_by_signature, uacpi_table_unref};
 
 pub struct LocalApic {
     /// How many ticks pass in 10 milliseconds.
@@ -278,8 +278,7 @@ impl IrqLine for ApicMsiLine {
 
 #[allow(unused)]
 mod ioapic_regs {
-    use crate::memory::Field;
-    use crate::memory::Register;
+    use crate::memory::{Field, Register};
 
     pub const ID: u32 = 0;
     pub const VERSION: u32 = 1;
@@ -298,6 +297,7 @@ mod ioapic_regs {
     pub const DESTINATION: Field<u32, u8> = Field::new_bits(DATA, 24..=31);
 }
 
+#[allow(unused)]
 pub struct IoApic {
     id: u8,
     gsi_base: u32,
@@ -305,14 +305,15 @@ pub struct IoApic {
 }
 
 impl IoApic {
-    pub fn setup(id: u8, gsi_base: u32, addr: PhysAddr) {
+    pub fn new(id: u8, gsi_base: u32, addr: PhysAddr) -> Arc<Self> {
         let ioapic = Arc::new(Self {
             id,
             gsi_base,
             regs: unsafe { MmioView::new(addr, 0x1000) },
         });
 
-        let num_lines = ((ioapic.read_reg(ioapic_regs::VERSION) >> 16) & 0xFF) + 1;
+        let num_lines = ioapic.gsi_count();
+
         log!(
             "IOAPIC {} with {} lines, GSI base at {}",
             id,
@@ -323,30 +324,42 @@ impl IoApic {
         for i in 0..num_lines {
             let mut slot = None;
             // Find a CPU with free IRQ lines.
-            for cpu in CpuData::iter() {
-                let lines = IRQ_LINES.get_for(cpu);
-                for (i, line) in lines.lock().iter().enumerate() {
-                    if line.is_none() {
-                        slot = Some((cpu, i))
-                    }
+
+            let lines = IRQ_LINES.get();
+            for (i, line) in lines.lock().iter().enumerate() {
+                if line.is_none() {
+                    slot = Some((CpuData::get(), i));
+                    break;
                 }
             }
 
             if let Some((cpu, idx)) = slot {
-                system::acpi::GLOBAL_IRQS.lock().insert(
+                let line = IoApicLine {
+                    state: IrqLineState::new(),
+                    ioapic: ioapic.clone(),
+                    index: i,
+                    lapic_id: LAPIC.get_for(cpu).id() as u8,
+                    vector: idx as u8 + 0x20,
+                    level_triggered: AtomicBool::new(false),
+                    active_low: AtomicBool::new(false),
+                };
+
+                // Program the IOAPIC redirection entry to a known masked state.
+                line.mask();
+
+                let line = Arc::new(line);
+                IRQ_LINES.get_for(cpu).lock()[idx] = Some(line.clone());
+                GLOBAL_IRQS.lock().insert(gsi_base + i, line);
+                log!(
+                    "Registered IOAPIC line {} at ISR {} on CPU {}",
                     gsi_base + i,
-                    SpinMutex::new(Box::new(IoApicLine {
-                        state: IrqLineState::new(),
-                        ioapic: ioapic.clone(),
-                        index: i,
-                        lapic_id: LAPIC.get_for(cpu).id() as u8,
-                        vector: idx as u8,
-                        level_triggered: AtomicBool::new(false),
-                        active_low: AtomicBool::new(false),
-                    })),
+                    idx + 0x20,
+                    cpu.id
                 );
             }
         }
+
+        ioapic
     }
 
     fn read_reg(&self, reg: u32) -> u32 {
@@ -362,13 +375,16 @@ impl IoApic {
             self.regs.write_reg(ioapic_regs::DATA, data).unwrap();
         }
     }
+
+    pub fn gsi_count(&self) -> u32 {
+        ((self.read_reg(ioapic_regs::VERSION) & 0xFF_0000) >> 16) + 1
+    }
 }
 
 pub struct IoApicLine {
     state: IrqLineState,
     ioapic: Arc<IoApic>,
     index: u32,
-    // TODO: Where is this used?
     lapic_id: u8,
     vector: u8,
     level_triggered: AtomicBool,
@@ -401,6 +417,14 @@ impl IrqLine for IoApicLine {
     }
 
     fn mask(&self) {
+        // Write high dword first (destination APIC ID).
+        self.ioapic.write_reg(
+            ioapic_regs::INTS + self.index * 2 + 1,
+            BitValue::new(0)
+                .write_field(ioapic_regs::DESTINATION, self.lapic_id)
+                .value(),
+        );
+
         self.ioapic.write_reg(
             ioapic_regs::INTS + self.index * 2,
             BitValue::new(0)
@@ -422,6 +446,14 @@ impl IrqLine for IoApicLine {
     }
 
     fn unmask(&self) {
+        // Write high dword first (destination APIC ID).
+        self.ioapic.write_reg(
+            ioapic_regs::INTS + self.index * 2 + 1,
+            BitValue::new(0)
+                .write_field(ioapic_regs::DESTINATION, self.lapic_id)
+                .value(),
+        );
+
         self.ioapic.write_reg(
             ioapic_regs::INTS + self.index * 2,
             BitValue::new(0)
@@ -446,27 +478,130 @@ impl IrqLine for IoApicLine {
     }
 }
 
-const PIC1_COMMAND_PORT: u16 = 0x20;
-const PIC1_DATA_PORT: u16 = 0x21;
-const PIC2_COMMAND_PORT: u16 = 0xA0;
-const PIC2_DATA_PORT: u16 = 0xA1;
-
-/// Masks the legacy Programmable Interrupt Controller so it doesn't get in our way.
 pub fn disable_legacy_pic() {
-    unsafe {
-        // Note: We initialize the PIC properly, but completely disable it and use the APIC in favor of it.
-        // Remap IRQs so they start at 0x20 since interrupts 0x00..0x1F are used by CPU exceptions.
-        asm::write8(PIC1_COMMAND_PORT, 0x11); // ICW1: Begin initialization and set cascade mode.
-        asm::write8(PIC1_DATA_PORT, 0x20); // ICW2: Set where interrupts should be mapped to (0x20-0x27).
-        asm::write8(PIC1_DATA_PORT, 0x04); // ICW3: Connect IRQ2 (0x04) to the slave PIC.
-        asm::write8(PIC1_DATA_PORT, 0x01); // ICW4: Set the PIC to operate in 8086/88 mode.
-        asm::write8(PIC1_DATA_PORT, 0xFF); // Mask all interrupts.
+    const PIC1_DATA_PORT: u16 = 0x21;
+    const PIC2_DATA_PORT: u16 = 0xA1;
 
-        // Same for the slave PIC.
-        asm::write8(PIC2_COMMAND_PORT, 0x11); // ICW1: Begin initialization.
-        asm::write8(PIC2_DATA_PORT, 0x28); // ICW2: Set where interrupts should be mapped to (0x28-0x2F).
-        asm::write8(PIC2_DATA_PORT, 0x02); // ICW3: Connect to master PIC at IRQ2.
-        asm::write8(PIC2_DATA_PORT, 0x01); // ICW4: Set the PIC to operate in 8086/88 mode.
-        asm::write8(PIC2_DATA_PORT, 0xFF); // Mask all interrupts.
+    // Masks the legacy Programmable Interrupt Controller so it doesn't get in our way.
+    unsafe {
+        asm::write8(PIC1_DATA_PORT, 0xFF);
+        asm::write8(PIC2_DATA_PORT, 0xFF);
     }
+}
+
+static SOURCE_OVERRIDES: SpinMutex<[Option<(u32, irq::TriggerMode, Polarity)>; 16]> =
+    SpinMutex::new([const { None }; _]);
+
+static GLOBAL_IRQS: SpinMutex<BTreeMap<u32, Arc<IoApicLine>>> = SpinMutex::new(BTreeMap::new());
+
+static IOAPICS: SpinMutex<Vec<Arc<IoApic>>> = SpinMutex::new(Vec::new());
+
+pub fn get_isa_irq(irq: u8) -> Option<Arc<IoApicLine>> {
+    if irq >= 16 {
+        return None;
+    }
+
+    let source_overrides = SOURCE_OVERRIDES.lock();
+    let gsis = GLOBAL_IRQS.lock();
+
+    // If we have a source override, use that. Otherwise just use the IRQ number as GSI.
+    let (gsi_idx, trigger, polarity) = source_overrides[irq as usize].unwrap_or((
+        irq as u32,
+        irq::TriggerMode::Edge,
+        Polarity::High,
+    ));
+
+    let gsi = gsis.get(&gsi_idx)?.clone();
+    (gsi.clone() as Arc<dyn IrqLine>).program(Some((trigger, polarity)));
+
+    Some(gsi)
+}
+
+#[initgraph::task(
+    name = "arch.x86_64.find-ioapics",
+    depends = [crate::system::acpi::INIT_STAGE],
+)]
+pub fn IOAPIC_STAGE() {
+    let mut table = uacpi_table::default();
+    let status = unsafe { uacpi_table_find_by_signature(c"APIC".as_ptr(), &raw mut table) };
+    if status != UACPI_STATUS_OK {
+        error!("Failed to get APIC table from ACPI!");
+        return;
+    }
+
+    let madt_ptr = unsafe { table.__bindgen_anon_1.ptr as *const uacpi_sys::acpi_madt };
+    let madt = unsafe { madt_ptr.read_unaligned() };
+
+    // Interrupt Source Overrides
+    if madt.flags & uacpi_sys::ACPI_PIC_ENABLED != 0 {
+        let mut offset = size_of::<uacpi_sys::acpi_madt>();
+        let mut source_overrides = SOURCE_OVERRIDES.lock();
+
+        while offset < madt.hdr.length as usize {
+            let entry_ptr =
+                unsafe { madt_ptr.byte_add(offset) } as *const uacpi_sys::acpi_entry_hdr;
+            let entry = unsafe { entry_ptr.read_unaligned() };
+
+            if entry.type_ as u32 == uacpi_sys::ACPI_MADT_ENTRY_TYPE_INTERRUPT_SOURCE_OVERRIDE {
+                let entry = unsafe {
+                    (entry_ptr as *const uacpi_sys::acpi_madt_interrupt_source_override)
+                        .read_unaligned()
+                };
+
+                let gsi = entry.gsi;
+                assert!(entry.source < 16);
+
+                let trigger = match entry.flags as u32 & uacpi_sys::ACPI_MADT_TRIGGERING_MASK {
+                    uacpi_sys::ACPI_MADT_TRIGGERING_EDGE => irq::TriggerMode::Edge,
+                    uacpi_sys::ACPI_MADT_TRIGGERING_LEVEL => irq::TriggerMode::Level,
+                    _ => irq::TriggerMode::Edge,
+                };
+
+                let polarity = match entry.flags as u32 & uacpi_sys::ACPI_MADT_POLARITY_MASK {
+                    uacpi_sys::ACPI_MADT_POLARITY_ACTIVE_HIGH => Polarity::High,
+                    uacpi_sys::ACPI_MADT_POLARITY_ACTIVE_LOW => Polarity::Low,
+                    _ => Polarity::High,
+                };
+
+                log!(
+                    "ISO: Source {} -> GSI {}, Trigger mode: {:?}, Polarity: {:?}",
+                    entry.source,
+                    gsi,
+                    trigger,
+                    polarity
+                );
+
+                *source_overrides.get_mut(entry.source as usize).unwrap() =
+                    Some((gsi, trigger, polarity));
+            }
+
+            offset += entry.length as usize;
+        }
+    }
+
+    {
+        let mut offset = size_of::<uacpi_sys::acpi_madt>();
+        let mut ioapics = IOAPICS.lock();
+
+        while offset < madt.hdr.length as usize {
+            let entry_ptr =
+                unsafe { madt_ptr.byte_add(offset) } as *const uacpi_sys::acpi_entry_hdr;
+            let entry = unsafe { entry_ptr.read_unaligned() };
+
+            if entry.type_ as u32 == uacpi_sys::ACPI_MADT_ENTRY_TYPE_IOAPIC {
+                let entry =
+                    unsafe { (entry_ptr as *const uacpi_sys::acpi_madt_ioapic).read_unaligned() };
+
+                ioapics.push(IoApic::new(
+                    entry.id,
+                    entry.gsi_base,
+                    PhysAddr::from(entry.address as usize),
+                ));
+            }
+
+            offset += entry.length as usize;
+        }
+    }
+
+    unsafe { uacpi_table_unref(&mut table) };
 }

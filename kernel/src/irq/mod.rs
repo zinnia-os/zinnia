@@ -16,13 +16,13 @@ pub enum Status {
     Handled,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Polarity {
     Low,
     High,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum TriggerMode {
     Edge,
     Level,
@@ -98,9 +98,6 @@ impl dyn IrqLine {
 
         state.is_busy.store(true, Ordering::Relaxed);
         let mode = *state.mode.lock();
-
-        // TODO
-        log!("Handling IRQ");
 
         let mut claimed = false;
         for handler in state.handlers.lock().iter_mut() {

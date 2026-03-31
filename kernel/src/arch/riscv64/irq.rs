@@ -1,3 +1,4 @@
+use crate::irq::MsiLine;
 use core::arch::asm;
 
 pub unsafe fn set_irq_state(value: bool) -> bool {
@@ -33,4 +34,8 @@ pub fn wait_for_irq() {
     unsafe {
         asm!("wfi");
     }
+}
+
+pub(in crate::arch) fn allocate_msi() -> Option<Arc<dyn MsiLine>> {
+    todo!()
 }
