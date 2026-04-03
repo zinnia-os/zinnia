@@ -19,7 +19,7 @@ struct Console;
 
 impl FileOps for Console {
     fn read(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
-        Ok(0)
+        Err(Errno::EBADF)
     }
 
     fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {

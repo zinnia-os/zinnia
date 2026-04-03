@@ -165,15 +165,11 @@ fn SERIAL_FILE_STAGE() {
     });
 
     let irq = super::apic::get_isa_irq(4).unwrap() as Arc<dyn IrqLine>;
-    irq.unmask();
     irq.attach(Box::new(SerialIrqHandler {
         state: state.clone(),
     }));
-
-    // Enable received data available interrupt.
-    unsafe {
-        write8(COM1_BASE + 1, 0x01);
-    }
+    unsafe { write8(COM1_BASE + 1, 0x01) };
+    irq.unmask();
 
     devtmpfs::register_device(
         b"serial",
