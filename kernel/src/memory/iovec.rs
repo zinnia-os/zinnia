@@ -57,6 +57,8 @@ impl<'a> IovecIter<'a> {
     }
 
     /// Creates a new iterator for kernel accesses.
+    /// # Safety
+    /// Only valid for kernel iovecs.
     pub unsafe fn new_kernel(iovecs: &'a [iovec]) -> Self {
         // Check if all addresses are in kernel memory.
         for i in iovecs {
