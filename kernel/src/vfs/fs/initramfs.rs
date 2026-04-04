@@ -5,8 +5,6 @@
 //! and mounting the real root file system from disk.
 
 use crate::{
-    boot::BootInfo,
-    module,
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::time::timespec,
@@ -157,15 +155,6 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
                     .as_ref()
                     .unwrap()
                     .update_time(Some(time), Some(time), Some(time));
-
-                if BootInfo::get()
-                    .command_line
-                    .get_bool("module_autoload")
-                    .unwrap_or(true)
-                    && file_name.ends_with(b".kso")
-                {
-                    module::load(&data[offset + 512..][..file_size]).unwrap();
-                }
             }
             SYM_LINK => {
                 let (dir, file_name) =

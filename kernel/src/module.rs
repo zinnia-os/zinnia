@@ -6,6 +6,7 @@ use crate::posix::errno::{EResult, Errno};
 use crate::util::{align_down, align_up, mutex::spin::SpinMutex};
 use crate::vfs::exec::elf::{self, ElfHashTable, ElfHdr, ElfPhdr, ElfRela, ElfSym};
 use alloc::{borrow::ToOwned, collections::btree_map::BTreeMap, string::String, vec::Vec};
+use core::str;
 use core::{ffi::CStr, slice, sync::atomic::Ordering};
 
 // TODO: This can use RwLocks.
@@ -22,7 +23,7 @@ unsafe extern "C" {
     unsafe static LD_DYNSTR_END: u8;
 }
 
-type ModuleEntryFn = extern "C" fn();
+type ModuleEntryFn = extern "C" fn(*const u8, usize);
 
 /// Stores metadata about a module.
 #[derive(Debug)]
@@ -76,7 +77,7 @@ fn MODULE_STAGE() {
 }
 
 /// Loads a module from an ELF in memory.
-pub fn load(data: &[u8]) -> EResult<()> {
+pub fn load(data: &[u8], cmdline: &[u8]) -> EResult<()> {
     let elf_hdr: &ElfHdr =
         bytemuck::try_from_bytes(&data[0..size_of::<ElfHdr>()]).map_err(|_| Errno::ENOEXEC)?;
 
@@ -389,13 +390,15 @@ pub fn load(data: &[u8]) -> EResult<()> {
 
     // Call the entry.
     info.entry = unsafe {
-        Some(core::mem::transmute::<usize, extern "C" fn()>(
+        Some(core::mem::transmute::<usize, ModuleEntryFn>(
             load_base + elf_hdr.e_entry as usize,
         ))
     };
 
     if let Some(entry_point) = info.entry {
-        (entry_point)();
+        // Make sure it's a valid string.
+        let cmd_str = str::from_utf8(cmdline).map_err(|_| Errno::EINVAL)?;
+        (entry_point)(cmd_str.as_ptr(), cmd_str.len());
     }
 
     MODULE_TABLE.lock().insert(name.to_owned(), info);
@@ -443,9 +446,14 @@ macro_rules! module {
             static MODULE_AUTHOR = $author;
         }
 
+        #[feature(str_from_raw_parts)]
         #[unsafe(no_mangle)]
-        unsafe extern "C" fn _start() {
-            $entry();
+        unsafe extern "C" fn _start(cmdline_ptr: *const u8, cmdline_len: usize) {
+            let cmdline = unsafe {
+                str::from_utf8_unchecked(core::slice::from_raw_parts(cmdline_ptr, cmdline_len))
+            };
+
+            $entry(cmdline);
         }
     };
 }

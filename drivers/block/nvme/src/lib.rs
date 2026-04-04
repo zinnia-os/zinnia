@@ -87,7 +87,7 @@ static DRIVER: Driver = Driver {
     variants: &[PciVariant::new().class(1).sub_class(8).function(2)],
 };
 
-fn main() {
+fn main(_cmdline: &str) {
     _ = DRIVER.register();
 }
 

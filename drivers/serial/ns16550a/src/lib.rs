@@ -21,7 +21,7 @@ fn probe(node: &Node) -> EResult<()> {
     Ok(())
 }
 
-pub fn main() {
+pub fn main(_cmdline: &str) {
     match DRIVER.register() {
         Ok(_) => (),
         Err(e) => zinnia::error!("Unable to load driver: {:?}", e),

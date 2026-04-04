@@ -36,6 +36,9 @@ impl<'a> IovecIter<'a> {
         })
     }
 
+    /// Creates an iovec from kernel memory.
+    /// # Safety
+    /// Only valid inside a kernel context.
     pub unsafe fn iovec_from_ptr(bytes: &[u8]) -> iovec {
         iovec {
             base: VirtAddr::from(bytes.as_ptr()),
@@ -43,6 +46,9 @@ impl<'a> IovecIter<'a> {
         }
     }
 
+    /// Creates an iovec from mutable kernel memory.
+    /// # Safety
+    /// Only valid inside a kernel context.
     pub unsafe fn iovec_from_mut_ptr(bytes: &mut [u8]) -> iovec {
         iovec {
             base: VirtAddr::from(bytes.as_mut_ptr()),
@@ -50,6 +56,7 @@ impl<'a> IovecIter<'a> {
         }
     }
 
+    /// Creates a new iterator for kernel accesses.
     pub unsafe fn new_kernel(iovecs: &'a [iovec]) -> Self {
         // Check if all addresses are in kernel memory.
         for i in iovecs {

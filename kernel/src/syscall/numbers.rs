@@ -126,3 +126,5 @@ pub const GETPRIORITY: usize = 124;
 pub const SETPRIORITY: usize = 125;
 pub const SCHED_GETPARAM: usize = 126;
 pub const SCHED_SETPARAM: usize = 127;
+pub const MODULE_INSERT: usize = 128;
+pub const MODULE_REMOVE: usize = 129;

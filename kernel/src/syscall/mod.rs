@@ -1,4 +1,5 @@
 mod memory;
+mod module;
 mod numbers;
 mod process;
 mod system;
@@ -181,6 +182,10 @@ pub fn dispatch(
         numbers::SCHED_GETPARAM => sys_unimp!("sched_getparam", Err(Errno::ENOSYS)),
         numbers::SCHED_SETPARAM => sys_unimp!("sched_setparam", Err(Errno::ENOSYS)),
         numbers::GETENTROPY => sys_unimp!("getentropy", Ok(0)),
+
+        // Modules
+        numbers::MODULE_INSERT => module::module_insert(a0.into(), a1.into()).map(|_| 0),
+        numbers::MODULE_REMOVE => sys_unimp!("module_remove", Err(Errno::ENOSYS)),
 
         _ => {
             warn!("Unknown syscall {num}");

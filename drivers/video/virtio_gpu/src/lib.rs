@@ -106,7 +106,7 @@ static DRIVER: Driver = Driver {
 
 zinnia::module!("VirtIO GPU driver", "Marvin Friedrich", main);
 
-pub fn main() {
+pub fn main(_cmdline: &str) {
     match DRIVER.register() {
         Ok(_) => (),
         Err(e) => error!("Unable to load VirtIO GPU driver: {:?}", e),
