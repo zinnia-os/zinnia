@@ -12,6 +12,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use core::{
+    any::Any,
     fmt::Debug,
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
@@ -108,7 +109,7 @@ impl Clone for FileDescription {
 /// Operations that can be performed on a file. Every trait function has a
 /// generic implementation, which treats it as unimplemented.
 /// Inputs have been sanitized when these functions are called.
-pub trait FileOps: Sync + Send {
+pub trait FileOps: Sync + Send + Any {
     /// Called when the file is being opened.
     fn acquire(&self, file: &File, flags: OpenFlags) -> EResult<()> {
         let _ = (file, flags);

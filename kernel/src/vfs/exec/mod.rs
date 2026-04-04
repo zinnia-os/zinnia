@@ -33,6 +33,8 @@ pub struct ExecInfo {
 
 /// An executable format.
 pub trait ExecFormat: Sync + Send + Debug {
+    fn name(&self) -> &str;
+
     /// Identifies whether a file is a valid executable of this format.
     fn identify(&self, file: &File) -> bool;
 
@@ -41,19 +43,21 @@ pub trait ExecFormat: Sync + Send + Debug {
     fn load(&self, proc: &Arc<Process>, info: &mut ExecInfo) -> EResult<Task>;
 }
 
-static KNOWN_FORMATS: SpinMutex<BTreeMap<String, Arc<dyn ExecFormat>>> =
+static KNOWN_FORMATS: SpinMutex<BTreeMap<String, &'static dyn ExecFormat>> =
     SpinMutex::new(BTreeMap::new());
 
 /// Attempts to identify the format of this executable file.
-pub fn identify(file: &File) -> Option<Arc<dyn ExecFormat>> {
+pub fn identify(file: &File) -> Option<&'static dyn ExecFormat> {
     KNOWN_FORMATS
         .lock()
-        .iter()
-        .find(|(_, f)| f.identify(file))
-        .map(|(_, f)| f.clone())
+        .values()
+        .copied()
+        .find(|f| f.identify(file))
 }
 
 /// Installs a new executable format.
-pub fn register(name: &str, format: Arc<dyn ExecFormat>) {
-    KNOWN_FORMATS.lock().insert(name.to_string(), format);
+pub fn register(format: &'static dyn ExecFormat) {
+    KNOWN_FORMATS
+        .lock()
+        .insert(format.name().to_string(), format);
 }

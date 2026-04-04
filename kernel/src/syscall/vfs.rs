@@ -12,31 +12,15 @@ use crate::{
         uio::iovec,
     },
     vfs::{
-        self, File, PathNode,
+        self, File, MountFlags, PathNode,
         cache::LookupFlags,
         file::{FileDescription, OpenFlags, SeekAnchor},
+        fs,
         inode::{INode, Mode, NodeOps},
     },
 };
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
-
-pub fn read(fd: i32, base: VirtAddr, len: usize) -> EResult<isize> {
-    let file = {
-        let proc = Scheduler::get_current().get_process();
-        let proc_inner = proc.open_files.lock();
-        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
-    };
-
-    let flags = *file.flags.lock();
-    if !flags.contains(OpenFlags::Read) {
-        return Err(Errno::EBADF);
-    }
-
-    let iovec = &[iovec { base, len }];
-    let mut iter = IovecIter::new(iovec)?;
-    file.read(&mut iter)
-}
 
 pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
     let file = {
@@ -45,31 +29,36 @@ pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isiz
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
-    let flags = *file.flags.lock();
+    let flags = file.flags.lock();
     if !flags.contains(OpenFlags::Read) {
         return Err(Errno::EBADF);
     }
 
-    let iovec = &[iovec { base, len }];
-    let mut iter = IovecIter::new(iovec)?;
+    let iovec = [iovec { base, len }];
+    let mut iter = IovecIter::new(&iovec)?;
     file.pread(&mut iter, offset as _)
 }
 
-pub fn write(fd: i32, base: VirtAddr, len: usize) -> EResult<isize> {
+pub fn readv(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
         let proc_inner = proc.open_files.lock();
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
-    let flags = *file.flags.lock();
-    if !flags.contains(OpenFlags::Write) {
+    let flags = file.flags.lock();
+    if !flags.contains(OpenFlags::Read) {
         return Err(Errno::EBADF);
     }
 
-    let iovec = &[iovec { base, len }];
-    let mut iter = IovecIter::new(iovec)?;
-    file.write(&mut iter)
+    let iov_ptr = UserPtr::<iovec>::new(iov);
+    let mut iovecs = Vec::with_capacity(iovcnt);
+    for i in 0..iovcnt {
+        iovecs.push(iov_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
+    }
+
+    let mut iter = IovecIter::new(&iovecs)?;
+    file.read(&mut iter)
 }
 
 pub fn pwrite(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
@@ -79,14 +68,36 @@ pub fn pwrite(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isi
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
+    let flags = file.flags.lock();
+    if !flags.contains(OpenFlags::Write) {
+        return Err(Errno::EBADF);
+    }
+
+    let iovec = [iovec { base, len }];
+    let mut iter = IovecIter::new(&iovec)?;
+    file.pwrite(&mut iter, offset as _)
+}
+
+pub fn writev(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
+    let file = {
+        let proc = Scheduler::get_current().get_process();
+        let proc_inner = proc.open_files.lock();
+        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
+
     let flags = *file.flags.lock();
     if !flags.contains(OpenFlags::Write) {
         return Err(Errno::EBADF);
     }
 
-    let iovec = &[iovec { base, len }];
-    let mut iter = IovecIter::new(iovec)?;
-    file.pwrite(&mut iter, offset as _)
+    let iov_ptr = UserPtr::<iovec>::new(iov);
+    let mut iovecs = Vec::with_capacity(iovcnt);
+    for i in 0..iovcnt {
+        iovecs.push(iov_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
+    }
+
+    let mut iter = IovecIter::new(&iovecs)?;
+    file.write(&mut iter)
 }
 
 pub fn openat(fd: i32, path: VirtAddr, oflag: usize /* mode */) -> EResult<i32> {
@@ -721,4 +732,93 @@ pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> ERe
         .ok_or(Errno::EFAULT)?;
 
     Ok(read as _)
+}
+
+pub fn mount(
+    type_ptr: VirtAddr,
+    dir_ptr: VirtAddr,
+    flags: u32,
+    data_ptr: VirtAddr,
+) -> EResult<usize> {
+    let fs_type = UserCStr::new(type_ptr)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+    let dir = UserCStr::new(dir_ptr)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+
+    let mount_flags = MountFlags::from_bits_truncate(flags);
+
+    let proc = Scheduler::get_current().get_process();
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+
+    let mount_point = PathNode::lookup(
+        root.clone(),
+        cwd,
+        &dir,
+        &identity,
+        LookupFlags::MustExist | LookupFlags::FollowSymlinks,
+    )?;
+
+    let new_mount = fs::mount(&fs_type, mount_flags, UserPtr::new(data_ptr))?;
+
+    mount_point.mount(new_mount)?;
+    Ok(0)
+}
+
+pub fn chroot(path: VirtAddr) -> EResult<usize> {
+    let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+
+    let node = PathNode::lookup(
+        root,
+        cwd,
+        &path,
+        &identity,
+        LookupFlags::MustExist | LookupFlags::FollowSymlinks,
+    )?;
+
+    // Verify it's a directory.
+    let inode = node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    match &inode.node_ops {
+        NodeOps::Directory(_) => {}
+        _ => return Err(Errno::ENOTDIR),
+    }
+
+    *proc.root_dir.lock() = node.clone();
+    *proc.working_dir.lock() = node;
+    Ok(0)
+}
+
+pub fn umount(dir_ptr: VirtAddr, _flags: u32) -> EResult<usize> {
+    let dir = UserCStr::new(dir_ptr)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+
+    let mount_point = PathNode::lookup(
+        root,
+        cwd,
+        &dir,
+        &identity,
+        LookupFlags::MustExist | LookupFlags::FollowSymlinks,
+    )?;
+
+    // Remove the last mount from this entry's mount list.
+    let mut mounts = mount_point.entry.mounts.lock();
+    if mounts.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    mounts.pop();
+    Ok(0)
 }

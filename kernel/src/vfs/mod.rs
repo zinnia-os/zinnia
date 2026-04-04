@@ -13,7 +13,7 @@ pub use fs::MountFlags;
 
 use crate::{
     memory::{
-        PagedMemoryObject, VirtAddr,
+        PagedMemoryObject, UserPtr, VirtAddr,
         virt::{AddressSpace, VmFlags},
     },
     posix::errno::{EResult, Errno},
@@ -26,9 +26,9 @@ use crate::{
     util::once::Once,
     vfs::{
         cache::LookupFlags,
-        file::{FileOps, MmapFlags, OpenFlags},
+        file::{MmapFlags, OpenFlags},
         fs::devtmpfs,
-        inode::{Mode, NodeOps, NodeType},
+        inode::{Device, Mode, NodeOps},
     },
 };
 use alloc::sync::Arc;
@@ -97,21 +97,10 @@ pub fn mknod(
     root: PathNode,
     cwd: PathNode,
     path: &[u8],
-    file_type: NodeType,
     mode: Mode,
-    device: Option<Arc<dyn FileOps>>,
+    device: Option<Device>,
     identity: &Identity,
 ) -> EResult<()> {
-    match file_type {
-        // POSIX only allows these types of nodes to be created.
-        NodeType::BlockDevice | NodeType::CharacterDevice | NodeType::FIFO => (),
-        // Anything else we disallow.
-        _ => {
-            error!("Creating a directory using mknod is not supported!");
-            return Err(Errno::EINVAL);
-        }
-    }
-
     let path = PathNode::lookup(root.clone(), cwd, path, identity, LookupFlags::MustNotExist)?;
     let parent = path
         .lookup_parent()
@@ -123,7 +112,7 @@ pub fn mknod(
         _ => return Err(Errno::ENOTDIR),
     };
 
-    let new_inode = dir.mknod(&parent, file_type, mode, device, identity)?;
+    let new_inode = dir.mknod(&parent, mode, device, identity)?;
     path.entry.set_inode(new_inode);
 
     Ok(())
@@ -164,7 +153,7 @@ pub fn get_dir_entries(
     buffer: &mut [dirent],
     identity: &Identity,
 ) -> EResult<usize> {
-    if buffer.len() == 0 {
+    if buffer.is_empty() {
         return Ok(0);
     }
 
@@ -227,8 +216,12 @@ pub fn get_dir_entries(
 )]
 pub fn VFS_STAGE() {
     // Mount a tmpfs as root.
-    let tmpfs =
-        fs::mount(None, b"tmpfs", MountFlags::empty()).expect("Unable to mount the root tmpfs");
+    let tmpfs = fs::mount(
+        b"tmpfs",
+        MountFlags::empty(),
+        UserPtr::new(VirtAddr::null()),
+    )
+    .expect("Unable to mount the root tmpfs");
 
     let root_path = PathNode {
         entry: tmpfs.root.clone(),
@@ -244,8 +237,12 @@ pub fn VFS_STAGE() {
 )]
 pub fn VFS_DEV_MOUNT_STAGE() {
     // Mount the devtmpfs on `/dev`.
-    let devtmpfs =
-        fs::mount(None, b"devtmpfs", MountFlags::empty()).expect("Unable to mount the devtmpfs");
+    let devtmpfs = fs::mount(
+        b"devtmpfs",
+        MountFlags::empty(),
+        UserPtr::new(VirtAddr::null()),
+    )
+    .expect("Unable to mount the devtmpfs");
 
     let proc = Process::get_kernel();
     let root = proc.root_dir.lock();

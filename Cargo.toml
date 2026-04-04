@@ -5,6 +5,7 @@ members = [
     "bindings/*",
     "drivers/common/*",
     "drivers/block/*",
+    "drivers/fs/*",
     "drivers/serial/*",
     "drivers/video/*",
 ]

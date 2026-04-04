@@ -1,5 +1,6 @@
 use crate::{
     arch::virt::get_page_size,
+    device::block::BlockDevice,
     memory::{
         PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
@@ -8,7 +9,10 @@ use crate::{
     uapi,
     util::mutex::spin::SpinMutex,
 };
-use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use alloc::{
+    collections::{btree_map::BTreeMap, btree_set::BTreeSet},
+    sync::Arc,
+};
 use core::{fmt::Debug, num::NonZeroUsize, slice};
 
 pub trait MemoryObject: Sync + Send {
@@ -20,6 +24,7 @@ pub trait MemoryObject: Sync + Send {
 #[derive(Debug)]
 pub struct PagedMemoryObject {
     pages: SpinMutex<BTreeMap<usize, PhysAddr>>,
+    dirty: SpinMutex<BTreeSet<usize>>,
     source: Arc<dyn Pager>,
 }
 
@@ -28,6 +33,7 @@ impl PagedMemoryObject {
     pub fn new(source: Arc<dyn Pager>) -> Self {
         Self {
             pages: SpinMutex::new(BTreeMap::new()),
+            dirty: SpinMutex::new(BTreeSet::new()),
             source,
         }
     }
@@ -37,6 +43,26 @@ impl PagedMemoryObject {
         Self::new(Arc::new(PhysPager))
     }
 
+    /// Marks a page as dirty.
+    pub fn mark_dirty(&self, page_index: usize) {
+        self.dirty.lock().insert(page_index);
+    }
+
+    /// Writes all dirty pages back through the pager and clears the dirty set.
+    pub fn sync(&self) -> EResult<()> {
+        let pages = self.pages.lock();
+        let mut dirty = self.dirty.lock();
+        for &idx in dirty.iter() {
+            if let Some(&addr) = pages.get(&idx) {
+                self.source
+                    .try_put_page(addr, idx)
+                    .map_err(|_| crate::posix::errno::Errno::EIO)?;
+            }
+        }
+        dirty.clear();
+        Ok(())
+    }
+
     /// If a private mapping is requested, creates a new memory object and copies the data over.
     pub fn make_private(
         self: &Arc<Self>,
@@ -44,7 +70,6 @@ impl PagedMemoryObject {
         offset: uapi::off_t,
     ) -> EResult<Arc<dyn MemoryObject>> {
         // Private mapping means we need to do a unique allocation.
-        // TODO: Do this in smaller chunks to not overwhelm the allocator.
         let phys = Arc::new(PagedMemoryObject::new_phys());
         let mut buf = vec![0u8; length.into()];
         (self.as_ref() as &dyn MemoryObject).read(&mut buf, offset as _);
@@ -149,6 +174,8 @@ pub enum PagerError {
     IndexOutOfBounds,
     /// The pager cannot allocate pages.
     OutOfMemory,
+    /// An I/O error occurred while reading/writing the page.
+    IoError,
 }
 
 /// A pager which uses kernel memory to get physical pages.
@@ -167,6 +194,80 @@ impl Pager for PhysPager {
 
     fn try_put_page(&self, _: PhysAddr, _: usize) -> Result<(), PagerError> {
         // Don't do anything. There's nothing to write back to.
+        Ok(())
+    }
+}
+
+/// A pager backed by a block device.
+/// Pages are read from / written to the device at a given byte offset.
+pub struct BlockPager {
+    device: Arc<dyn BlockDevice>,
+    /// Byte offset into the device where this pager's data starts.
+    byte_offset: u64,
+}
+
+impl Debug for BlockPager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BlockPager")
+            .field("byte_offset", &self.byte_offset)
+            .finish()
+    }
+}
+
+impl BlockPager {
+    pub fn new(device: Arc<dyn BlockDevice>, byte_offset: u64) -> Self {
+        Self {
+            device,
+            byte_offset,
+        }
+    }
+}
+
+impl Pager for BlockPager {
+    fn has_page(&self, _page_index: usize) -> bool {
+        true
+    }
+
+    fn try_get_page(&self, page_index: usize) -> Result<PhysAddr, PagerError> {
+        let page_size = get_page_size();
+        let phys =
+            KernelAlloc::alloc(1, AllocFlags::empty()).map_err(|_| PagerError::OutOfMemory)?;
+
+        let lba_size = self.device.get_lba_size();
+        if lba_size == 0 {
+            return Err(PagerError::IoError);
+        }
+
+        let offset = self.byte_offset + (page_index * page_size) as u64;
+        let start_lba = offset / lba_size as u64;
+        let num_lbas = page_size.div_ceil(lba_size);
+
+        if self.device.read_lba(phys, num_lbas, start_lba).is_err() {
+            unsafe { KernelAlloc::dealloc(phys, 1) };
+            return Err(PagerError::IoError);
+        }
+
+        Ok(phys)
+    }
+
+    fn try_put_page(&self, address: PhysAddr, page_index: usize) -> Result<(), PagerError> {
+        let page_size = get_page_size();
+        let lba_size = self.device.get_lba_size();
+        if lba_size == 0 {
+            return Err(PagerError::IoError);
+        }
+
+        let offset = self.byte_offset + (page_index * page_size) as u64;
+        let num_lbas = page_size / lba_size;
+
+        for i in 0..num_lbas {
+            let lba = offset / lba_size as u64 + i as u64;
+            let buf = PhysAddr::new(address.value() + i * lba_size);
+            self.device
+                .write_lba(buf, lba)
+                .map_err(|_| PagerError::IoError)?;
+        }
+
         Ok(())
     }
 }

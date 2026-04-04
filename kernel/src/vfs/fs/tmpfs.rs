@@ -1,7 +1,9 @@
 use super::{MountFlags, SuperBlock};
 use crate::{
     arch,
-    memory::{AddressSpace, IovecIter, PagedMemoryObject, VirtAddr, VmFlags, cache::MemoryObject},
+    memory::{
+        AddressSpace, IovecIter, PagedMemoryObject, UserPtr, VirtAddr, VmFlags, cache::MemoryObject,
+    },
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, statvfs::statvfs},
@@ -11,7 +13,7 @@ use crate::{
         cache::Entry,
         file::{File, FileOps, MmapFlags, OpenFlags},
         fs::{FileSystem, Mount},
-        inode::{DirectoryOps, INode, Mode, NodeOps, NodeType, RegularOps, SymlinkOps},
+        inode::{Device, DirectoryOps, INode, Mode, NodeOps, RegularOps, SymlinkOps},
     },
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -28,12 +30,12 @@ impl FileSystem for TmpFs {
         b"tmpfs"
     }
 
-    fn mount(&self, _: Option<Arc<Entry>>, flags: MountFlags) -> EResult<Arc<Mount>> {
+    fn mount(&self, flags: MountFlags, _: UserPtr<()>) -> EResult<Arc<Mount>> {
         let super_block = Arc::try_new(TmpSuper {
             inode_counter: AtomicUsize::new(0),
         })?;
 
-        let dir = Arc::new(TmpDir::default());
+        let dir = Arc::new(TmpDir);
 
         let root_entry = Arc::new(Entry::new(
             b"",
@@ -53,16 +55,7 @@ struct TmpSuper {
     inode_counter: AtomicUsize,
 }
 
-impl SuperBlock for TmpSuper {
-    fn sync(self: Arc<Self>) -> EResult<()> {
-        // This is a no-op.
-        Ok(())
-    }
-
-    fn statvfs(self: Arc<Self>) -> EResult<statvfs> {
-        todo!()
-    }
-
+impl TmpSuper {
     fn create_inode(self: Arc<Self>, node_ops: NodeOps, mode: Mode) -> EResult<Arc<INode>> {
         Ok(Arc::try_new(INode {
             id: self.inode_counter.fetch_add(1, Ordering::Acquire),
@@ -77,12 +70,16 @@ impl SuperBlock for TmpSuper {
             gid: SpinMutex::default(),
         })?)
     }
+}
 
-    fn destroy_inode(self: Arc<Self>, _inode: INode) -> EResult<()> {
-        match Arc::into_inner(self) {
-            Some(_) => Ok(()),
-            None => Err(Errno::EBUSY),
-        }
+impl SuperBlock for TmpSuper {
+    fn sync(self: Arc<Self>) -> EResult<()> {
+        // This is a no-op.
+        Ok(())
+    }
+
+    fn statvfs(self: Arc<Self>) -> EResult<statvfs> {
+        todo!()
     }
 }
 
@@ -150,7 +147,8 @@ impl DirectoryOps for TmpDir {
         let _ = identity; // TODO
         let reg = Arc::new(TmpSymlink::default());
 
-        let sym_inode = node.sb.clone().unwrap().create_inode(
+        let sb: Arc<TmpSuper> = Arc::downcast(node.sb.clone().unwrap()).unwrap();
+        let sym_inode = sb.create_inode(
             NodeOps::SymbolicLink(reg.clone()),
             Mode::from_bits_truncate(0o777),
         )?;
@@ -169,11 +167,9 @@ impl DirectoryOps for TmpDir {
         _identity: &Identity,
     ) -> EResult<()> {
         let new_file = Arc::new(TmpRegular::new());
-        let new_node = self_node
-            .sb
-            .clone()
-            .unwrap()
-            .create_inode(NodeOps::Regular(new_file), mode)?;
+
+        let sb: Arc<TmpSuper> = Arc::downcast(self_node.sb.clone().unwrap()).unwrap();
+        let new_node = sb.create_inode(NodeOps::Regular(new_file), mode)?;
         entry.set_inode(new_node.clone());
         Ok(())
     }
@@ -186,11 +182,8 @@ impl DirectoryOps for TmpDir {
         _identity: &Identity,
     ) -> EResult<()> {
         let result_dir = Arc::new(TmpDir);
-        let result_inode = self_node
-            .sb
-            .clone()
-            .unwrap()
-            .create_inode(NodeOps::Directory(result_dir.clone()), mode)?;
+        let sb: Arc<TmpSuper> = Arc::downcast(self_node.sb.clone().unwrap()).unwrap();
+        let result_inode = sb.create_inode(NodeOps::Directory(result_dir.clone()), mode)?;
 
         path.entry.set_inode(result_inode.clone());
 
@@ -200,17 +193,16 @@ impl DirectoryOps for TmpDir {
     fn mknod(
         &self,
         self_node: &Arc<INode>,
-        node_type: NodeType,
         mode: Mode,
-        dev: Option<Arc<dyn FileOps>>,
+        dev: Option<Device>,
         _identity: &Identity,
     ) -> EResult<Arc<INode>> {
         let new_node = dev.ok_or(Errno::ENODEV)?;
-        self_node.sb.clone().unwrap().create_inode(
-            match node_type {
-                NodeType::BlockDevice => NodeOps::BlockDevice(new_node),
-                NodeType::CharacterDevice => NodeOps::CharacterDevice(new_node),
-                _ => return Err(Errno::ENODEV),
+        let sb: Arc<TmpSuper> = Arc::downcast(self_node.sb.clone().unwrap()).unwrap();
+        sb.create_inode(
+            match new_node {
+                Device::BlockDevice(x) => NodeOps::BlockDevice(x),
+                Device::CharacterDevice(x) => NodeOps::CharacterDevice(x),
             },
             mode,
         )
@@ -323,5 +315,5 @@ impl FileOps for TmpRegular {
     entails = [crate::vfs::VFS_STAGE],
 )]
 pub fn TMPFS_INIT_STAGE() {
-    super::register_fs(&TmpFs);
+    super::register(&TmpFs);
 }

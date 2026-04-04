@@ -44,7 +44,7 @@ impl<T: Sized + Copy> UserPtr<T> {
 
     /// Creates a new pointer with an offset as a multiple of the underlying type.
     pub fn offset(self, offset: usize) -> Self {
-        Self::new(self.addr + VirtAddr::new(offset))
+        Self::new(self.addr + (VirtAddr::new(offset * size_of::<T>())))
     }
 
     #[must_use]
@@ -68,9 +68,7 @@ impl<T: Sized + Copy> UserPtr<T> {
     #[must_use]
     pub fn read_slice(&self, value: &mut [T]) -> Option<()> {
         arch::virt::copy_from_user(
-            unsafe {
-                slice::from_raw_parts_mut(value.as_mut_ptr() as _, value.len() * size_of::<T>())
-            },
+            unsafe { slice::from_raw_parts_mut(value.as_mut_ptr() as _, size_of_val(value)) },
             self.addr,
         )
         .then_some(())
@@ -79,7 +77,7 @@ impl<T: Sized + Copy> UserPtr<T> {
     #[must_use]
     pub fn write_slice(&mut self, value: &[T]) -> Option<()> {
         arch::virt::copy_to_user(self.addr, unsafe {
-            slice::from_raw_parts(value.as_ptr() as _, value.len() * size_of::<T>())
+            slice::from_raw_parts(value.as_ptr() as _, size_of_val(value))
         })
         .then_some(())
     }
@@ -96,6 +94,10 @@ impl UserCStr {
     }
 
     pub fn as_vec(&self, max_len: usize) -> Option<Vec<u8>> {
+        if self.addr.is_null() {
+            return Some(Vec::new());
+        }
+
         let len = arch::virt::cstr_len_user(self.addr, max_len)?;
         let mut buf = vec![0u8; len];
         if arch::virt::copy_from_user(&mut buf, self.addr) {

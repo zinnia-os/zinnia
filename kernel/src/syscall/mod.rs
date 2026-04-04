@@ -71,10 +71,12 @@ pub fn dispatch(
         numbers::THREAD_GETNAME => sys_unimp!("thread_getname", Err(Errno::ENOSYS)),
 
         // VFS
-        numbers::READ => vfs::read(a0 as _, a1.into(), a2).map(|x| x as _),
+        numbers::READ => Err(Errno::ENOSYS), // Deprecated
         numbers::PREAD => vfs::pread(a0 as _, a1.into(), a2, a3).map(|x| x as _),
-        numbers::WRITE => vfs::write(a0 as _, a1.into(), a2).map(|x| x as _),
+        numbers::READV => vfs::readv(a0 as _, a1.into(), a2).map(|x| x as _),
+        numbers::WRITE => Err(Errno::ENOSYS), // Deprecated
         numbers::PWRITE => vfs::pwrite(a0 as _, a1.into(), a2, a3).map(|x| x as _),
+        numbers::WRITEV => vfs::writev(a0 as _, a1.into(), a2).map(|x| x as _),
         numbers::SEEK => vfs::seek(a0 as _, a1, a2),
         numbers::IOCTL => vfs::ioctl(a0 as _, a1, a2.into()),
         numbers::OPENAT => vfs::openat(a0 as _, a1.into(), a2).map(|x| x as _),
@@ -113,9 +115,9 @@ pub fn dispatch(
         numbers::SYNC => sys_unimp!("sync", Err(Errno::ENOSYS)),
         numbers::FSYNC => sys_unimp!("fsync", Err(Errno::ENOSYS)),
         numbers::FDATASYNC => sys_unimp!("fdatasync", Err(Errno::ENOSYS)),
-        numbers::CHROOT => sys_unimp!("chroot", Err(Errno::ENOSYS)),
-        numbers::MOUNT => sys_unimp!("mount", Err(Errno::ENOSYS)),
-        numbers::UMOUNT => sys_unimp!("umount", Err(Errno::ENOSYS)),
+        numbers::CHROOT => vfs::chroot(a0.into()),
+        numbers::MOUNT => vfs::mount(a0.into(), a1.into(), a2 as _, a3.into()),
+        numbers::UMOUNT => vfs::umount(a0.into(), a1 as _),
         numbers::PIPE => vfs::pipe(a0.into()).map(|_| 0),
 
         // Sockets

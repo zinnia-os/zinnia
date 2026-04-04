@@ -182,9 +182,8 @@ pub fn FBCON_STAGE() {
 
     devtmpfs::register_device(
         b"fbcon",
-        Arc::new(fbcon),
+        crate::vfs::inode::Device::CharacterDevice(Arc::new(fbcon)),
         Mode::from_bits_truncate(0o666),
-        false,
     )
     .unwrap();
 }

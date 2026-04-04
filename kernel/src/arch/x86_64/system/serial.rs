@@ -173,9 +173,8 @@ fn SERIAL_FILE_STAGE() {
 
     devtmpfs::register_device(
         b"serial",
-        Arc::new(SerialDevice { state }),
+        crate::vfs::inode::Device::CharacterDevice(Arc::new(SerialDevice { state })),
         Mode::from_bits_truncate(0o666),
-        false,
     )
     .expect("Unable to create serial file");
 }

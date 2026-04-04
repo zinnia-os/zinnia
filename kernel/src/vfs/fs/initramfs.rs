@@ -62,12 +62,12 @@ fn oct2bin(str: &[u8]) -> usize {
 }
 
 /// Creates all directories in the given path and opens the last one. Also returns the final file name.
-pub fn create_dirs<'a>(
+pub fn create_dirs(
     root: PathNode,
     at: PathNode,
-    path: &'a [u8],
+    path: &[u8],
     mode: Mode,
-) -> EResult<(PathNode, &'a [u8])> {
+) -> EResult<(PathNode, &[u8])> {
     let mut current = at;
 
     // If there is a path to split off, do that. If there isn't, there are no directories to create.

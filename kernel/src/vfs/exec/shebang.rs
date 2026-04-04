@@ -10,6 +10,10 @@ use alloc::{sync::Arc, vec::Vec};
 struct ShebangFormat;
 
 impl ExecFormat for ShebangFormat {
+    fn name(&self) -> &str {
+        "shebang"
+    }
+
     fn identify(&self, file: &File) -> bool {
         let mut buffer = [0u8; 2];
         match file.pread_kernel(&mut buffer, 0) {
@@ -70,5 +74,5 @@ impl ExecFormat for ShebangFormat {
     entails = [crate::vfs::VFS_STAGE],
 )]
 fn ELF_STAGE() {
-    super::register("shebang", Arc::new(ShebangFormat));
+    super::register(&ShebangFormat);
 }

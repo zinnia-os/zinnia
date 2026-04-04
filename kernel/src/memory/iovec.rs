@@ -27,9 +27,14 @@ impl<'a> IovecIter<'a> {
             }
         }
 
+        let mut total_len: usize = 0;
+        for i in iovecs.iter() {
+            total_len = total_len.checked_add(i.len).ok_or(Errno::EINVAL)?;
+        }
+
         Ok(Self {
             iovecs,
-            total_len: iovecs.iter().map(|x| x.len).sum(),
+            total_len,
             total_offset: 0,
             current_idx: 0,
             current_offset: 0,
@@ -141,9 +146,7 @@ impl<'a> IovecIter<'a> {
                     }
                 }
             } else {
-                let dest = unsafe {
-                    core::slice::from_raw_parts_mut(addr.as_ptr() as *mut u8, copy_current)
-                };
+                let dest = unsafe { core::slice::from_raw_parts_mut(addr.as_ptr(), copy_current) };
                 dest.fill(value);
             }
 
@@ -177,8 +180,7 @@ impl<'a> IovecIter<'a> {
                     return Err(Errno::EFAULT);
                 }
             } else {
-                let dest =
-                    unsafe { core::slice::from_raw_parts_mut(addr.as_ptr() as *mut u8, src.len()) };
+                let dest = unsafe { core::slice::from_raw_parts_mut(addr.as_ptr(), src.len()) };
                 dest.copy_from_slice(src);
             }
 
@@ -213,8 +215,7 @@ impl<'a> IovecIter<'a> {
                     return Err(Errno::EFAULT);
                 }
             } else {
-                let src =
-                    unsafe { core::slice::from_raw_parts(addr.as_ptr() as *mut u8, dest.len()) };
+                let src = unsafe { core::slice::from_raw_parts(addr.as_ptr(), dest.len()) };
                 dest.copy_from_slice(src);
             }
 

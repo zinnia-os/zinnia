@@ -1,0 +1,11 @@
+[package]
+name = "ext2"
+version = "0.1.0"
+edition = "2024"
+build = "../../build.rs"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+zinnia = { workspace = true }

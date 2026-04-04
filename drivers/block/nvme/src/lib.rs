@@ -5,11 +5,11 @@ use core::sync::atomic::AtomicUsize;
 use zinnia::{
     alloc::format,
     core::sync::atomic::Ordering,
+    device::block::register_block_device,
     error, log,
     memory::{MmioView, PhysAddr},
     posix::errno::{EResult, Errno},
     system::pci::{DeviceView, Driver, PciBar, PciVariant},
-    vfs::{fs::devtmpfs::register_device, inode::Mode},
 };
 
 mod command;
@@ -69,13 +69,7 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
     let nvme_id = NVME_COUNTER.fetch_add(1, Ordering::SeqCst);
     for ns in namespaces {
         let path = format!("nvme{}n{}", nvme_id, ns.get_id());
-        register_device(path.as_bytes(), ns, Mode::from_bits_truncate(0o660), true)?;
-
-        log!(
-            "Registered new block device: \"{}\" on {}",
-            path,
-            view.address()
-        );
+        register_block_device(&path, ns)?;
     }
 
     Ok(())

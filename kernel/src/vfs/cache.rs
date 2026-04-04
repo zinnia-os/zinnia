@@ -177,7 +177,7 @@ impl PathNode {
 
         if name == b".." {
             return match self.lookup_parent() {
-                Err(e) if e == Errno::ENOENT => Ok(self),
+                Err(Errno::ENOENT) => Ok(self),
                 x => x,
             };
         }

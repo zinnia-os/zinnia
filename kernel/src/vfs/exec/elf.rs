@@ -451,6 +451,10 @@ impl ElfFormat {
 }
 
 impl ExecFormat for ElfFormat {
+    fn name(&self) -> &str {
+        "elf"
+    }
+
     fn identify(&self, file: &File) -> bool {
         let mut buffer = [0u8; size_of::<ElfHdr>()];
         match file.pread_kernel(&mut buffer, 0) {
@@ -579,5 +583,5 @@ impl ExecFormat for ElfFormat {
     entails = [crate::vfs::VFS_STAGE],
 )]
 fn ELF_STAGE() {
-    super::register("elf", Arc::new(ElfFormat));
+    super::register(&ElfFormat);
 }

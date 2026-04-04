@@ -1,5 +1,6 @@
 use super::fs::SuperBlock;
 use crate::{
+    device::block::BlockDevice,
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, dirent::dirent, off_t, stat::*, time::timespec},
@@ -126,9 +127,14 @@ pub enum NodeOps {
     Directory(Arc<dyn DirectoryOps>),
     SymbolicLink(Arc<dyn SymlinkOps>),
     FIFO(Arc<dyn FileOps>),
-    BlockDevice(Arc<dyn FileOps>),
+    BlockDevice(Arc<dyn BlockDevice>),
     CharacterDevice(Arc<dyn FileOps>),
     Socket(Arc<()>), // TODO
+}
+
+pub enum Device {
+    BlockDevice(Arc<dyn BlockDevice>),
+    CharacterDevice(Arc<dyn FileOps>),
 }
 
 /// Operations for directory [`INode`]s.
@@ -210,12 +216,11 @@ pub trait DirectoryOps: FileOps + Any {
     fn mknod(
         &self,
         self_node: &Arc<INode>,
-        node_type: NodeType,
         mode: Mode,
-        dev: Option<Arc<dyn FileOps>>,
+        dev: Option<Device>,
         identity: &Identity,
     ) -> EResult<Arc<INode>> {
-        let _ = (self_node, node_type, mode, dev, identity);
+        let _ = (self_node, mode, dev, identity);
         Err(Errno::ENODEV)
     }
 

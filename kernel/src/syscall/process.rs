@@ -1,15 +1,14 @@
 use crate::{
     arch::sched::Context,
-    memory::{VirtAddr, user::UserPtr},
+    memory::{UserCStr, VirtAddr, user::UserPtr},
     percpu::CpuData,
     posix::errno::{EResult, Errno},
     process::ProcessState,
     sched::Scheduler,
-    uapi,
+    uapi::{self, limits::PATH_MAX},
     vfs::{File, file::OpenFlags, inode::Mode},
 };
 use alloc::vec::Vec;
-use core::ffi::{CStr, c_char};
 
 pub fn gettid() -> usize {
     Scheduler::get_current().get_id()
@@ -79,33 +78,41 @@ pub fn fork(ctx: &Context) -> EResult<usize> {
 
 pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
+    let path_str = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
-    let path_str = unsafe { CStr::from_ptr(path.as_ptr()) };
+    let argv_ptr = UserPtr::<usize>::new(argv);
+    let envp_ptr = UserPtr::<usize>::new(envp);
 
-    let args: Vec<_> = (0..)
-        .map(|i| unsafe { argv.as_ptr::<usize>().offset(i).read() })
-        .take_while(|&p| p != 0)
-        .map(|p| {
-            unsafe { CStr::from_ptr(p as *const c_char) }
-                .to_bytes()
-                .to_vec()
-        })
-        .collect();
+    let mut args: Vec<Vec<u8>> = Vec::new();
+    let mut envs: Vec<Vec<u8>> = Vec::new();
 
-    let envs: Vec<_> = (0..)
-        .map(|i| unsafe { envp.as_ptr::<usize>().offset(i).read() })
-        .take_while(|&p| p != 0)
-        .map(|p| {
-            unsafe { CStr::from_ptr(p as *const c_char) }
-                .to_bytes()
-                .to_vec()
-        })
-        .collect();
+    for i in 0.. {
+        let arg_ptr = VirtAddr::new(argv_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
+        if arg_ptr.is_null() {
+            break;
+        }
+        let arg = UserCStr::new(arg_ptr)
+            .as_vec(PATH_MAX)
+            .ok_or(Errno::EFAULT)?;
+        args.push(arg);
+    }
+
+    for i in 0.. {
+        let env_ptr = VirtAddr::new(envp_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
+        if env_ptr.is_null() {
+            break;
+        }
+        let env = UserCStr::new(env_ptr)
+            .as_vec(PATH_MAX)
+            .ok_or(Errno::EFAULT)?;
+
+        envs.push(env);
+    }
 
     let file = File::open(
         proc.root_dir.lock().clone(),
         proc.working_dir.lock().clone(),
-        path_str.to_bytes(),
+        &path_str,
         OpenFlags::Read | OpenFlags::Executable,
         Mode::empty(),
         &proc.identity.lock(),

@@ -1,13 +1,27 @@
+pub mod gpt;
+pub mod partition;
+
 use crate::{
     memory::{AllocFlags, IovecIter, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
-    vfs::{File, file::FileOps},
+    vfs::{
+        File,
+        file::FileOps,
+        fs::devtmpfs,
+        inode::{Device, Mode},
+    },
 };
+use alloc::{format, sync::Arc};
 use core::slice;
 
 pub trait BlockDevice: FileOps {
     /// Gets the size of a sector in bytes.
     fn get_lba_size(&self) -> usize;
+
+    /// Returns the total number of LBAs on this device.
+    fn lba_count(&self) -> u64 {
+        0
+    }
 
     /// Reads a logical block from from `lba` into the buffer.
     fn read_lba(&self, buffer: PhysAddr, num_lba: usize, lba: u64) -> EResult<usize>;
@@ -16,6 +30,56 @@ pub trait BlockDevice: FileOps {
     fn write_lba(&self, buffer: PhysAddr, lba: u64) -> EResult<()>;
 
     fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize>;
+}
+
+/// Registers a block device by name and scans for partitions.
+pub fn register_block_device(name: &str, device: Arc<dyn BlockDevice>) -> EResult<()> {
+    // Register in devtmpfs as well.
+    devtmpfs::register_device(
+        name.as_bytes(),
+        Device::BlockDevice(device.clone()),
+        Mode::from_bits_truncate(0o660),
+    )?;
+
+    log!("Registered block device: \"{}\"", name);
+
+    // Scan for GPT partitions.
+    scan_partitions(name, device)?;
+
+    Ok(())
+}
+
+/// Scans a block device for GPT partitions and registers each as a sub-device.
+fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<()> {
+    let partitions = match gpt::scan_gpt(device.clone()) {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // No GPT found, that's fine.
+    };
+
+    for (i, part) in partitions.iter().enumerate() {
+        let part_name = format!("{}p{}", parent_name, i + 1);
+        let part_dev = Arc::new(partition::PartitionDevice::new(
+            device.clone(),
+            part.start_lba,
+            part.end_lba - part.start_lba + 1,
+        ));
+
+        devtmpfs::register_device(
+            part_name.as_bytes(),
+            Device::BlockDevice(part_dev),
+            Mode::from_bits_truncate(0o660),
+        )?;
+
+        let uuid_str = part.unique_guid.to_string();
+        devtmpfs::register_symlink(
+            format!("partuuid-{}", uuid_str).as_bytes(),
+            part_name.as_bytes(),
+        )?;
+
+        log!("Partition {}: \"{}\" UUID: {}", i + 1, part_name, uuid_str);
+    }
+
+    Ok(())
 }
 
 impl<T: BlockDevice> FileOps for T {

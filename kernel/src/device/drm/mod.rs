@@ -796,8 +796,7 @@ pub fn register(card: Arc<DrmFile>) -> EResult<()> {
     log!("Registering new DRM card");
     register_device(
         format!("drmcard{}", CARD_COUNTER.fetch_add(1, Ordering::SeqCst)).as_bytes(),
-        card,
+        crate::vfs::inode::Device::CharacterDevice(card),
         Mode::from_bits_truncate(0o660),
-        false,
     )
 }

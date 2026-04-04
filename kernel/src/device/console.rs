@@ -56,9 +56,8 @@ impl FileOps for Console {
 fn CONSOLE_STAGE() {
     devtmpfs::register_device(
         b"console",
-        Arc::new(Console),
+        crate::vfs::inode::Device::CharacterDevice(Arc::new(Console)),
         Mode::from_bits_truncate(0o666),
-        false,
     )
     .expect("Unable to create console");
 }

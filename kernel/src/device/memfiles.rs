@@ -6,7 +6,7 @@ use crate::{
         File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::Mode,
+        inode::{Device, Mode},
     },
 };
 use alloc::sync::Arc;
@@ -59,25 +59,22 @@ impl FileOps for FullFile {
 fn MEMFILES_STAGE() {
     devtmpfs::register_device(
         b"null",
-        Arc::new(NullFile),
+        Device::CharacterDevice(Arc::new(NullFile)),
         Mode::from_bits_truncate(0o666),
-        false,
     )
     .expect("Unable to create /dev/null");
 
     devtmpfs::register_device(
         b"full",
-        Arc::new(FullFile),
+        Device::CharacterDevice(Arc::new(FullFile)),
         Mode::from_bits_truncate(0o666),
-        false,
     )
     .expect("Unable to create /dev/full");
 
     devtmpfs::register_device(
         b"zero",
-        Arc::new(ZeroFile),
+        Device::CharacterDevice(Arc::new(ZeroFile)),
         Mode::from_bits_truncate(0o666),
-        false,
     )
     .expect("Unable to create /dev/zero");
 }
