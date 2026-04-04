@@ -71,10 +71,8 @@ pub fn dispatch(
         numbers::THREAD_GETNAME => sys_unimp!("thread_getname", Err(Errno::ENOSYS)),
 
         // VFS
-        numbers::READ => Err(Errno::ENOSYS), // Deprecated
         numbers::PREAD => vfs::pread(a0 as _, a1.into(), a2, a3).map(|x| x as _),
         numbers::READV => vfs::readv(a0 as _, a1.into(), a2).map(|x| x as _),
-        numbers::WRITE => Err(Errno::ENOSYS), // Deprecated
         numbers::PWRITE => vfs::pwrite(a0 as _, a1.into(), a2, a3).map(|x| x as _),
         numbers::WRITEV => vfs::writev(a0 as _, a1.into(), a2).map(|x| x as _),
         numbers::SEEK => vfs::seek(a0 as _, a1, a2),
