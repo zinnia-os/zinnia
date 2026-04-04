@@ -71,12 +71,23 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
         )?;
 
         let uuid_str = part.unique_guid.to_string();
+        let type_str = part.type_guid.to_string();
+        devtmpfs::register_symlink(
+            format!("parttype-{}", type_str).as_bytes(),
+            part_name.as_bytes(),
+        )?;
         devtmpfs::register_symlink(
             format!("partuuid-{}", uuid_str).as_bytes(),
             part_name.as_bytes(),
         )?;
 
-        log!("Partition {}: \"{}\" UUID: {}", i + 1, part_name, uuid_str);
+        log!(
+            "Partition {}: \"{}\" Type: {} UUID: {}",
+            i + 1,
+            part_name,
+            type_str,
+            uuid_str
+        );
     }
 
     Ok(())
