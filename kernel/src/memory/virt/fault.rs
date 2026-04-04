@@ -1,8 +1,6 @@
 use crate::{
     arch,
-    memory::{
-        AddressSpace, MemoryObject, PagedMemoryObject, VirtAddr, pmm::KernelAlloc, virt::VmFlags,
-    },
+    memory::{MemoryObject, PagedMemoryObject, VirtAddr, pmm::KernelAlloc, virt::VmFlags},
     sched::Scheduler,
 };
 use alloc::sync::Arc;
@@ -25,9 +23,12 @@ pub struct PageFaultInfo {
     pub page_was_present: bool,
 }
 
-/// The actual page fault. This function is meant to be called by other code too.
-/// This is useful for [`crate::memory::user::UserPtr`], which avoids taking any additional locks.
-pub fn handler_inner(info: &PageFaultInfo, space: &mut AddressSpace) {
+/// Generic page fault handler for MMU-generated faults.
+pub fn handler(info: &PageFaultInfo) -> bool {
+    let task = Scheduler::get_current();
+    let proc = task.get_process();
+    let space = &mut proc.address_space.lock();
+
     // Check if the current address space has a theoretical mapping at the faulting address.
     let page_size = arch::virt::get_page_size();
     let faulty_page = info.addr.value() / arch::virt::get_page_size();
@@ -97,7 +98,13 @@ pub fn handler_inner(info: &PageFaultInfo, space: &mut AddressSpace) {
                 .table
                 .map_single::<KernelAlloc>(info.addr, phys, map_flags)
                 .expect("Failed to map a demand-loaded page");
-            return;
+            return true;
+        }
+    } else {
+        // If there is no mapping here, but we were trying to read from the user, fault gracefully.
+        let uar = task.uar.load(Ordering::Relaxed);
+        if !uar.is_null() {
+            return false;
         }
     }
 
@@ -142,20 +149,4 @@ pub fn handler_inner(info: &PageFaultInfo, space: &mut AddressSpace) {
         info.addr.0,
         info.ip.0
     );
-}
-
-/// Generic page fault handler for MMU-generated faults.
-#[must_use]
-pub fn handler(info: &PageFaultInfo) -> bool {
-    let task = Scheduler::get_current();
-
-    let uar = task.uar.load(Ordering::Relaxed);
-    if !uar.is_null() {
-        return false;
-    }
-
-    let proc = task.get_process();
-    handler_inner(info, &mut proc.address_space.lock());
-
-    return true;
 }
