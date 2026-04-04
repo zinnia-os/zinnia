@@ -151,27 +151,14 @@ impl PathNode {
     }
 
     pub fn lookup_child(self, name: &[u8]) -> EResult<Self> {
-        // Traverse the mounts.
-        let mut mount = self.mount.clone();
-        let mut entry = self.entry.clone();
-
-        'again: loop {
-            for child_mnt in entry.clone().mounts.lock().iter() {
-                if !Arc::ptr_eq(child_mnt, &mount) {
-                    mount = child_mnt.clone();
-                    entry = child_mnt.root.clone();
-                    continue 'again;
-                }
-            }
-            break;
-        }
+        // Traverse the mounts on the current entry.
+        let crossed = Self::cross_mounts(self.mount.clone(), self.entry.clone())?;
+        let mount = crossed.mount;
+        let entry = crossed.entry;
 
         // If this entry has already been looked up before, return that.
         if let Some(child) = entry.children.lock().get(name) {
-            return Ok(Self {
-                mount,
-                entry: child.clone(),
-            });
+            return Self::cross_mounts(mount, child.clone());
         }
 
         // If it hasn't, we have to perform a new lookup into the file system.
@@ -220,7 +207,22 @@ impl PathNode {
             .lock()
             .insert(name.to_vec(), child.entry.clone());
 
-        return Ok(child);
+        return Self::cross_mounts(child.mount, child.entry);
+    }
+
+    /// If `entry` is a mount point, cross into the topmost mounted filesystem's root.
+    fn cross_mounts(mut mount: Arc<Mount>, mut entry: Arc<Entry>) -> EResult<Self> {
+        'again: loop {
+            for child_mnt in entry.clone().mounts.lock().iter() {
+                if !Arc::ptr_eq(child_mnt, &mount) {
+                    mount = child_mnt.clone();
+                    entry = child_mnt.root.clone();
+                    continue 'again;
+                }
+            }
+            break;
+        }
+        Ok(Self { mount, entry })
     }
 
     pub fn lookup_parent(&self) -> EResult<Self> {
