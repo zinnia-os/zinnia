@@ -1,4 +1,5 @@
 pub mod block;
+pub mod cmdline;
 pub mod console;
 pub mod drm;
 pub mod fbcon;

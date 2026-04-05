@@ -161,7 +161,7 @@ impl<'a> IovecIter<'a> {
         Ok(())
     }
 
-    pub fn copy_from_slice(&mut self, slice: &[u8]) -> EResult<()> {
+    pub fn copy_from_slice(&mut self, slice: &[u8]) -> EResult<isize> {
         let old_offset = self.total_offset;
         let mut remaining_total = slice.len().min(self.total_len - self.total_offset);
         let mut total_done = 0;
@@ -193,10 +193,10 @@ impl<'a> IovecIter<'a> {
             }
         }
 
-        Ok(())
+        Ok(total_done as isize)
     }
 
-    pub fn copy_to_slice(&mut self, slice: &mut [u8]) -> EResult<()> {
+    pub fn copy_to_slice(&mut self, slice: &mut [u8]) -> EResult<isize> {
         let old_offset = self.total_offset;
         let mut remaining_total = slice.len().min(self.total_len - self.total_offset);
         let mut total_done = 0;
@@ -228,6 +228,6 @@ impl<'a> IovecIter<'a> {
             }
         }
 
-        Ok(())
+        Ok(total_done as isize)
     }
 }
