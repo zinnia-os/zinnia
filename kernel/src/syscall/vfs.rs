@@ -29,8 +29,7 @@ pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isiz
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
-    let flags = file.flags.lock();
-    if !flags.contains(OpenFlags::Read) {
+    if !file.flags.lock().contains(OpenFlags::Read) {
         return Err(Errno::EBADF);
     }
 
@@ -46,8 +45,7 @@ pub fn readv(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
-    let flags = file.flags.lock();
-    if !flags.contains(OpenFlags::Read) {
+    if !file.flags.lock().contains(OpenFlags::Read) {
         return Err(Errno::EBADF);
     }
 
@@ -68,8 +66,7 @@ pub fn pwrite(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isi
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
-    let flags = file.flags.lock();
-    if !flags.contains(OpenFlags::Write) {
+    if !file.flags.lock().contains(OpenFlags::Write) {
         return Err(Errno::EBADF);
     }
 
@@ -85,8 +82,7 @@ pub fn writev(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
 
-    let flags = *file.flags.lock();
-    if !flags.contains(OpenFlags::Write) {
+    if !file.flags.lock().contains(OpenFlags::Write) {
         return Err(Errno::EBADF);
     }
 
