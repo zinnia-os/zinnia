@@ -8,6 +8,7 @@ use crate::{
     irq::{IrqLine, MsiLine, lock::IrqLock},
     memory::fault::PageFaultInfo,
     percpu::CpuData,
+    process::signal::{self, Signal},
     sched::Scheduler,
     util::mutex::spin::SpinMutex,
 };
@@ -83,6 +84,12 @@ pub unsafe extern "C" fn amd64_syscall_stub() {
         "sti",
         "call {syscall_handler}",     // Call syscall handler
         "cli",
+        // If signal delivery or sigreturn modified the context, the isr field
+        // will be nonzero as a flag to use iretq instead of sysretq.
+        // sysretq uses RCX/R11 which may not match the modified RIP/RFLAGS.
+        "cmp byte ptr [rsp+{isr_offset}], 0",
+        "jne {interrupt_return}",
+        // Normal sysretq path (no signal context modification).
         "pop r15",
         "pop r14",
         "pop r13",
@@ -104,6 +111,8 @@ pub unsafe extern "C" fn amd64_syscall_stub() {
         "sysretq",                    // Return to user mode.
 
         syscall_handler = sym syscall_handler,
+        interrupt_return = sym interrupt_return,
+        isr_offset = const offset_of!(Context, isr),
         user_stack = const offset_of!(CpuData, user_stack),
         kernel_stack = const offset_of!(CpuData, kernel_stack),
         user_code64 = const offset_of!(Gdt, user_code64) | CPL_USER as usize,
@@ -130,6 +139,9 @@ extern "C" fn syscall_handler(frame: *mut Context) {
         );
         frame.rax = result.0 as u64;
         frame.rdx = result.1 as u64;
+
+        // Check for pending signals before returning to userspace.
+        crate::process::signal::deliver_pending_signals(frame);
     }
 }
 
@@ -239,13 +251,37 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
     let old = IrqLock::set_interrupted(true);
     let context = unsafe { context.as_mut().unwrap() };
     let isr = context.isr as u8;
+    let from_user = context.cs & CPL_USER as u64 == CPL_USER as u64;
 
     match isr {
         // Exceptions.
         consts::IDT_PF => {
             page_fault_handler(context);
         }
-        // Unhandled exceptions.
+        // CPU exceptions that should generate signals when from userspace.
+        0x00..0x20 if from_user => {
+            let sig = match isr {
+                consts::IDT_DE => Signal::SIGFPE,  // Divide error
+                consts::IDT_DB => Signal::SIGTRAP, // Debug
+                consts::IDT_BP => Signal::SIGTRAP, // Breakpoint
+                consts::IDT_OF => Signal::SIGFPE,  // Overflow
+                consts::IDT_BR => Signal::SIGSEGV, // BOUND range exceeded
+                consts::IDT_UD => Signal::SIGILL,  // Invalid opcode
+                consts::IDT_SS => Signal::SIGSEGV, // Stack-segment fault
+                consts::IDT_GP => Signal::SIGSEGV, // General protection fault
+                consts::IDT_MF => Signal::SIGFPE,  // x87 FP error
+                consts::IDT_AC => Signal::SIGBUS,  // Alignment check
+                consts::IDT_XF => Signal::SIGFPE,  // SIMD FP error
+                _ => {
+                    error!("{:?}", context);
+                    panic!("Unhandled userspace exception {}", isr);
+                }
+            };
+
+            let task = Scheduler::get_current();
+            signal::send_signal_to_thread(&task, sig);
+        }
+        // Kernel exceptions are fatal.
         0x00..0x20 => {
             error!("{:?}", context);
             panic!("Got an exception {}", isr);
@@ -271,10 +307,12 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
     }
 
     IrqLock::set_interrupted(old);
-}
 
-// /// Try to send a signal to the user-space program or panic if the interrupt is caused by the kernel.
-// fn try_signal_or_die(context: &Context, signal: u32, code: u32) {}
+    // Check for pending signals before returning to userspace.
+    if from_user {
+        signal::deliver_pending_signals(context);
+    }
+}
 
 fn page_fault_handler(context: &mut Context) {
     let mut cr2: usize;

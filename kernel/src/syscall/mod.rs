@@ -2,6 +2,7 @@ mod memory;
 mod module;
 mod numbers;
 mod process;
+mod signal;
 mod system;
 mod vfs;
 
@@ -19,7 +20,7 @@ macro_rules! sys_unimp {
 /// Returns a tuple of (value, error) to the user. An error code of 0 inidcates success.
 /// If the error code is not 0, `value` is not valid and indicates failure.
 pub fn dispatch(
-    frame: &Context,
+    frame: &mut Context,
     num: usize,
     a0: usize,
     a1: usize,
@@ -45,18 +46,19 @@ pub fn dispatch(
         numbers::MADVISE => sys_unimp!("madvise", Err(Errno::ENOSYS)),
 
         // Signals
-        numbers::SIGPROCMASK => sys_unimp!("sigprocmask", Err(Errno::ENOSYS)),
+        numbers::SIGPROCMASK => signal::sigprocmask(a0, a1.into(), a2.into()),
         numbers::SIGSUSPEND => sys_unimp!("sigsuspend", Err(Errno::ENOSYS)),
         numbers::SIGPENDING => sys_unimp!("sigpending", Err(Errno::ENOSYS)),
-        numbers::SIGACTION => sys_unimp!("sigaction", Err(Errno::ENOSYS)),
+        numbers::SIGACTION => signal::sigaction(a0 as _, a1.into(), a2.into()),
         numbers::SIGTIMEDWAIT => sys_unimp!("sigtimedwait", Err(Errno::ENOSYS)),
         numbers::SIGALTSTACK => sys_unimp!("sigaltstack", Err(Errno::ENOSYS)),
+        numbers::SIGRETURN => signal::sigreturn(frame),
 
         // Processes
         numbers::EXIT => process::exit(a0),
         numbers::EXECVE => process::execve(a0.into(), a1.into(), a2.into()),
         numbers::FORK => process::fork(frame),
-        numbers::KILL => sys_unimp!("kill", Err(Errno::ENOSYS)),
+        numbers::KILL => signal::kill(a0 as isize, a1),
         numbers::GETTID => Ok(process::gettid()),
         numbers::GETPID => Ok(process::getpid()),
         numbers::GETPPID => Ok(process::getppid()),

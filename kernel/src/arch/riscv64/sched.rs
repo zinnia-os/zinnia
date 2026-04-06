@@ -1,8 +1,8 @@
 use crate::{
     irq::lock::IrqGuard,
     memory::{VirtAddr, virt::KERNEL_STACK_SIZE},
-    posix::errno::EResult,
-    process::task::Task,
+    posix::errno::{EResult, Errno},
+    process::{signal::SignalSet, task::Task},
 };
 use core::{arch::naked_asm, mem::offset_of};
 
@@ -197,6 +197,20 @@ unsafe extern "C" fn task_entry_thunk() -> ! {
 pub unsafe fn jump_to_user(ip: VirtAddr, sp: VirtAddr) {
     let _ = (ip, sp);
     todo!()
+}
+
+pub fn setup_signal_frame(
+    _context: &mut Context,
+    _handler: usize,
+    _signal: u32,
+    _mask: SignalSet,
+    _restorer: usize,
+) {
+    todo!("riscv64 signal frame setup not yet implemented")
+}
+
+pub fn restore_signal_frame(_context: &mut Context) -> EResult<()> {
+    Err(Errno::ENOSYS)
 }
 
 pub unsafe fn jump_to_context(context: *mut Context) {

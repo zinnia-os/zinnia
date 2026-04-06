@@ -1,39 +1,39 @@
 #![allow(unused)]
 
 /// Carry floating
-pub const RFLAGS_CF: usize = 1 << 0;
+pub const RFLAGS_CF: u64 = 1 << 0;
 /// Parity Flag
-pub const RFLAGS_PF: usize = 1 << 2;
+pub const RFLAGS_PF: u64 = 1 << 2;
 /// Auxiliary Carry Flag
-pub const RFLAGS_AF: usize = 1 << 4;
+pub const RFLAGS_AF: u64 = 1 << 4;
 /// Zero Flag
-pub const RFLAGS_ZF: usize = 1 << 6;
+pub const RFLAGS_ZF: u64 = 1 << 6;
 /// Sign Flag
-pub const RFLAGS_SF: usize = 1 << 7;
+pub const RFLAGS_SF: u64 = 1 << 7;
 /// Trap Flag
-pub const RFLAGS_TF: usize = 1 << 8;
+pub const RFLAGS_TF: u64 = 1 << 8;
 /// Interrupt Enable Flag
-pub const RFLAGS_IF: usize = 1 << 9;
+pub const RFLAGS_IF: u64 = 1 << 9;
 /// Direction Flag
-pub const RFLAGS_DF: usize = 1 << 10;
+pub const RFLAGS_DF: u64 = 1 << 10;
 /// Overflow Flag
-pub const RFLAGS_OF: usize = 1 << 11;
+pub const RFLAGS_OF: u64 = 1 << 11;
 /// I/O Privilege Level
-pub const RFLAGS_IOPL: usize = 3 << 12;
+pub const RFLAGS_IOPL: u64 = 3 << 12;
 /// Nested Task
-pub const RFLAGS_NT: usize = 1 << 14;
+pub const RFLAGS_NT: u64 = 1 << 14;
 /// Resume Flag
-pub const RFLAGS_RF: usize = 1 << 16;
+pub const RFLAGS_RF: u64 = 1 << 16;
 /// Virtual-8086 Mode
-pub const RFLAGS_VM: usize = 1 << 17;
+pub const RFLAGS_VM: u64 = 1 << 17;
 /// Alignment Check / Access Control
-pub const RFLAGS_AC: usize = 1 << 18;
+pub const RFLAGS_AC: u64 = 1 << 18;
 /// Virtual Interrupt Flag
-pub const RFLAGS_VIF: usize = 1 << 19;
+pub const RFLAGS_VIF: u64 = 1 << 19;
 /// Virtual Interrupt Pending
-pub const RFLAGS_VIP: usize = 1 << 20;
+pub const RFLAGS_VIP: u64 = 1 << 20;
 /// ID Flag
-pub const RFLAGS_ID: usize = 1 << 21;
+pub const RFLAGS_ID: u64 = 1 << 21;
 
 // Control register 0
 /// Protected Mode Enable

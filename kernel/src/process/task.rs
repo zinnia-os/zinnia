@@ -3,6 +3,7 @@ use crate::{
     arch::{self},
     memory::{UserAccessRegion, virt::KERNEL_STACK_SIZE},
     posix::errno::EResult,
+    process::signal::ThreadSignalState,
     util::mutex::spin::SpinMutex,
 };
 use alloc::sync::{Arc, Weak};
@@ -52,6 +53,8 @@ pub struct Task {
     pub priority: i8,
     /// Used to handle [`UserPtr`] page faults.
     pub uar: AtomicPtr<UserAccessRegion>,
+    /// Per-thread signal state (pending signals and signal mask).
+    pub signal: SpinMutex<ThreadSignalState>,
 }
 
 const STACK_LAYOUT: Layout = match Layout::from_size_align(KERNEL_STACK_SIZE, 0x1000) {
@@ -76,6 +79,7 @@ impl Task {
             is_user,
             process: Arc::downgrade(parent),
             uar: AtomicPtr::new(null_mut()),
+            signal: SpinMutex::new(ThreadSignalState::default()),
             state: SpinMutex::new(TaskState::Ready),
             task_context: SpinMutex::new(arch::sched::TaskContext::default()),
             kernel_stack,

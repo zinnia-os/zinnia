@@ -169,7 +169,6 @@ pub(super) fn setup_core(context: &'static CpuData) {
         }
     }
 
-    // TODO
     if cpuid7.ecx & consts::CPUID_7C_UMIP != 0 {
         cr4 |= consts::CR4_UMIP;
     }

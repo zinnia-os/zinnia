@@ -6,7 +6,7 @@ use crate::{
     memory::{VirtAddr, virt::AddressSpace},
     percpu::CpuData,
     posix::errno::{EResult, Errno},
-    process::task::Task,
+    process::{signal::SignalState, task::Task},
     sched::Scheduler,
     uapi,
     util::{mutex::spin::SpinMutex, once::Once},
@@ -59,6 +59,8 @@ pub struct Process {
     pub identity: SpinMutex<Identity>,
     /// A table of open file descriptors.
     pub open_files: SpinMutex<FdTable>,
+    /// Per-process signal action table.
+    pub signal_actions: SpinMutex<SignalState>,
     /// A pointer to the next free memory region.
     pub mmap_head: SpinMutex<VirtAddr>,
 }
@@ -102,6 +104,7 @@ impl Process {
             children: SpinMutex::new(Vec::new()),
             identity: SpinMutex::new(self.identity.lock().clone()),
             open_files: SpinMutex::new(self.open_files.lock().clone()),
+            signal_actions: SpinMutex::new(self.signal_actions.lock().clone()),
             mmap_head: SpinMutex::new(*self.mmap_head.lock()),
         });
 
@@ -149,6 +152,7 @@ impl Process {
             working_dir: SpinMutex::new(cwd),
             identity: SpinMutex::new(identity),
             open_files: SpinMutex::new(FdTable::new()),
+            signal_actions: SpinMutex::new(SignalState::new()),
             // TODO: This address should be determined from the highest loaded segment.
             mmap_head: SpinMutex::new(VirtAddr::new(0x1_0000_0000)),
         })
@@ -190,6 +194,7 @@ impl Process {
             *space = info.space;
 
             self.open_files.lock().close_exec();
+            self.signal_actions.lock().reset_on_exec();
         }
 
         CpuData::get().scheduler.add_task(init);

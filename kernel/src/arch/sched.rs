@@ -2,6 +2,7 @@ use super::internal;
 use crate::irq::lock::IrqGuard;
 use crate::memory::VirtAddr;
 use crate::posix::errno::EResult;
+use crate::process::signal::SignalSet;
 use crate::process::task::Task;
 use core::fmt::Debug;
 
@@ -71,6 +72,24 @@ pub unsafe fn jump_to_user(ip: VirtAddr, sp: VirtAddr) {
 /// `context` has to be allocated on the stack.
 pub unsafe fn jump_to_context(context: *mut Context) {
     unsafe { internal::sched::jump_to_context(context) };
+}
+
+/// Sets up a signal frame on the user stack, modifying the context to jump to the signal handler.
+/// When the handler returns, execution continues via the restorer which calls sigreturn.
+pub fn setup_signal_frame(
+    context: &mut Context,
+    handler: usize,
+    signal: u32,
+    mask: SignalSet,
+    restorer: usize,
+) {
+    internal::sched::setup_signal_frame(context, handler, signal, mask, restorer);
+}
+
+/// Restores the original context from a signal frame on the user stack.
+/// Called by the sigreturn syscall.
+pub fn restore_signal_frame(context: &mut Context) -> EResult<()> {
+    internal::sched::restore_signal_frame(context)
 }
 
 // # Note

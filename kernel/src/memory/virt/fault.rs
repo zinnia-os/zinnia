@@ -1,6 +1,7 @@
 use crate::{
     arch,
     memory::{MemoryObject, PagedMemoryObject, VirtAddr, pmm::KernelAlloc, virt::VmFlags},
+    process::signal::Signal,
     sched::Scheduler,
 };
 use alloc::sync::Arc;
@@ -109,26 +110,10 @@ pub fn handler(info: &PageFaultInfo) -> bool {
     }
 
     if info.caused_by_user {
-        // TODO: Send SIGSEGV and reschedule.
-        // Kill process.
-        // Force immediate reschedule.
-        panic!(
-            "User process caused a segmentation fault! Attempted to {} a {} page at {:#x} (IP: {:#x})",
-            if info.caused_by_write {
-                "write to"
-            } else if info.caused_by_fetch {
-                "execute on"
-            } else {
-                "read from"
-            },
-            if info.page_was_present {
-                "present"
-            } else {
-                "non-present"
-            },
-            info.addr.0,
-            info.ip.0
-        );
+        // Send SIGSEGV to the faulting user process.
+        let task = crate::sched::Scheduler::get_current();
+        crate::process::signal::send_signal_to_thread(&task, Signal::SIGSEGV);
+        return true; // Will be delivered on return to userspace.
     }
 
     // If any other attempt to recover has failed, we made a mistake.

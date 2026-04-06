@@ -1,5 +1,3 @@
-use alloc::boxed::Box;
-
 use super::{
     ARCH_DATA,
     asm::{rdmsr, wrmsr},
@@ -9,14 +7,14 @@ use super::{
     system::{apic::LAPIC, gdt::TSS},
 };
 use crate::{
-    arch,
     irq::lock::{IrqGuard, IrqLock},
-    memory::{VirtAddr, virt::KERNEL_STACK_SIZE},
+    memory::{UserPtr, VirtAddr, virt::KERNEL_STACK_SIZE},
     percpu::CpuData,
-    posix::errno::EResult,
-    process::task::Task,
+    posix::errno::{EResult, Errno},
+    process::{signal::SignalSet, task::Task},
     sched::Scheduler,
 };
+use alloc::boxed::Box;
 use core::{
     arch::{asm, naked_asm},
     fmt::Write,
@@ -316,9 +314,107 @@ pub(in crate::arch) unsafe fn jump_to_context(context: *mut Context) -> ! {
             "mov rsp, {context}",
             "jmp {interrupt_return}",
             context = in(reg) context,
-            interrupt_return = sym arch::x86_64::irq::interrupt_return
+            interrupt_return = sym crate::arch::x86_64::irq::interrupt_return
         );
 
         unreachable!();
     }
+}
+
+/// Signal frame placed on the user stack when delivering a signal.
+/// The restorer function pops this frame via sigreturn.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SignalFrame {
+    /// The saved signal mask to restore after handler returns.
+    saved_mask: u64,
+    /// The saved user context to restore after handler returns.
+    saved_context: Context,
+    /// The signal number.
+    signal_number: u32,
+    _pad: u32,
+    /// Return address: points to the restorer trampoline.
+    restorer_ret: u64,
+}
+
+pub(in crate::arch) fn setup_signal_frame(
+    context: &mut Context,
+    handler: usize,
+    signal: u32,
+    mask: SignalSet,
+    restorer: usize,
+) {
+    let frame_sp = (context.rsp as usize - size_of::<SignalFrame>()) & !0xF;
+
+    let frame = SignalFrame {
+        saved_mask: mask.as_raw(),
+        saved_context: *context,
+        signal_number: signal,
+        _pad: 0,
+        restorer_ret: restorer as u64,
+    };
+
+    let mut ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_sp));
+    if ptr.write(frame).is_none() {
+        // If we can't write the signal frame, force-kill the process.
+        warn!(
+            "Failed to write signal frame to user stack at {:#x}, killing process",
+            frame_sp
+        );
+        let task = Scheduler::get_current();
+        let proc = task.get_process();
+        proc.exit(128 + signal as u8);
+        unreachable!();
+    }
+
+    // Place the restorer return address BELOW the signal frame so the
+    // handler's stack grows downward away from the frame, not into it.
+    // Also ensures RSP % 16 == 8 at handler entry (x86_64 ABI).
+    let ret_sp = frame_sp - 8;
+    let mut ret_ptr = UserPtr::<u64>::new(VirtAddr::new(ret_sp));
+    if ret_ptr.write(restorer as u64).is_none() {
+        warn!(
+            "Failed to write restorer address to user stack at {:#x}, killing process",
+            ret_sp
+        );
+        let task = Scheduler::get_current();
+        let proc = task.get_process();
+        proc.exit(128 + signal as u8);
+        unreachable!();
+    }
+
+    // Modify context to jump to the handler.
+    context.rip = handler as u64;
+    context.rdi = signal as u64; // First argument: signal number.
+    context.rsp = ret_sp as u64;
+    // Clear direction flag, as required by x86_64 ABI.
+    context.rflags &= !consts::RFLAGS_DF;
+    // Force iretq return path instead of sysretq. sysretq uses RCX/R11
+    // which don't match the modified RIP/RFLAGS/RSP.
+    context.isr = 0xFF;
+}
+
+pub(in crate::arch) fn restore_signal_frame(context: &mut Context) -> EResult<()> {
+    // After the handler's `ret` pops the restorer address, RSP = ret_sp + 8 = frame_sp.
+    // The restorer then calls sigreturn without modifying RSP further.
+    let rsp = context.rsp as usize;
+    let frame_addr = rsp;
+
+    let ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_addr));
+    let frame = ptr.read().ok_or(Errno::EFAULT)?;
+
+    // Restore the saved context.
+    *context = frame.saved_context;
+
+    // Force iretq return path instead of sysretq. The restored context
+    // may have come from an IDT entry where RCX/R11 don't match RIP/RFLAGS.
+    context.isr = 0xFF;
+
+    // Restore the signal mask.
+    let task = Scheduler::get_current();
+    let mut sig_state = task.signal.lock();
+    sig_state.mask = SignalSet::from_raw(frame.saved_mask);
+    sig_state.mask.sanitize_mask();
+
+    Ok(())
 }
