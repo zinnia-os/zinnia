@@ -4,7 +4,8 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use crate::util::spin::SpinLock;
+use crate::irq::lock::IrqGuard;
+use crate::{irq::lock::IrqLock, util::spin::SpinLock};
 
 /// A locking primitive for mutually exclusive accesses.
 /// `T` is the type of the inner value to store.
@@ -39,7 +40,10 @@ impl<T: ?Sized> SpinMutex<T> {
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
         let inner = unsafe { &mut *self.inner.get() };
         inner.spin.lock();
-        SpinMutexGuard { parent: self }
+        SpinMutexGuard {
+            parent: self,
+            _irq_guard: IrqLock::lock(),
+        }
     }
 }
 
@@ -74,6 +78,7 @@ impl<T: ?Sized> Debug for SpinMutex<T> {
 /// This struct is returned by [`SpinMutex::lock`] and is used to safely control mutex locking state.
 pub struct SpinMutexGuard<'m, T: 'm + ?Sized> {
     parent: &'m SpinMutex<T>,
+    _irq_guard: IrqGuard<'m>,
 }
 
 impl<T: ?Sized> Deref for SpinMutexGuard<'_, T> {
