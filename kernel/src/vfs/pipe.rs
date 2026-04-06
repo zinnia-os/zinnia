@@ -59,15 +59,23 @@ impl FileOps for PipeBuffer {
     }
 
     fn release(&self, file: &File) -> EResult<()> {
-        let mut inner = self.inner.lock();
-        let flags = *file.flags.lock();
+        {
+            let mut inner = self.inner.lock();
+            let flags = *file.flags.lock();
 
-        if flags.contains(OpenFlags::Read) {
-            inner.readers -= 1;
+            if flags.contains(OpenFlags::Read) {
+                inner.readers -= 1;
+            }
+            if flags.contains(OpenFlags::Write) {
+                inner.writers -= 1;
+            }
         }
-        if flags.contains(OpenFlags::Write) {
-            inner.writers -= 1;
-        }
+
+        // Wake blocked readers/writers so they can observe the closed state.
+        // A reader blocked on an empty pipe needs to see writers == 0 (EOF).
+        // A writer blocked on a full pipe needs to see readers == 0 (EPIPE).
+        self.rd_queue.wake_all();
+        self.wr_queue.wake_all();
 
         Ok(())
     }
