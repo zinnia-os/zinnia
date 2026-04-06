@@ -178,7 +178,7 @@ const KERNEL64_DS: usize = offset_of!(Gdt, kernel64_data);
 
 /// Information which is passed to a booted up AP via the trampoline.
 #[repr(C, packed)]
-#[derive(Debug, Pod, Zeroable, Clone, Copy)]
+#[derive(Pod, Zeroable, Clone, Copy)]
 struct InfoData {
     gdt: Gdt,
     gdtr_limit: u16,
@@ -189,6 +189,7 @@ struct InfoData {
     hhdm_offset: u64,
     temp_cr3: u32,
     entry: u64,
+    percpu_data: u64,
     lapic_id: u32,
     booted: u8,
 }
@@ -196,12 +197,17 @@ struct InfoData {
 extern "C" fn ap_entry(info: PhysAddr) -> ! {
     unsafe { PageTable::get_kernel().set_active() };
 
-    let cpu_ctx = percpu::allocate_cpu().expect("Unable to allocate per-CPU context");
-    super::super::cpu::setup_core(cpu_ctx);
+    let info = unsafe { (info.as_hhdm() as *mut InfoData).as_mut().unwrap() };
+
+    super::super::cpu::setup_core(unsafe {
+        (info.percpu_data as *const CpuData).as_ref().unwrap()
+    });
 
     // Create a new idle task for this CPU.
     let idle_task =
         Arc::new(Task::new(sched::idle_fn, 0, 0, Process::get_kernel(), false).unwrap());
+
+    let cpu_ctx = CpuData::get();
     cpu_ctx
         .scheduler
         .idle_task
@@ -223,8 +229,7 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
 
     unsafe {
         // Let the BSP know that we're alive.
-        let booted = (info.as_hhdm() as *mut u8).byte_add(offset_of!(InfoData, booted));
-        booted.write_volatile(1);
+        (&raw mut info.booted).write_volatile(1);
     }
 
     cpu_ctx.scheduler.do_yield();
@@ -261,6 +266,7 @@ fn start_ap(temp_cr3: u32, id: u32) {
     buffer.copy_from_slice(tp_code);
 
     let data_offset = unsafe { data.offset_from_unsigned(start) };
+    let percpu_data = percpu::allocate_cpu().expect("Unable to allocate per-CPU context");
 
     // Save our metadata to the trampoline.
     let info = InfoData {
@@ -273,6 +279,7 @@ fn start_ap(temp_cr3: u32, id: u32) {
         hhdm_offset: PhysAddr::null().as_hhdm() as *mut u8 as _,
         temp_cr3,
         entry: ap_entry as *const fn() as _,
+        percpu_data: percpu_data as *const CpuData as u64,
         lapic_id: id,
         booted: 0,
     };
