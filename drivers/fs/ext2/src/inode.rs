@@ -375,7 +375,7 @@ impl Ext2Dir {
                 }
 
                 let actual_len = if entry.inode != 0 {
-                    (size_of::<Ext2DirEntry>() + entry.name_len as usize).div_ceil(4)
+                    (size_of::<Ext2DirEntry>() + entry.name_len as usize).div_ceil(4) * 4
                 } else {
                     0
                 };

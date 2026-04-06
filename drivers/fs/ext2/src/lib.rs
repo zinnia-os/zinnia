@@ -638,6 +638,7 @@ impl Ext2Super {
                     let z = zinnia::alloc::vec![0u8; self.block_size];
                     self.write_block(ind, &z)?;
                     raw.i_block[EXT2_IND_BLOCK] = ind as u32;
+                    raw.i_blocks += (self.block_size / 512) as u32;
                 }
                 self.write_block_ptr(raw.i_block[EXT2_IND_BLOCK] as u64, lb as usize, new_block)?;
             } else {
