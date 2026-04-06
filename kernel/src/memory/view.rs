@@ -11,8 +11,12 @@ pub struct BitValue<T: PrimInt> {
 }
 
 fn field_mask<T: PrimInt, A: PrimInt + Into<T>>(field: Field<T, A>) -> T {
-    let mask: T = A::one().into();
-    (mask << field.bit_width) - A::one().into()
+    if field.bit_width == size_of::<T>() * 8 {
+        T::max_value()
+    } else {
+        let mask: T = A::one().into();
+        (mask << field.bit_width) - A::one().into()
+    }
 }
 
 impl<T: PrimInt> BitValue<T> {
