@@ -241,6 +241,11 @@ pub trait DirectoryOps: FileOps + Any {
         let mut current = 0;
 
         for (_, child) in children.iter() {
+            let inode = match child.get_inode() {
+                Some(x) => x,
+                None => continue,
+            };
+
             if current < offset {
                 current += 1;
                 continue;
@@ -249,11 +254,6 @@ pub trait DirectoryOps: FileOps + Any {
             if read == buffer.len() {
                 break;
             }
-
-            let inode = match child.get_inode() {
-                Some(x) => x,
-                None => continue,
-            };
 
             buffer[read] = dirent {
                 d_ino: inode.id,

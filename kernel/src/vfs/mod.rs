@@ -165,27 +165,27 @@ pub fn get_dir_entries(
 
     // Read `.` and `..` entries.
     if *offset == 0 {
-        buffer[0] = dirent {
+        buffer[num_read] = dirent {
             d_ino: inode.id,
             d_off: 0,
             d_reclen: size_of::<dirent>() as _,
             d_type: DT_DIR,
             d_name: [0u8; _],
         };
-        buffer[0].d_name[0] = b'.';
+        buffer[num_read].d_name[0] = b'.';
         num_read += 1;
     }
 
     if *offset == 1 || num_read == 1 {
-        buffer[1] = dirent {
+        buffer[num_read] = dirent {
             d_ino: inode.id,
             d_off: 1,
             d_reclen: size_of::<dirent>() as _,
             d_type: DT_DIR,
             d_name: [0u8; _],
         };
-        buffer[1].d_name[0] = b'.';
-        buffer[1].d_name[1] = b'.';
+        buffer[num_read].d_name[0] = b'.';
+        buffer[num_read].d_name[1] = b'.';
         num_read += 1;
     }
 
@@ -194,7 +194,7 @@ pub fn get_dir_entries(
         NodeOps::Directory(x) => x.get_dir_entries(
             &inode,
             path.entry,
-            *offset as off_t,
+            (*offset).saturating_sub(2) as off_t,
             &mut buffer[num_read..],
             identity,
         )?,
