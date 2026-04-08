@@ -27,22 +27,22 @@ pub fn getppid() -> usize {
 
 pub fn getuid() -> usize {
     let proc = Scheduler::get_current().get_process();
-    proc.identity.lock().user_id
+    proc.identity.lock().user_id as _
 }
 
 pub fn geteuid() -> usize {
     let proc = Scheduler::get_current().get_process();
-    proc.identity.lock().effective_user_id
+    proc.identity.lock().effective_user_id as _
 }
 
 pub fn getgid() -> usize {
     let proc = Scheduler::get_current().get_process();
-    proc.identity.lock().group_id
+    proc.identity.lock().group_id as _
 }
 
 pub fn getegid() -> usize {
     let proc = Scheduler::get_current().get_process();
-    proc.identity.lock().effective_group_id
+    proc.identity.lock().effective_group_id as _
 }
 
 pub fn getpgid(pid: usize) -> EResult<usize> {
