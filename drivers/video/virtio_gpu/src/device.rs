@@ -3,6 +3,7 @@ use core::any::Any;
 use virtio::{VirtQueue, VirtioDevice};
 use zinnia::alloc::vec;
 use zinnia::device::drm::DeviceState;
+use zinnia::device::drm::modes::DMT_MODES;
 use zinnia::uapi::drm::drm_mode_connector_type;
 use zinnia::{
     alloc::{sync::Arc, vec::Vec},
@@ -353,38 +354,21 @@ impl VirtioGpuDevice {
             let encoder = Arc::new(Encoder::new(encoder_id, vec![crtc.clone()], crtc.clone()));
             all_encoders.push(encoder.clone());
 
-            // Create mode info
-            let mode = drm_mode_modeinfo {
-                clock: (scanout.width * scanout.height * 60) / 1000, // Approximate
-                hdisplay: scanout.width as u16,
-                hsync_start: scanout.width as u16,
-                hsync_end: scanout.width as u16,
-                htotal: scanout.width as u16,
-                hskew: 0,
-                vdisplay: scanout.height as u16,
-                vsync_start: scanout.height as u16,
-                vsync_end: scanout.height as u16,
-                vtotal: scanout.height as u16,
-                vscan: 0,
-                vrefresh: 60,
-                flags: 0,
-                typ: 0,
-                name: {
-                    let mut name = [0u8; 32];
-                    let mode_name = zinnia::alloc::format!("{}x{}", scanout.width, scanout.height);
-                    let bytes = mode_name.as_bytes();
-                    let len = bytes.len().min(31);
-                    name[..len].copy_from_slice(&bytes[..len]);
-                    name
-                },
-            };
+            // Look up proper modes from the DMT table
+            let modes: Vec<drm_mode_modeinfo> = DMT_MODES
+                .iter()
+                .filter(|m| {
+                    m.hdisplay == scanout.width as u16 && m.vdisplay == scanout.height as u16
+                })
+                .cloned()
+                .collect();
 
             // Create connector
             let connector_id = self.obj_counter.alloc();
             let connector = Arc::new(Connector::new(
                 connector_id,
                 drm_mode_connector_state::Connected,
-                vec![mode],
+                modes,
                 vec![encoder.clone()],
                 drm_mode_connector_type::Virtual,
             ));
