@@ -34,7 +34,7 @@ pub struct cmsghdr {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct sockaddr_storage {
-    pub s_family: sa_family_t,
+    pub ss_family: sa_family_t,
     padding: [u8; 128 - size_of::<sa_family_t>() - size_of::<usize>()],
     alignment: usize,
 }
@@ -57,7 +57,7 @@ pub struct sockaddr_un {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ucred {
     pub pid: super::pid_t,
     pub uid: super::uid_t,
@@ -67,9 +67,6 @@ pub struct ucred {
 pub const SCM_RIGHTS: u32 = 1;
 pub const SCM_TIMESTAMP: u32 = SO_TIMESTAMP;
 pub const SCM_TIMESTAMPNS: u32 = SO_TIMESTAMPNS;
-
-/*MISSING: CMSG_DATA, CMSG_NXTHDR, CMSG_FIRSTHDR */
-
 pub const SCM_CREDENTIALS: u32 = 0x02;
 
 pub const SOCK_DGRAM: u32 = 1 << 0;
@@ -131,56 +128,27 @@ pub const MSG_WAITALL: u32 = 0x80;
 pub const MSG_FIN: u32 = 0x200;
 pub const MSG_CONFIRM: u32 = 0x800;
 
-/* Linux extensions. */
-pub const MSG_DONTWAIT: u32 = 0x1000;
-pub const MSG_CMSG_CLOEXEC: u32 = 0x2000;
-pub const MSG_MORE: u32 = 0x4000;
-pub const MSG_FASTOPEN: u32 = 0x20000000;
-
-/* GNU (?) extension: Protocol family constants. */
-
-pub const PF_INET: u32 = 1;
-pub const PF_INET6: u32 = 2;
-pub const PF_UNIX: u32 = 3;
-pub const PF_LOCAL: u32 = 3;
-pub const PF_UNSPEC: u32 = 4;
-pub const PF_NETLINK: u32 = 5;
-pub const PF_BRIDGE: u32 = 6;
-pub const PF_APPLETALK: u32 = 7;
-pub const PF_BLUETOOTH: u32 = 8;
-pub const PF_DECNET: u32 = 9;
-pub const PF_IPX: u32 = 10;
-pub const PF_ISDN: u32 = 11;
-pub const PF_SNA: u32 = 12;
-pub const PF_PACKET: u32 = 13;
-pub const PF_AX25: u32 = 14;
-pub const PF_NETROM: u32 = 15;
-pub const PF_ROSE: u32 = 16;
-pub const PF_TIPC: u32 = 30;
-pub const PF_ALG: u32 = 38;
-pub const PF_MAX: u32 = 46;
-
-pub const AF_INET: u32 = PF_INET;
-pub const AF_INET6: u32 = PF_INET6;
-pub const AF_UNIX: u32 = PF_UNIX;
-pub const AF_LOCAL: u32 = PF_LOCAL;
-pub const AF_UNSPEC: u32 = PF_UNSPEC;
-pub const AF_NETLINK: u32 = PF_NETLINK;
-pub const AF_BRIDGE: u32 = PF_BRIDGE;
-pub const AF_APPLETALK: u32 = PF_APPLETALK;
-pub const AF_BLUETOOTH: u32 = PF_BLUETOOTH;
-pub const AF_DECNET: u32 = PF_DECNET;
-pub const AF_IPX: u32 = PF_IPX;
-pub const AF_ISDN: u32 = PF_ISDN;
-pub const AF_SNA: u32 = PF_SNA;
-pub const AF_PACKET: u32 = PF_PACKET;
-pub const AF_AX25: u32 = PF_AX25;
-pub const AF_NETROM: u32 = PF_NETROM;
-pub const AF_ROSE: u32 = PF_ROSE;
-pub const AF_TIPC: u32 = PF_TIPC;
-pub const AF_ALG: u32 = PF_ALG;
-pub const AF_MAX: u32 = PF_MAX;
+pub const AF_INET: u32 = 1;
+pub const AF_INET6: u32 = 2;
+pub const AF_UNIX: u32 = 3;
+pub const AF_LOCAL: u32 = 3;
+pub const AF_UNSPEC: u32 = 4;
+pub const AF_NETLINK: u32 = 5;
+pub const AF_BRIDGE: u32 = 6;
+pub const AF_APPLETALK: u32 = 7;
+pub const AF_BLUETOOTH: u32 = 8;
+pub const AF_DECNET: u32 = 9;
+pub const AF_IPX: u32 = 10;
+pub const AF_ISDN: u32 = 11;
+pub const AF_SNA: u32 = 12;
+pub const AF_PACKET: u32 = 13;
+pub const AF_AX25: u32 = 14;
+pub const AF_NETROM: u32 = 15;
+pub const AF_ROSE: u32 = 16;
+pub const AF_TIPC: u32 = 30;
+pub const AF_ALG: u32 = 38;
+pub const AF_MAX: u32 = 46;
 
 pub const SHUT_RD: u32 = 1;
-pub const SHUT_RDWR: u32 = 2;
-pub const SHUT_WR: u32 = 3;
+pub const SHUT_WR: u32 = 2;
+pub const SHUT_RDWR: u32 = SHUT_RD | SHUT_WR;
