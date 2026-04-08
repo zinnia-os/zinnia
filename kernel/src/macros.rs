@@ -69,7 +69,6 @@ macro_rules! log_inner {
         use ::core::fmt::Write;
         {
             let current_time = $crate::clock::get_elapsed();
-            let _lock = $crate::irq::lock::IrqLock::lock();
             let mut writer = $crate::log::GLOBAL_LOGGERS.lock();
             _ = writer.write_fmt(format_args!(
                 "[{:5}.{:06}] \x1b[1;34m{}:\x1b[0m ",

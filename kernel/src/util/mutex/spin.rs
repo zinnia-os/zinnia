@@ -38,11 +38,12 @@ impl<T: Default> Default for SpinMutex<T> {
 
 impl<T: ?Sized> SpinMutex<T> {
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
+        let irq_guard = IrqLock::lock();
         let inner = unsafe { &mut *self.inner.get() };
         inner.spin.lock();
         SpinMutexGuard {
             parent: self,
-            _irq_guard: IrqLock::lock(),
+            _irq_guard: irq_guard,
         }
     }
 }
@@ -60,6 +61,7 @@ impl<T: ?Sized> SpinMutex<T> {
 
 impl<T> SpinMutex<T> {
     pub fn into_inner(self) -> T {
+        let _irq = IrqLock::lock();
         let inner = unsafe { &mut *self.inner.get() };
         inner.spin.lock();
         self.inner.into_inner().data
