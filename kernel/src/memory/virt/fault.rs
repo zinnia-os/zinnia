@@ -101,12 +101,13 @@ pub fn handler(info: &PageFaultInfo) -> bool {
                 .expect("Failed to map a demand-loaded page");
             return true;
         }
-    } else {
-        // If there is no mapping here, but we were trying to read from the user, fault gracefully.
-        let uar = task.uar.load(Ordering::Relaxed);
-        if !uar.is_null() {
-            return false;
-        }
+    }
+
+    // If there is no resolvable mapping here, but we were trying to copy from/to user memory,
+    // fault gracefully via the user access region fixup.
+    let uar = task.uar.load(Ordering::Relaxed);
+    if !uar.is_null() {
+        return false;
     }
 
     if info.caused_by_user {
