@@ -1,7 +1,10 @@
 use crate::{
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    uapi,
+    uapi::{
+        self,
+        poll::{POLLERR, POLLHUP, POLLIN, POLLOUT},
+    },
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
     vfs::{
         File,
@@ -143,9 +146,34 @@ impl FileOps for PipeBuffer {
         }
     }
 
-    fn poll(&self, _file: &File, _mask: i16) -> EResult<i16> {
-        // TODO
-        Err(Errno::ENOSYS)
+    fn poll(&self, file: &File, mask: i16) -> EResult<i16> {
+        let inner = self.inner.lock();
+        let flags = *file.flags.lock();
+        let mut revents: i16 = 0;
+
+        if flags.contains(OpenFlags::Read) {
+            // Readable if there is data in the buffer.
+            if inner.buffer.get_data_len() > 0 {
+                revents |= POLLIN;
+            }
+            // If no writers remain, signal hangup (EOF).
+            if inner.writers == 0 {
+                revents |= POLLHUP;
+            }
+        }
+
+        if flags.contains(OpenFlags::Write) {
+            // Writable if there is space in the buffer.
+            if inner.buffer.get_available_len() > 0 {
+                revents |= POLLOUT;
+            }
+            // If no readers remain, signal error (broken pipe).
+            if inner.readers == 0 {
+                revents |= POLLERR;
+            }
+        }
+
+        Ok(revents & (mask | POLLERR | POLLHUP))
     }
 
     fn ioctl(&self, _file: &File, request: usize, argp: VirtAddr) -> EResult<usize> {
