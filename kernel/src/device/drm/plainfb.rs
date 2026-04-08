@@ -34,12 +34,12 @@ impl Device for PlainDevice {
         &self.state
     }
 
-    fn driver_version(&self) -> (u32, u32, u32) {
+    fn driver_version(&self) -> (i32, i32, i32) {
         (0, 1, 0)
     }
 
-    fn driver_info(&self) -> (&str, &str, &str) {
-        ("plainfb", "Plain Framebuffer", "0")
+    fn driver_info(&self) -> (&[u8], &[u8], &[u8]) {
+        (b"plainfb", b"Plain Framebuffer", b"0")
     }
 
     fn create_dumb(

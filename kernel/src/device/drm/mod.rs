@@ -68,10 +68,10 @@ pub trait Device: Send + Sync {
     fn state(&self) -> &DeviceState;
 
     /// Returns a tuple of (major, minor, patch).
-    fn driver_version(&self) -> (u32, u32, u32);
+    fn driver_version(&self) -> (i32, i32, i32);
 
     /// Returns a tuple of (name, description, date).
-    fn driver_info(&self) -> (&str, &str, &str);
+    fn driver_info(&self) -> (&[u8], &[u8], &[u8]);
 
     /// Creates a dumb framebuffer. Also returns the pitch in bytes.
     fn create_dumb(
@@ -178,6 +178,37 @@ impl FileOps for DrmFile {
 
     fn ioctl(&self, _file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         match request as u32 {
+            drm::DRM_IOCTL_VERSION => {
+                let mut ptr = UserPtr::<drm::drm_version>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                (val.version_major, val.version_minor, val.version_patchlevel) =
+                    self.device.driver_version();
+                let (name, date, desc) = self.device.driver_info();
+
+                if !val.name.is_null() && val.name_len > 0 {
+                    let len = name.len().min(val.name_len);
+                    val.name.write_slice(&name[..len]).ok_or(Errno::EFAULT)?;
+                }
+                val.name_len = name.len();
+
+                if !val.date.is_null() && val.date_len > 0 {
+                    let len = date.len().min(val.date_len);
+                    val.date.write_slice(&date[..len]).ok_or(Errno::EFAULT)?;
+                }
+                val.date_len = date.len();
+
+                if !val.desc.is_null() && val.desc_len > 0 {
+                    let len = desc.len().min(val.desc_len);
+                    val.desc.write_slice(&desc[..len]).ok_or(Errno::EFAULT)?;
+                }
+                val.desc_len = desc.len();
+
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_SET_MASTER | drm::DRM_IOCTL_DROP_MASTER => {
+                // No-op: single client, always master
+            }
             drm::DRM_IOCTL_SET_VERSION => {
                 let mut ptr = UserPtr::<drm::drm_set_version>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
@@ -189,8 +220,12 @@ impl FileOps for DrmFile {
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
                 match val.capability {
                     drm::DRM_CAP_DUMB_BUFFER => val.value = 1,
-                    drm::DRM_CAP_ATOMIC => val.value = 1,
-                    _ => warn!("Unknown Capability {}!", val.capability),
+                    drm::DRM_CAP_DUMB_PREFERRED_DEPTH => val.value = 24,
+                    drm::DRM_CAP_DUMB_PREFER_SHADOW => val.value = 0,
+                    drm::DRM_CAP_CURSOR_WIDTH => val.value = 64,
+                    drm::DRM_CAP_CURSOR_HEIGHT => val.value = 64,
+                    drm::DRM_CAP_TIMESTAMP_MONOTONIC => val.value = 1,
+                    _ => return Err(Errno::EINVAL),
                 }
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
@@ -248,6 +283,11 @@ impl FileOps for DrmFile {
                             .ok_or(Errno::EFAULT)?;
                     }
                 }
+
+                val.min_width = 1;
+                val.max_width = 8192;
+                val.min_height = 1;
+                val.max_height = 8192;
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
@@ -714,6 +754,26 @@ impl FileOps for DrmFile {
                 log!("CREATEPROPBLOB: length={}, blob_id={}", val.length, blob_id);
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_MODE_DIRTYFB => {
+                let ptr = UserPtr::<drm::drm_mode_fb_dirty_cmd>::new(arg);
+                let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                let state = self.device.state();
+                let framebuffers = state.framebuffers.lock();
+                let fb = framebuffers
+                    .iter()
+                    .find(|x| x.id == val.fb_id)
+                    .ok_or(Errno::ENOENT)?
+                    .clone();
+                drop(framebuffers);
+
+                // Find which CRTC is displaying this FB and flush it
+                if let Some((crtc_id, _)) = self.active_fb.lock().as_ref() {
+                    let mut commit = AtomicState::new(self.device.clone());
+                    commit.set_crtc_framebuffer(*crtc_id, fb);
+                    self.device.commit(&commit);
+                }
             }
             drm::DRM_IOCTL_MODE_PAGE_FLIP => {
                 let ptr = UserPtr::<drm::drm_mode_crtc_page_flip>::new(arg);

@@ -406,12 +406,12 @@ impl Device for VirtioGpuDevice {
         &self.state
     }
 
-    fn driver_version(&self) -> (u32, u32, u32) {
+    fn driver_version(&self) -> (i32, i32, i32) {
         (1, 0, 0)
     }
 
-    fn driver_info(&self) -> (&str, &str, &str) {
-        ("virtio-gpu", "VirtIO GPU Driver", "2026")
+    fn driver_info(&self) -> (&[u8], &[u8], &[u8]) {
+        (b"virtio-gpu", b"VirtIO GPU Driver", b"2026")
     }
 
     fn create_dumb(
