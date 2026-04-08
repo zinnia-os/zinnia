@@ -451,7 +451,13 @@ pub fn fcntl(fd: i32, cmd: usize, arg: usize) -> EResult<usize> {
             Ok(flags.bits() as _)
         }
         F_SETFL => {
-            warn!("fcntl F_SETFL is a stub!");
+            let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
+            let new_flags = OpenFlags::from_bits_truncate(arg as u32);
+            // Only status flags (NonBlocking, Append) can be changed via F_SETFL.
+            let changeable = OpenFlags::NonBlocking | OpenFlags::Append;
+            let mut flags = file.file.flags.lock();
+            flags.remove(changeable);
+            flags.insert(new_flags & changeable);
             Ok(0)
         }
         F_GETOWN => {
