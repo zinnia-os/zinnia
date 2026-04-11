@@ -4,7 +4,7 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi,
-    util::mutex::spin::SpinMutex,
+    util::{event::Event, mutex::spin::SpinMutex},
     vfs::{
         cache::{LookupFlags, PathNode},
         inode::{Mode, NodeOps},
@@ -88,6 +88,72 @@ pub struct FileDescription {
     pub close_on_exec: AtomicBool,
 }
 
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PollFlags: i16 {
+        const In = uapi::poll::POLLIN;
+        const Out = uapi::poll::POLLOUT;
+        const Pri = uapi::poll::POLLPRI;
+        const Hup = uapi::poll::POLLHUP;
+        const Err = uapi::poll::POLLERR;
+        const Rdhup = uapi::poll::POLLRDHUP;
+        const Nval = uapi::poll::POLLNVAL;
+        const Rdnorm = uapi::poll::POLLRDNORM;
+        const Rdband = uapi::poll::POLLRDBAND;
+        const Wrnorm = uapi::poll::POLLWRNORM;
+        const Wrband = uapi::poll::POLLWRBAND;
+
+        const Read = uapi::poll::POLLIN | uapi::poll::POLLPRI | uapi::poll::POLLRDHUP | uapi::poll::POLLRDNORM | uapi::poll::POLLRDBAND;
+        const Write = uapi::poll::POLLOUT | uapi::poll::POLLWRNORM | uapi::poll::POLLWRBAND;
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct PollEventSet<'a> {
+    first: Option<&'a Event>,
+    second: Option<&'a Event>,
+}
+
+impl<'a> PollEventSet<'a> {
+    pub const fn new() -> Self {
+        Self {
+            first: None,
+            second: None,
+        }
+    }
+
+    pub const fn one(event: &'a Event) -> Self {
+        Self {
+            first: Some(event),
+            second: None,
+        }
+    }
+
+    pub fn add(mut self, event: &'a Event) -> Self {
+        if self
+            .first
+            .is_some_and(|existing| core::ptr::eq(existing, event))
+            || self
+                .second
+                .is_some_and(|existing| core::ptr::eq(existing, event))
+        {
+            return self;
+        }
+
+        if self.first.is_none() {
+            self.first = Some(event);
+        } else if self.second.is_none() {
+            self.second = Some(event);
+        }
+
+        self
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = &'a Event> {
+        [self.first, self.second].into_iter().flatten()
+    }
+}
+
 impl FileDescription {
     pub fn new(file: Arc<File>) -> Self {
         Self {
@@ -144,9 +210,15 @@ pub trait FileOps: Sync + Send + Any {
     }
 
     /// Polls this file with a mask.
-    fn poll(&self, file: &File, mask: i16) -> EResult<i16> {
+    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
         _ = (file, mask);
         Ok(mask)
+    }
+
+    /// Returns the events that can change readiness for the requested poll mask.
+    fn poll_events(&self, file: &File, mask: PollFlags) -> PollEventSet<'_> {
+        let _ = (file, mask);
+        PollEventSet::new()
     }
 
     /// Maps the file into an [`AddressSpace`].
@@ -371,7 +443,7 @@ impl File {
         self.pwrite(&mut iter, offset)
     }
 
-    pub fn poll(&self, mask: i16) -> EResult<i16> {
+    pub fn poll(&self, mask: PollFlags) -> EResult<PollFlags> {
         self.ops.poll(self, mask)
     }
 

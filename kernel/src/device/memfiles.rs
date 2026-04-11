@@ -1,9 +1,9 @@
 use crate::{
     memory::IovecIter,
     posix::errno::{EResult, Errno},
-    process::PROCESS_STAGE,
+    process::{Identity, PROCESS_STAGE},
     vfs::{
-        File,
+        self, File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
         inode::{Device, Mode},
@@ -57,24 +57,35 @@ impl FileOps for FullFile {
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
 fn MEMFILES_STAGE() {
-    devtmpfs::register_device(
+    let root = devtmpfs::get_root();
+
+    vfs::mknod(
+        root.clone(),
+        root.clone(),
         b"null",
-        Device::CharacterDevice(Arc::new(NullFile)),
         Mode::from_bits_truncate(0o666),
+        Some(Device::CharacterDevice(Arc::new(NullFile))),
+        &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/null");
 
-    devtmpfs::register_device(
+    vfs::mknod(
+        root.clone(),
+        root.clone(),
         b"full",
-        Device::CharacterDevice(Arc::new(FullFile)),
         Mode::from_bits_truncate(0o666),
+        Some(Device::CharacterDevice(Arc::new(FullFile))),
+        &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/full");
 
-    devtmpfs::register_device(
+    vfs::mknod(
+        root.clone(),
+        root,
         b"zero",
-        Device::CharacterDevice(Arc::new(ZeroFile)),
         Mode::from_bits_truncate(0o666),
+        Some(Device::CharacterDevice(Arc::new(ZeroFile))),
+        &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/zero");
 }

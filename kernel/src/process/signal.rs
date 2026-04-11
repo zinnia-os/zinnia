@@ -1,5 +1,6 @@
 use crate::{
     arch::sched::Context,
+    process::Process,
     sched::Scheduler,
     uapi::signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
 };
@@ -326,10 +327,70 @@ pub struct ThreadSignalState {
     pub mask: SignalSet,
 }
 
-/// Queue a signal on the given thread. Returns Ok(()) if the signal was queued.
-pub fn send_signal_to_thread(task: &crate::process::task::Task, sig: Signal) {
-    let mut state = task.signal.lock();
-    state.pending.set(sig, true);
+/// Queue a signal on the given thread and wake it if it is sleeping.
+///
+/// Signals whose effective disposition is "ignore" (either explicitly via
+/// `SIG_IGN` or implicitly via `SIG_DFL` when the default action is
+/// [`DefaultAction::Ignore`]) are silently dropped per POSIX semantics.
+/// This prevents ignored signals from generating spurious `EINTR` returns
+/// on blocking syscalls.
+pub fn send_signal_to_thread(task: &alloc::sync::Arc<crate::process::task::Task>, sig: Signal) {
+    // Drop signals that would be ignored — they must not interrupt
+    // blocking syscalls or be delivered to userspace.
+    {
+        let proc = task.get_process();
+        let actions = proc.signal_actions.lock();
+        let action = actions.get_action(sig);
+        if action.is_ignore()
+            || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
+        {
+            return;
+        }
+    }
+
+    {
+        let mut state = task.signal.lock();
+        state.pending.set(sig, true);
+    }
+    // Wake the task so it can process the signal. If it's already on the
+    // run queue this is harmless — the scheduler will just see it twice
+    // and the second pick will find it Dead/not-Ready and skip it.
+    crate::percpu::CpuData::get()
+        .scheduler
+        .add_task(task.clone());
+}
+
+/// Force-deliver a synchronous signal (e.g., from a hardware fault like SIGSEGV/SIGBUS/SIGFPE).
+/// This unmasks the signal and resets its handler to SIG_DFL, ensuring it cannot be blocked
+/// or caught in a way that causes an infinite fault loop.
+pub fn force_signal_to_thread(task: &alloc::sync::Arc<crate::process::task::Task>, sig: Signal) {
+    // Unmask the signal so it's deliverable.
+    {
+        let mut state = task.signal.lock();
+        state.mask.set(sig, false);
+        state.pending.set(sig, true);
+    }
+
+    // Reset the handler to SIG_DFL so the default action (terminate) is taken.
+    let proc = task.get_process();
+    proc.signal_actions
+        .lock()
+        .set_action(sig, SigAction::default());
+}
+
+/// Send a signal to every process in the given process group.
+pub fn send_signal_to_pgrp(pgrp: crate::process::Pid, sig: Signal) {
+    let table = crate::process::PROCESS_TABLE.lock();
+    for proc in table.values() {
+        let Some(proc) = proc.upgrade() else { continue }; // TODO: Should entries be removed?
+        if *proc.pgrp.lock() == pgrp {
+            // Send to the first thread of each matching process.
+            let threads = proc.threads.lock();
+            if let Some(t) = threads.first() {
+                send_signal_to_thread(t, sig);
+            }
+        }
+    }
 }
 
 /// Deliver pending signals to the current thread. Called before returning to userspace.
@@ -356,6 +417,8 @@ pub fn deliver_pending_signals(context: &mut Context) {
             None => return,
         };
 
+        log!("Delivering signal: {:?}", sig);
+
         // Clear this signal from pending.
         task.signal.lock().pending.set(sig, false);
 
@@ -368,7 +431,7 @@ pub fn deliver_pending_signals(context: &mut Context) {
             match sig.default_action() {
                 DefaultAction::Terminate | DefaultAction::CoreDump => {
                     // Terminate the process with exit code 128 + signal number (POSIX convention).
-                    proc.clone().exit((128 + sig.as_raw()) as u8);
+                    Process::exit((128 + sig.as_raw()) as u8);
                     // exit() never returns.
                 }
                 DefaultAction::Stop => {

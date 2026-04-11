@@ -2,16 +2,15 @@
 
 use crate::{
     boot::BootInfo,
+    device::tty::{Tty, TtyDriver},
     memory::{
-        IovecIter, PhysAddr, UserPtr, VirtAddr, free, malloc,
+        PhysAddr, free, malloc,
         pmm::KernelAlloc,
         virt::{VmFlags, mmu::PageTable},
     },
-    posix::errno::{EResult, Errno},
-    uapi::{self, termios::winsize},
-    vfs::{File, file::FileOps, fs::devtmpfs, inode::Mode},
+    uapi::termios::winsize,
 };
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
 use core::{
     ffi::{c_char, c_void},
     ptr::null_mut,
@@ -133,36 +132,20 @@ impl Drop for FbCon {
     }
 }
 
-impl FileOps for FbCon {
-    fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        let _ = (offset, buffer, file);
-        // TODO: Get multiplexed input from event devices.
-        Ok(0)
+impl TtyDriver for FbCon {
+    fn write_output(&self, data: &[u8]) {
+        for &byte in data {
+            unsafe { flanterm_write(self.ctx, &byte as *const u8 as *const c_char, 1) };
+        }
     }
 
-    fn write(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        for _ in 0..buffer.len() {
-            let mut c = [0u8];
-            buffer.copy_to_slice(&mut c)?;
-            unsafe { flanterm_write(self.ctx, c.as_ptr() as *const c_char, c.len()) };
+    fn get_winsize(&self) -> winsize {
+        winsize {
+            ws_row: self.rows as _,
+            ws_col: self.cols as _,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
         }
-        Ok(buffer.len() as _)
-    }
-
-    fn ioctl(&self, _file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
-        match request as _ {
-            uapi::ioctls::TIOCGWINSZ => {
-                let mut arg = UserPtr::new(arg);
-                arg.write(winsize {
-                    ws_row: self.rows as _,
-                    ws_col: self.cols as _,
-                    ..Default::default()
-                })
-                .ok_or(Errno::EINVAL)?;
-            }
-            _ => return Err(Errno::ENOSYS),
-        }
-        Ok(0)
     }
 }
 
@@ -179,11 +162,6 @@ pub fn FBCON_STAGE() {
     };
 
     let fbcon = FbCon::new(fb);
-
-    devtmpfs::register_device(
-        b"fbcon",
-        crate::vfs::inode::Device::CharacterDevice(Arc::new(fbcon)),
-        Mode::from_bits_truncate(0o666),
-    )
-    .unwrap();
+    let tty = Tty::new(String::from("fbcon"), Arc::new(fbcon));
+    tty.register_device().expect("Unable to create fbcon");
 }

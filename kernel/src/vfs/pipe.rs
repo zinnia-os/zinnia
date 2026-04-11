@@ -1,14 +1,11 @@
 use crate::{
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    uapi::{
-        self,
-        poll::{POLLERR, POLLHUP, POLLIN, POLLOUT},
-    },
+    uapi,
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
     vfs::{
         File,
-        file::{FileOps, OpenFlags},
+        file::{FileOps, OpenFlags, PollEventSet, PollFlags},
     },
 };
 use core::hint::unlikely;
@@ -110,6 +107,9 @@ impl FileOps for PipeBuffer {
             } else {
                 drop(inner);
                 read.wait();
+                if crate::sched::Scheduler::get_current().has_pending_signals() {
+                    return Err(Errno::EINTR);
+                }
             }
         }
     }
@@ -142,38 +142,55 @@ impl FileOps for PipeBuffer {
                 return Err(Errno::EAGAIN);
             } else {
                 write.wait();
+                if crate::sched::Scheduler::get_current().has_pending_signals() {
+                    return Err(Errno::EINTR);
+                }
             }
         }
     }
 
-    fn poll(&self, file: &File, mask: i16) -> EResult<i16> {
+    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
         let inner = self.inner.lock();
         let flags = *file.flags.lock();
-        let mut revents: i16 = 0;
+        let mut revents = PollFlags::empty();
 
         if flags.contains(OpenFlags::Read) {
             // Readable if there is data in the buffer.
             if inner.buffer.get_data_len() > 0 {
-                revents |= POLLIN;
+                revents |= PollFlags::In;
             }
             // If no writers remain, signal hangup (EOF).
             if inner.writers == 0 {
-                revents |= POLLHUP;
+                revents |= PollFlags::Hup;
             }
         }
 
         if flags.contains(OpenFlags::Write) {
             // Writable if there is space in the buffer.
             if inner.buffer.get_available_len() > 0 {
-                revents |= POLLOUT;
+                revents |= PollFlags::Out;
             }
             // If no readers remain, signal error (broken pipe).
             if inner.readers == 0 {
-                revents |= POLLERR;
+                revents |= PollFlags::Err;
             }
         }
 
-        Ok(revents & (mask | POLLERR | POLLHUP))
+        Ok(revents & (mask | PollFlags::Err | PollFlags::Hup))
+    }
+
+    fn poll_events(&self, _file: &File, mask: PollFlags) -> PollEventSet<'_> {
+        let wants_read = mask.intersects(PollFlags::Read);
+        let wants_write = mask.intersects(PollFlags::Write);
+
+        let mut events = PollEventSet::new();
+        if wants_read || !wants_write {
+            events = events.add(&self.rd_queue);
+        }
+        if wants_write || !wants_read {
+            events = events.add(&self.wr_queue);
+        }
+        events
     }
 
     fn ioctl(&self, _file: &File, request: usize, argp: VirtAddr) -> EResult<usize> {

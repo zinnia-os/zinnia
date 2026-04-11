@@ -10,7 +10,7 @@ use crate::{
     util::mutex::spin::SpinMutex,
     vfs::{
         PathNode,
-        cache::Entry,
+        cache::{Entry, EntryState},
         file::{File, FileOps, MmapFlags, OpenFlags},
         fs::{FileSystem, Mount},
         inode::{Device, DirectoryOps, INode, Mode, NodeOps, RegularOps, SymlinkOps},
@@ -120,21 +120,28 @@ impl DirectoryOps for TmpDir {
         Ok(())
     }
 
-    fn unlink(&self, node: &Arc<INode>, entry: &PathNode, identity: &Identity) -> EResult<()> {
-        let _ = (node, entry, identity);
-        todo!()
+    fn unlink(&self, _node: &Arc<INode>, entry: &PathNode, _identity: &Identity) -> EResult<()> {
+        *entry.entry.inode.lock() = EntryState::NotPresent;
+        Ok(())
     }
 
     fn rename(
         &self,
-        node: &Arc<INode>,
+        _node: &Arc<INode>,
         entry: PathNode,
-        target: &Arc<INode>,
+        _target: &Arc<INode>,
         target_entry: PathNode,
-        identity: &Identity,
+        _identity: &Identity,
     ) -> EResult<()> {
-        let _ = (node, entry, target, target_entry, identity);
-        todo!()
+        let inode = entry.entry.get_inode().ok_or(Errno::ENOENT)?;
+        target_entry.entry.set_inode(inode);
+        *entry.entry.inode.lock() = EntryState::NotPresent;
+
+        // Transfer children for directory renames.
+        let children = core::mem::take(&mut *entry.entry.children.lock());
+        *target_entry.entry.children.lock() = children;
+
+        Ok(())
     }
 
     fn symlink(
@@ -203,6 +210,7 @@ impl DirectoryOps for TmpDir {
             match new_node {
                 Device::BlockDevice(x) => NodeOps::BlockDevice(x),
                 Device::CharacterDevice(x) => NodeOps::CharacterDevice(x),
+                Device::Socket(x) => NodeOps::Socket(x),
             },
             mode,
         )
@@ -288,7 +296,7 @@ impl FileOps for TmpRegular {
         offset: uapi::off_t,
     ) -> EResult<VirtAddr> {
         let object = if flags.contains(MmapFlags::Private) {
-            self.cache.make_private(len, offset)?
+            self.cache.make_private(len, offset as usize)?
         } else {
             self.cache.clone()
         };

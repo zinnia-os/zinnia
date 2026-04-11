@@ -12,12 +12,20 @@ use crate::{
     },
     posix::errno::{EResult, Errno},
     uapi::drm::{
-        DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_PRIMARY, drm_mode_connector_state,
-        drm_mode_connector_type,
+        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, DRM_PLANE_TYPE_PRIMARY,
+        drm_mode_connector_state, drm_mode_connector_type,
     },
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::any::Any;
+
+struct CursorState {
+    buffer: Option<Arc<dyn BufferObject>>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
 
 struct PlainDevice {
     state: DeviceState,
@@ -27,6 +35,51 @@ struct PlainDevice {
     stride: u32,
     addr: MmioView, // Shared DRM object storage (device-global)
     obj_counter: IdAllocator,
+    cursor: crate::util::mutex::spin::SpinMutex<CursorState>,
+}
+
+impl PlainDevice {
+    /// Alpha-blend cursor pixels onto the MMIO framebuffer.
+    fn composite_cursor(&self, cursor: &CursorState, cbuf: &PlainDumbBuffer) {
+        let fb_w = self.width as i32;
+        let fb_h = self.height as i32;
+        let stride = self.stride as usize;
+        let cw = cursor.width as i32;
+        let ch = cursor.height as i32;
+
+        let dst_base = self.addr.base() as *mut u8;
+        let src_base = cbuf.addr.as_hhdm::<u8>();
+
+        for cy in 0..ch {
+            let py = cursor.y + cy;
+            if py < 0 || py >= fb_h {
+                continue;
+            }
+            for cx in 0..cw {
+                let px = cursor.x + cx;
+                if px < 0 || px >= fb_w {
+                    continue;
+                }
+
+                let src_off = (cy as usize * cursor.width as usize + cx as usize) * 4;
+                let dst_off = py as usize * stride + px as usize * 4;
+
+                unsafe {
+                    let sa = *src_base.add(src_off + 3) as u32;
+                    if sa == 0 {
+                        continue;
+                    }
+                    let inv_a = 255 - sa;
+
+                    for c in 0..3 {
+                        let s = *src_base.add(src_off + c) as u32;
+                        let d = *dst_base.add(dst_off + c) as u32;
+                        *dst_base.add(dst_off + c) = ((s * sa + d * inv_a) / 255) as u8;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Device for PlainDevice {
@@ -49,11 +102,16 @@ impl Device for PlainDevice {
         height: u32,
         bpp: u32,
     ) -> EResult<(Arc<dyn BufferObject>, u32)> {
-        (width == self.width).ok_or(Errno::EINVAL)?;
-        (height == self.height).ok_or(Errno::EINVAL)?;
-        (bpp == self.bpp).ok_or(Errno::EINVAL)?;
+        // Allow exact framebuffer size or cursor-sized (up to 64x64) allocations
+        let is_fb_size = width == self.width && height == self.height && bpp == self.bpp;
+        let is_cursor_size = width <= 64 && height <= 64 && bpp == 32;
+        if !is_fb_size && !is_cursor_size {
+            return Err(Errno::EINVAL);
+        }
 
-        let size = self.stride as usize * self.height as usize;
+        let bytes_per_pixel = bpp.div_ceil(8);
+        let pitch = width * bytes_per_pixel;
+        let size = (pitch * height) as usize;
 
         // Allocate physical memory for the buffer
         let buffer_addr =
@@ -67,7 +125,7 @@ impl Device for PlainDevice {
                 height,
                 addr: buffer_addr,
             }),
-            self.stride,
+            pitch,
         ))
     }
 
@@ -106,8 +164,38 @@ impl Device for PlainDevice {
                 unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, size);
                 }
+
+                // Composite cursor on top if active
+                let cursor = self.cursor.lock();
+                if let Some(ref cursor_buf) = cursor.buffer {
+                    let cursor_data = cursor_buf.as_ref() as &dyn Any;
+                    if let Some(cbuf) = cursor_data.downcast_ref::<PlainDumbBuffer>() {
+                        self.composite_cursor(&cursor, cbuf);
+                    }
+                }
             }
         }
+    }
+
+    fn set_cursor(
+        &self,
+        _crtc_id: u32,
+        buffer: Option<Arc<dyn BufferObject>>,
+        width: u32,
+        height: u32,
+    ) -> EResult<()> {
+        let mut cursor = self.cursor.lock();
+        cursor.buffer = buffer;
+        cursor.width = width;
+        cursor.height = height;
+        Ok(())
+    }
+
+    fn move_cursor(&self, _crtc_id: u32, x: i32, y: i32) -> EResult<()> {
+        let mut cursor = self.cursor.lock();
+        cursor.x = x;
+        cursor.y = y;
+        Ok(())
     }
 }
 
@@ -170,6 +258,13 @@ fn PLAINFB_STAGE() {
         stride: fb.pitch as _,
         addr: unsafe { MmioView::new(fb.base, fb.pitch * fb.height) },
         obj_counter: IdAllocator::new(),
+        cursor: crate::util::mutex::spin::SpinMutex::new(CursorState {
+            buffer: None,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }),
     });
 
     // Initialize DRM objects and store them in the device
@@ -200,10 +295,19 @@ fn PLAINFB_STAGE() {
         drm_mode_connector_type::Virtual,
     ));
 
+    // Create a cursor plane
+    let cursor_plane = Arc::new(Plane::new(
+        device.obj_counter.alloc(),
+        vec![crtc.clone()],
+        DRM_PLANE_TYPE_CURSOR,
+        vec![DRM_FORMAT_ARGB8888],
+    ));
+
     device.state.crtcs.lock().push(crtc);
     device.state.encoders.lock().push(encoder);
     device.state.connectors.lock().push(connector);
     device.state.planes.lock().push(plane.clone());
+    device.state.planes.lock().push(cursor_plane);
 
     super::register(DrmFile::new(device)).expect("Unable to create plainfb DRM card");
 }

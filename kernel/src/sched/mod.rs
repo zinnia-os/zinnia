@@ -122,7 +122,7 @@ impl Scheduler {
 
             // If we are switching between address spaces, we need to update the page table.
             // TODO: This is very ugly.
-            to_proc.address_space.lock().table.set_active();
+            (*to_proc.address_space.raw_inner()).table.set_active();
 
             let cpu = CPU_DATA.get();
 

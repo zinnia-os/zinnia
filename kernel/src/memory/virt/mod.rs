@@ -333,7 +333,6 @@ impl AddressSpace {
     pub fn unmap(&self, addr: VirtAddr, len: NonZeroUsize) -> EResult<()> {
         let _ = (len, addr);
         // TODO
-        warn!("AddressSpace::unmap() is a stub!");
         Ok(())
     }
 

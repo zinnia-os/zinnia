@@ -19,11 +19,9 @@ pub use virt::*;
 use super::util::once::Once;
 use crate::{
     arch::{self, virt::get_page_size},
-    {
-        boot::{BootInfo, PhysMemoryUsage},
-        memory::virt::mmu::PageTable,
-        util::{align_down, align_up},
-    },
+    boot::{BootInfo, PhysMemoryUsage},
+    memory::virt::mmu::PageTable,
+    util::{align_down, align_up},
 };
 use alloc::sync::Arc;
 use bump::BumpAllocator;

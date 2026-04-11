@@ -28,7 +28,7 @@ pub struct PageFaultInfo {
 pub fn handler(info: &PageFaultInfo) -> bool {
     let task = Scheduler::get_current();
     let proc = task.get_process();
-    let space = &mut proc.address_space.lock();
+    let mut space = proc.address_space.lock();
 
     // Check if the current address space has a theoretical mapping at the faulting address.
     let page_size = arch::virt::get_page_size();
@@ -68,13 +68,12 @@ pub fn handler(info: &PageFaultInfo) -> bool {
                 let new_obj: Arc<dyn MemoryObject> = Arc::new(PagedMemoryObject::new_phys());
 
                 // Copy the data from the old mapping into the new private object.
-                let mut buf = vec![0u8; page_size];
-                for page in 0..num_pages {
-                    mapped
-                        .object
-                        .read(&mut buf, (mapped.offset_page + page) * page_size);
-                    new_obj.write(&buf, (mapped.offset_page + page) * page_size);
-                }
+                new_obj.copy(
+                    mapped.offset_page * page_size,
+                    mapped.object.as_ref(),
+                    mapped.offset_page * page_size,
+                    page_size * num_pages,
+                );
 
                 space
                     .map_object(
@@ -111,9 +110,10 @@ pub fn handler(info: &PageFaultInfo) -> bool {
     }
 
     if info.caused_by_user {
-        // Send SIGSEGV to the faulting user process.
+        // Force SIGSEGV to the faulting user process. Using force_signal ensures the signal
+        // cannot be masked or caught in a loop (handler is reset to SIG_DFL).
         let task = crate::sched::Scheduler::get_current();
-        crate::process::signal::send_signal_to_thread(&task, Signal::SIGSEGV);
+        crate::process::signal::force_signal_to_thread(&task, Signal::SIGSEGV);
         return true; // Will be delivered on return to userspace.
     }
 

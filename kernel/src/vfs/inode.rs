@@ -1,6 +1,6 @@
 use super::fs::SuperBlock;
 use crate::{
-    device::block::BlockDevice,
+    device::{block::BlockDevice, net::Socket},
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, dirent::dirent, off_t, stat::*, time::timespec},
@@ -111,7 +111,7 @@ impl INode {
             NodeOps::FIFO(x) => x.clone(),
             NodeOps::BlockDevice(x) => x.clone(),
             NodeOps::CharacterDevice(x) => x.clone(),
-            NodeOps::Socket(_) => todo!(),
+            NodeOps::Socket(s) => s.clone(),
         }
     }
 }
@@ -129,12 +129,13 @@ pub enum NodeOps {
     FIFO(Arc<dyn FileOps>),
     BlockDevice(Arc<dyn BlockDevice>),
     CharacterDevice(Arc<dyn FileOps>),
-    Socket(Arc<()>), // TODO
+    Socket(Arc<Socket>),
 }
 
 pub enum Device {
     BlockDevice(Arc<dyn BlockDevice>),
     CharacterDevice(Arc<dyn FileOps>),
+    Socket(Arc<Socket>),
 }
 
 /// Operations for directory [`INode`]s.

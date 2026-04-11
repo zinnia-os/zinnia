@@ -390,6 +390,24 @@ pub struct drm_prime_handle {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct drm_mode_crtc_lut {
+    pub crtc_id: u32,
+    pub gamma_size: u32,
+    pub red: u64,
+    pub green: u64,
+    pub blue: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct drm_mode_list_lessees {
+    pub count_lessees: u32,
+    pub pad: u32,
+    pub lessees_ptr: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct drm_mode_cursor {
     pub flags: u32,
     pub crtc_id: u32,
@@ -486,6 +504,24 @@ pub struct drm_mode_crtc_page_flip {
     pub fb_id: u32,
     pub flags: u32,
     pub reserved: u32,
+    pub user_data: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct drm_crtc_get_sequence {
+    pub crtc_id: u32,
+    pub active: u32,
+    pub sequence: u64,
+    pub sequence_ns: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct drm_crtc_queue_sequence {
+    pub crtc_id: u32,
+    pub flags: u32,
+    pub sequence: u64,
     pub user_data: u64,
 }
 
@@ -642,15 +678,15 @@ pub const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = drm_iowr::<drm_prime_handle>(0x2e)
 // pub const DRM_IOCTL_SG_ALLOC: u32 = drm_iowr::<drm_scatter_gather>(0x38);
 // pub const DRM_IOCTL_SG_FREE: u32 = drm_iow::<drm_scatter_gather>(0x39);
 // pub const DRM_IOCTL_WAIT_VBLANK: u32 = drm_iowr::<drm_wait_vblank>(0x3a);
-// pub const DRM_IOCTL_CRTC_GET_SEQUENCE: u32 = drm_iowr::<drm_crtc_get_sequence>(0x3b);
-// pub const DRM_IOCTL_CRTC_QUEUE_SEQUENCE: u32 = drm_iowr::<drm_crtc_queue_sequence>(0x3c);
+pub const DRM_IOCTL_CRTC_GET_SEQUENCE: u32 = drm_iowr::<drm_crtc_get_sequence>(0x3b);
+pub const DRM_IOCTL_CRTC_QUEUE_SEQUENCE: u32 = drm_iowr::<drm_crtc_queue_sequence>(0x3c);
 // pub const DRM_IOCTL_UPDATE_DRAW: u32 = drm_iow::<drm_update_draw>(0x3f);
 pub const DRM_IOCTL_MODE_GETRESOURCES: u32 = drm_iowr::<drm_mode_card_res>(0xA0);
 pub const DRM_IOCTL_MODE_GETCRTC: u32 = drm_iowr::<drm_mode_crtc>(0xA1);
 pub const DRM_IOCTL_MODE_SETCRTC: u32 = drm_iowr::<drm_mode_crtc>(0xA2);
 pub const DRM_IOCTL_MODE_CURSOR: u32 = drm_iowr::<drm_mode_cursor>(0xA3);
 // pub const DRM_IOCTL_MODE_GETGAMMA: u32 = drm_iowr::<drm_mode_crtc_lut>(0xA4);
-// pub const DRM_IOCTL_MODE_SETGAMMA: u32 = drm_iowr::<drm_mode_crtc_lut>(0xA5);
+pub const DRM_IOCTL_MODE_SETGAMMA: u32 = drm_iowr::<drm_mode_crtc_lut>(0xA5);
 pub const DRM_IOCTL_MODE_GETENCODER: u32 = drm_iowr::<drm_mode_get_encoder>(0xA6);
 pub const DRM_IOCTL_MODE_GETCONNECTOR: u32 = drm_iowr::<drm_mode_get_connector>(0xA7);
 pub const DRM_IOCTL_MODE_GETPROPERTY: u32 = drm_iowr::<drm_mode_get_property>(0xAA);
@@ -682,7 +718,7 @@ pub const DRM_IOCTL_MODE_DESTROYPROPBLOB: u32 = drm_iowr::<drm_mode_destroy_blob
 // pub const DRM_IOCTL_SYNCOBJ_RESET: u32 = drm_iowr::<drm_syncobj_array>(0xC4);
 // pub const DRM_IOCTL_SYNCOBJ_SIGNAL: u32 = drm_iowr::<drm_syncobj_array>(0xC5);
 // pub const DRM_IOCTL_MODE_CREATE_LEASE: u32 = drm_iowr::<drm_mode_create_lease>(0xC6);
-// pub const DRM_IOCTL_MODE_LIST_LESSEES: u32 = drm_iowr::<drm_mode_list_lessees>(0xC7);
+pub const DRM_IOCTL_MODE_LIST_LESSEES: u32 = drm_iowr::<drm_mode_list_lessees>(0xC7);
 // pub const DRM_IOCTL_MODE_GET_LEASE: u32 = drm_iowr::<drm_mode_get_lease>(0xC8);
 // pub const DRM_IOCTL_MODE_REVOKE_LEASE: u32 = drm_iowr::<drm_mode_revoke_lease>(0xC9);
 // pub const DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT: u32 = drm_iowr::<drm_syncobj_timeline_wait>(0xCA);

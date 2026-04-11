@@ -4,9 +4,10 @@ pub mod partition;
 use crate::{
     memory::{AllocFlags, IovecIter, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
+    process::Identity,
     vfs::{
-        File,
-        file::FileOps,
+        self, File,
+        file::{FileOps, PollFlags},
         fs::devtmpfs,
         inode::{Device, Mode},
     },
@@ -32,13 +33,35 @@ pub trait BlockDevice: FileOps {
     fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize>;
 }
 
+#[initgraph::task(
+    name = "generic.device.block",
+    depends = [devtmpfs::DEVTMPFS_STAGE]
+)]
+pub fn BLOCK_STAGE() {
+    let root = devtmpfs::get_root();
+
+    vfs::mkdir(
+        root.clone(),
+        root,
+        b"block",
+        Mode::from_bits_truncate(0o755),
+        &Identity::get_kernel(),
+    )
+    .expect("Unable to create /dev/block");
+}
+
 /// Registers a block device by name and scans for partitions.
 pub fn register_block_device(name: &str, device: Arc<dyn BlockDevice>) -> EResult<()> {
     // Register in devtmpfs as well.
-    devtmpfs::register_device(
-        name.as_bytes(),
-        Device::BlockDevice(device.clone()),
+    let root = devtmpfs::get_root();
+
+    vfs::mknod(
+        root.clone(),
+        root,
+        format!("block/{}", name).as_bytes(),
         Mode::from_bits_truncate(0o660),
+        Some(Device::BlockDevice(device.clone())),
+        &Identity::get_kernel(),
     )?;
 
     log!("Registered block device: \"{}\"", name);
@@ -64,21 +87,34 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             part.end_lba - part.start_lba + 1,
         ));
 
-        devtmpfs::register_device(
-            part_name.as_bytes(),
-            Device::BlockDevice(part_dev),
+        let root = devtmpfs::get_root();
+
+        vfs::mknod(
+            root.clone(),
+            root.clone(),
+            format!("block/{}", part_name).as_bytes(),
             Mode::from_bits_truncate(0o660),
+            Some(Device::BlockDevice(part_dev)),
+            &Identity::get_kernel(),
         )?;
 
         let uuid_str = part.unique_guid.to_string();
         let type_str = part.type_guid.to_string();
-        devtmpfs::register_symlink(
-            format!("parttype-{}", type_str).as_bytes(),
+
+        // TODO: This could conflict with other partitions.
+        vfs::symlink(
+            root.clone(),
+            root.clone(),
+            format!("block/parttype-{}", type_str).as_bytes(),
             part_name.as_bytes(),
+            &Identity::get_kernel(),
         )?;
-        devtmpfs::register_symlink(
-            format!("partuuid-{}", uuid_str).as_bytes(),
+        vfs::symlink(
+            root.clone(),
+            root.clone(),
+            format!("block/partuuid-{}", uuid_str).as_bytes(),
             part_name.as_bytes(),
+            &Identity::get_kernel(),
         )?;
 
         log!(
@@ -217,7 +253,7 @@ impl<T: BlockDevice> FileOps for T {
         self.handle_ioctl(file, request, arg)
     }
 
-    fn poll(&self, file: &File, mask: i16) -> EResult<i16> {
+    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
         _ = (file, mask);
         Ok(mask)
     }

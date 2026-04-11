@@ -5,6 +5,7 @@ use crate::{
         cpu::halt,
         system::{apic::LAPIC, gdt::Gdt},
     },
+    clock,
     irq::{IrqLine, MsiLine, lock::IrqLock},
     memory::fault::PageFaultInfo,
     percpu::CpuData,
@@ -291,6 +292,7 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
             halt();
         }
         consts::IDT_IPI_RESCHED => {
+            clock::handle_tick();
             unsafe { crate::arch::sched::preempt_disable() };
             if unsafe { crate::arch::sched::preempt_enable() } {
                 LAPIC.get().eoi();

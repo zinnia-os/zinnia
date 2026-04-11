@@ -1,14 +1,14 @@
-pub const POLLIN: i16 = 0x0001;
-pub const POLLPRI: i16 = 0x0002;
-pub const POLLOUT: i16 = 0x0004;
-pub const POLLERR: i16 = 0x0008;
-pub const POLLHUP: i16 = 0x0010;
-pub const POLLNVAL: i16 = 0x0020;
-pub const POLLRDNORM: i16 = 0x0040;
-pub const POLLRDBAND: i16 = 0x0080;
-pub const POLLWRNORM: i16 = 0x0100;
-pub const POLLWRBAND: i16 = 0x0200;
-pub const POLLRDHUP: i16 = 0x2000;
+pub const POLLIN: i16 = 0x01;
+pub const POLLOUT: i16 = 0x02;
+pub const POLLPRI: i16 = 0x04;
+pub const POLLHUP: i16 = 0x08;
+pub const POLLERR: i16 = 0x10;
+pub const POLLRDHUP: i16 = 0x20;
+pub const POLLNVAL: i16 = 0x40;
+pub const POLLRDNORM: i16 = 0x80;
+pub const POLLRDBAND: i16 = 0x100;
+pub const POLLWRNORM: i16 = 0x200;
+pub const POLLWRBAND: i16 = 0x400;
 
 pub type nfds_t = isize;
 

@@ -10,6 +10,8 @@
 Zinnia is a modular 64-bit BSD-like kernel written in Rust.
 It aims for full compatibility with POSIX 2024.
 
+<img src="screenshot.png"/>
+
 > [!NOTE]
 > This repository contains only the kernel and drivers.
 > If you want to get a bootable image, you might want to check out

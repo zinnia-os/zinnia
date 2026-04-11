@@ -11,7 +11,7 @@ use crate::{
     memory::{UserPtr, VirtAddr, virt::KERNEL_STACK_SIZE},
     percpu::CpuData,
     posix::errno::{EResult, Errno},
-    process::{signal::SignalSet, task::Task},
+    process::{Process, signal::SignalSet, task::Task},
     sched::Scheduler,
 };
 use alloc::boxed::Box;
@@ -361,10 +361,7 @@ pub(in crate::arch) fn setup_signal_frame(
             "Failed to write signal frame to user stack at {:#x}, killing process",
             frame_sp
         );
-        let task = Scheduler::get_current();
-        let proc = task.get_process();
-        proc.exit(128 + signal as u8);
-        unreachable!();
+        Process::exit(128 + signal as u8);
     }
 
     // Place the restorer return address BELOW the signal frame so the
@@ -377,10 +374,7 @@ pub(in crate::arch) fn setup_signal_frame(
             "Failed to write restorer address to user stack at {:#x}, killing process",
             ret_sp
         );
-        let task = Scheduler::get_current();
-        let proc = task.get_process();
-        proc.exit(128 + signal as u8);
-        unreachable!();
+        Process::exit(128 + signal as u8);
     }
 
     // Modify context to jump to the handler.

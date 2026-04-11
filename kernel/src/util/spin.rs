@@ -3,7 +3,7 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-/// A spin lock without a specific resource connected to it.
+/// A ticket spinlock without a specific resource connected to it.
 pub struct SpinLock {
     next: AtomicU32,
     owner: AtomicU32,
@@ -28,6 +28,6 @@ impl SpinLock {
     #[inline(always)]
     pub fn unlock(&mut self) {
         let val = self.owner.load(Ordering::Relaxed);
-        self.owner.store(val + 1, Ordering::Release);
+        self.owner.store(val.wrapping_add(1), Ordering::Release);
     }
 }

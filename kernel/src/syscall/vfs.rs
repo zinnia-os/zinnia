@@ -3,23 +3,18 @@ use crate::{
     posix::errno::{EResult, Errno},
     sched::Scheduler,
     uapi::{
-        dirent::dirent,
-        fcntl::*,
-        limits::PATH_MAX,
-        mode_t,
-        poll::{POLLERR, POLLNVAL, pollfd},
-        stat::*,
-        uio::iovec,
+        dirent::dirent, fcntl::*, limits::PATH_MAX, mode_t, poll::pollfd, stat::*,
+        statvfs::statvfs, uio::iovec,
     },
     vfs::{
         self, File, MountFlags, PathNode,
         cache::LookupFlags,
-        file::{FileDescription, OpenFlags, SeekAnchor},
+        file::{FileDescription, OpenFlags, PollFlags, SeekAnchor},
         fs,
         inode::{INode, Mode, NodeOps},
     },
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
@@ -96,7 +91,7 @@ pub fn writev(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
     file.write(&mut iter)
 }
 
-pub fn openat(fd: i32, path: VirtAddr, oflag: usize /* mode */) -> EResult<i32> {
+pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i32> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
     }
@@ -127,7 +122,7 @@ pub fn openat(fd: i32, path: VirtAddr, oflag: usize /* mode */) -> EResult<i32> 
         // O_CLOEXEC doesn't apply to a file, but rather its individual FD.
         // This means that dup'ing a file doesn't share this flag.
         oflag & !OpenFlags::CloseOnExec,
-        Mode::empty(),
+        Mode::from_bits_truncate(mode),
         &proc.identity.lock(),
     )?;
 
@@ -522,51 +517,114 @@ pub fn ppoll(
     ];
     fds_ptr.read_slice(&mut fds).ok_or(Errno::EFAULT)?;
 
+    // Determine if this is a non-blocking poll (timeout of zero).
+    let is_nonblocking = if !timeout_ptr.is_null() {
+        let ts: UserPtr<crate::uapi::time::timespec> = UserPtr::new(timeout_ptr);
+        let timeout = ts.read().ok_or(Errno::EFAULT)?;
+        timeout.tv_sec == 0 && timeout.tv_nsec == 0
+    } else {
+        false // NULL timeout = block indefinitely
+    };
+
+    let _ = sigmask_ptr; // TODO: apply signal mask during poll
+
     let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
 
-    let mut ready_count = 0;
+    // Collect the Arc<File> references for each valid fd once (avoids holding
+    // the open_files lock across a potential block).
+    let files: Vec<Option<Arc<File>>> = {
+        let open_files = proc.open_files.lock();
+        fds.iter()
+            .map(|e| {
+                if e.fd < 0 {
+                    None
+                } else {
+                    open_files.get_fd(e.fd).map(|d| d.file)
+                }
+            })
+            .collect()
+    };
 
-    // Poll each file descriptor
-    for poll_entry in fds.iter_mut() {
-        let fd = poll_entry.fd;
-        poll_entry.revents = 0;
+    // Register as a waiter on every fd that provides a poll event before the
+    // first poll pass so we don't miss a wake-up that happens between the poll
+    // check and going to sleep.
+    let _guards: Vec<_> = if is_nonblocking {
+        Vec::new()
+    } else {
+        let mut guards = Vec::new();
 
-        if fd < 0 {
-            // Negative fd means ignore this entry
-            continue;
+        for (poll_entry, file_opt) in fds.iter().zip(files.iter()) {
+            if let Some(file) = file_opt {
+                let mask = PollFlags::from_bits_truncate(poll_entry.events);
+                guards.extend(
+                    file.ops
+                        .poll_events(file, mask)
+                        .iter()
+                        .map(|event| event.guard()),
+                );
+            }
         }
 
-        // Get the file
-        let file_desc = match proc_inner.get_fd(fd) {
-            Some(f) => f,
-            None => {
-                // Invalid fd - set POLLNVAL
-                poll_entry.revents = POLLNVAL;
-                ready_count += 1;
+        guards
+    };
+
+    loop {
+        let mut ready_count = 0usize;
+
+        for (poll_entry, file_opt) in fds.iter_mut().zip(files.iter()) {
+            poll_entry.revents = 0;
+
+            if poll_entry.fd < 0 {
                 continue;
             }
-        };
 
-        // Call the file's poll method
-        match file_desc.file.poll(poll_entry.events) {
-            Ok(revents) => {
-                poll_entry.revents = revents;
-                if revents != 0 {
+            let file = match file_opt {
+                Some(f) => f,
+                None => {
+                    poll_entry.revents = PollFlags::Nval.bits();
+                    ready_count += 1;
+                    continue;
+                }
+            };
+
+            let mask = PollFlags::from_bits_truncate(poll_entry.events);
+
+            match file.poll(mask) {
+                Ok(revents) => {
+                    poll_entry.revents = revents.bits();
+                    if !revents.is_empty() {
+                        ready_count += 1;
+                    }
+                }
+                Err(_) => {
+                    poll_entry.revents = PollFlags::Err.bits();
                     ready_count += 1;
                 }
             }
-            Err(_) => {
-                poll_entry.revents = POLLERR;
-                ready_count += 1;
-            }
+        }
+
+        if ready_count > 0 || is_nonblocking {
+            // Write back the results.
+            let mut fds_out = UserPtr::<pollfd>::new(fds_ptr.addr());
+            fds_out.write_slice(&fds).ok_or(Errno::EFAULT)?;
+            return Ok(ready_count);
+        }
+
+        // Nothing ready — block until a file signals readiness.
+        // The EventGuards we already hold ensure we'll be woken up.
+        // If no guards were collected (none of the fds have a poll_event),
+        // return immediately to avoid hanging forever.
+        if _guards.is_empty() {
+            let mut fds_out = UserPtr::<pollfd>::new(fds_ptr.addr());
+            fds_out.write_slice(&fds).ok_or(Errno::EFAULT)?;
+            return Ok(0);
+        }
+
+        _guards[0].wait();
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::EINTR);
         }
     }
-
-    // For now, we only support non-blocking poll (ignore timeout and sigmask)
-    // TODO: Implement blocking with timeout
-    let _ = (timeout_ptr, sigmask_ptr);
-    Ok(ready_count)
 }
 
 pub fn pipe(filedes: VirtAddr) -> EResult<()> {
@@ -645,21 +703,255 @@ pub fn faccessat(fd: i32, path: VirtAddr, amode: usize, flag: usize) -> EResult<
     Ok(())
 }
 
-pub fn unlinkat(fd: i32, path: VirtAddr, flags: usize) -> EResult<()> {
+pub fn statvfs(path: VirtAddr, buf: VirtAddr) -> EResult<()> {
+    let mut buf: UserPtr<statvfs> = UserPtr::new(buf);
+    let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+
+    let node = PathNode::lookup(
+        root,
+        cwd,
+        &path,
+        &identity,
+        LookupFlags::MustExist | LookupFlags::FollowSymlinks,
+    )?;
+    let inode = node.entry.get_inode().ok_or(Errno::EINVAL)?;
+    let sb = inode.sb.as_ref().ok_or(Errno::ENOSYS)?;
+
+    let result = sb.clone().statvfs()?;
+    buf.write(result).ok_or(Errno::EFAULT)
+}
+
+pub fn fstatvfs(fd: i32, buf: VirtAddr) -> EResult<()> {
+    let mut buf: UserPtr<statvfs> = UserPtr::new(buf);
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+
+    let file = files.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+    let sb = inode.sb.as_ref().ok_or(Errno::ENOSYS)?;
+
+    let result = sb.clone().statvfs()?;
+    buf.write(result).ok_or(Errno::EFAULT)
+}
+
+pub fn renameat(old_fd: i32, old_path: VirtAddr, new_fd: i32, new_path: VirtAddr) -> EResult<()> {
+    if old_path == VirtAddr::null() || new_path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
+    }
+
+    let old_path_buf = UserCStr::new(old_path)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+    let new_path_buf = UserCStr::new(new_path)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+
+    let old_parent = if old_fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(old_fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let new_parent = if new_fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(new_fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
+    let old_node = PathNode::lookup(
+        root.clone(),
+        old_parent,
+        &old_path_buf,
+        &identity,
+        LookupFlags::MustExist,
+    )?;
+
+    let old_parent_node = old_node.lookup_parent()?;
+    let old_parent_inode = old_parent_node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    old_parent_inode.try_access(&identity, OpenFlags::Write, false)?;
+
+    let new_node = PathNode::lookup(
+        root,
+        new_parent,
+        &new_path_buf,
+        &identity,
+        LookupFlags::empty(),
+    )?;
+
+    let new_parent_node = new_node.lookup_parent()?;
+    let new_parent_inode = new_parent_node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    new_parent_inode.try_access(&identity, OpenFlags::Write, false)?;
+
+    match &old_parent_inode.node_ops {
+        NodeOps::Directory(x) => x.rename(
+            &old_parent_inode,
+            old_node,
+            &new_parent_inode,
+            new_node,
+            &identity,
+        ),
+        _ => Err(Errno::ENOTDIR),
+    }
+}
+
+pub fn fchmod(fd: i32, mode: mode_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+
+    let file = files.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+    inode.chmod(Mode::from_bits_truncate(mode));
+    Ok(())
+}
+
+pub fn fchmodat(fd: i32, path: VirtAddr, mode: mode_t, flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
     }
 
-    let buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+    let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
-    warn!(
-        "unlinkat({}, \"{}\", {:#x}) is a stub!",
-        fd,
-        String::from_utf8_lossy(&buf),
-        flags
-    );
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+    let parent = if fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
 
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
+    let node = PathNode::lookup(
+        root,
+        parent,
+        &path_buf,
+        &identity,
+        LookupFlags::MustExist
+            | if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
+                LookupFlags::empty()
+            } else {
+                LookupFlags::FollowSymlinks
+            },
+    )?;
+    let inode = node.entry.get_inode().ok_or(Errno::EINVAL)?;
+    inode.chmod(Mode::from_bits_truncate(mode));
     Ok(())
+}
+
+pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> EResult<()> {
+    if path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
+    }
+
+    let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+    let parent = if fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
+    let node = PathNode::lookup(
+        root,
+        parent,
+        &path_buf,
+        &identity,
+        LookupFlags::MustExist
+            | if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
+                LookupFlags::empty()
+            } else {
+                LookupFlags::FollowSymlinks
+            },
+    )?;
+    let inode = node.entry.get_inode().ok_or(Errno::EINVAL)?;
+    inode.chown(uid, gid);
+    Ok(())
+}
+
+pub fn unlinkat(fd: i32, path: VirtAddr, _flags: usize) -> EResult<()> {
+    if path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
+    }
+
+    let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+    let parent = if fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
+    let node = PathNode::lookup(root, parent, &path_buf, &identity, LookupFlags::MustExist)?;
+
+    let parent_node = node.lookup_parent()?;
+    let parent_inode = parent_node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    parent_inode.try_access(&identity, OpenFlags::Write, false)?;
+
+    match &parent_inode.node_ops {
+        NodeOps::Directory(x) => x.unlink(&parent_inode, &node, &identity),
+        _ => Err(Errno::ENOTDIR),
+    }
 }
 
 pub fn linkat(
@@ -673,23 +965,82 @@ pub fn linkat(
         return Err(Errno::EINVAL);
     }
 
-    let old_path = UserCStr::new(old_path)
+    let old_path_buf = UserCStr::new(old_path)
         .as_vec(PATH_MAX)
         .ok_or(Errno::EFAULT)?;
-    let new_path = UserCStr::new(new_path)
+    let new_path_buf = UserCStr::new(new_path)
         .as_vec(PATH_MAX)
         .ok_or(Errno::EFAULT)?;
 
-    warn!(
-        "linkat({}, \"{}\", {}, \"{}\", {:#x}) is a stub!",
-        old_fd,
-        String::from_utf8_lossy(&old_path),
-        new_fd,
-        String::from_utf8_lossy(&new_path),
-        flags,
-    );
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
 
-    Ok(())
+    let old_parent = if old_fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(old_fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let new_parent = if new_fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(new_fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
+    let follow = if (flags & AT_SYMLINK_FOLLOW as usize) != 0 {
+        LookupFlags::FollowSymlinks
+    } else {
+        LookupFlags::empty()
+    };
+
+    let old_node = PathNode::lookup(
+        root.clone(),
+        old_parent,
+        &old_path_buf,
+        &identity,
+        LookupFlags::MustExist | follow,
+    )?;
+    let target_inode = old_node.entry.get_inode().ok_or(Errno::ENOENT)?;
+
+    // Hard links to directories are not allowed.
+    if matches!(target_inode.node_ops, NodeOps::Directory(_)) {
+        return Err(Errno::EPERM);
+    }
+
+    let new_node = PathNode::lookup(
+        root,
+        new_parent,
+        &new_path_buf,
+        &identity,
+        LookupFlags::MustNotExist,
+    )?;
+
+    let new_parent_node = new_node.lookup_parent()?;
+    let new_parent_inode = new_parent_node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    new_parent_inode.try_access(&identity, OpenFlags::Write, false)?;
+
+    match &new_parent_inode.node_ops {
+        NodeOps::Directory(x) => x.link(&new_parent_inode, &new_node, &target_inode, &identity),
+        _ => Err(Errno::ENOTDIR),
+    }
 }
 
 pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> EResult<isize> {

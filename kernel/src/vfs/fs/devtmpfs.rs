@@ -1,13 +1,8 @@
 use crate::{
     memory::{UserPtr, VirtAddr},
     posix::errno::EResult,
-    process::Identity,
     util::once::Once,
-    vfs::{
-        self, Mount, MountFlags, PathNode,
-        fs::FileSystem,
-        inode::{Device, Mode},
-    },
+    vfs::{Mount, MountFlags, PathNode, fs::FileSystem},
 };
 use alloc::sync::Arc;
 
@@ -46,37 +41,11 @@ pub fn DEVTMPFS_STAGE() {
     unsafe { DEV_MOUNT.init(tmpfs) };
 }
 
-pub fn register_device(name: &[u8], device: Device, mode: Mode) -> EResult<()> {
+/// Returns the root [`PathNode`] for the devtmpfs mount (`/dev`).
+pub fn get_root() -> PathNode {
     let mount = DEV_MOUNT.get();
-
-    let parent = PathNode {
+    PathNode {
         mount: mount.clone(),
         entry: mount.root.clone(),
-    };
-
-    vfs::mknod(
-        parent.clone(),
-        parent.clone(),
-        name,
-        mode,
-        Some(device),
-        Identity::get_kernel(),
-    )
-}
-
-pub fn register_symlink(name: &[u8], target: &[u8]) -> EResult<()> {
-    let mount = DEV_MOUNT.get();
-
-    let parent = PathNode {
-        mount: mount.clone(),
-        entry: mount.root.clone(),
-    };
-
-    vfs::symlink(
-        parent.clone(),
-        parent.clone(),
-        name,
-        target,
-        Identity::get_kernel(),
-    )
+    }
 }
