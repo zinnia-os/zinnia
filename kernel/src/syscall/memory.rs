@@ -33,6 +33,7 @@ pub fn mmap(
     vm_prot.set(VmFlags::Read, prot & PROT_READ != 0);
     vm_prot.set(VmFlags::Write, prot & PROT_WRITE != 0);
     vm_prot.set(VmFlags::Exec, prot & PROT_EXEC != 0);
+    vm_prot.set(VmFlags::Shared, flags.contains(MmapFlags::Shared));
 
     let proc = Scheduler::get_current().get_process();
     let mut mmap_head = proc.mmap_head.lock();

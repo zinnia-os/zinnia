@@ -1,13 +1,11 @@
 use crate::{
     arch::x86_64::asm::{read8, write8},
+    device::tty::{Tty, TtyDriver},
     irq::{IrqHandler, IrqLine},
     log::{self, LoggerSink},
-    memory::IovecIter,
-    posix::errno::EResult,
-    util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
-    vfs::{File, file::FileOps, fs::devtmpfs, inode::Mode},
+    uapi::termios::winsize,
 };
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 
 /// Serial port
 pub const COM1_BASE: u16 = 0x3F8;
@@ -49,73 +47,37 @@ impl LoggerSink for SerialLogger {
     }
 }
 
-struct SerialState {
-    buffer: SpinMutex<RingBuffer>,
-    rd_queue: Event,
-}
+struct SerialTtyDriver;
 
-struct SerialDevice {
-    state: Arc<SerialState>,
-}
-
-struct SerialIrqHandler {
-    state: Arc<SerialState>,
-}
-
-impl FileOps for SerialDevice {
-    fn read(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let guard = self.state.rd_queue.guard();
-        loop {
-            {
-                let mut inner = self.state.buffer.lock();
-                if !inner.is_empty() {
-                    let mut byte = [0u8; 1];
-                    inner.read(&mut byte);
-                    buffer.copy_from_slice(&byte)?;
-                    return Ok(1);
-                }
+impl TtyDriver for SerialTtyDriver {
+    fn write_output(&self, data: &[u8]) {
+        for &ch in data {
+            while !SerialLogger::is_tx_ready() {
+                core::hint::spin_loop();
             }
-            guard.wait();
+            unsafe { write8(COM1_BASE + DATA_REG, ch) };
         }
     }
 
-    fn write(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let mut buf = vec![0u8; buffer.len()];
-        buffer.copy_to_slice(&mut buf)?;
-        SerialLogger.write(&buf);
-        Ok(buffer.len() as _)
+    fn get_winsize(&self) -> winsize {
+        winsize {
+            ws_row: 25,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }
     }
+}
+
+struct SerialIrqHandler {
+    tty: Arc<Tty>,
 }
 
 impl IrqHandler for SerialIrqHandler {
     fn raise(&mut self) -> crate::irq::Status {
-        let mut any = false;
-
-        // Drain all bytes currently available in the UART FIFO.
         while unsafe { read8(COM1_BASE + LSR_REG) } & LSR_DATA_READY != 0 {
             let byte = unsafe { read8(COM1_BASE + DATA_REG) };
-
-            // Translate carriage return to newline (terminals send \r on Enter).
-            let byte = if byte == b'\r' { b'\n' } else { byte };
-
-            // Echo the character back so it appears on the console.
-            while unsafe { read8(COM1_BASE + LSR_REG) } & LSR_THR_EMPTY == 0 {
-                core::hint::spin_loop();
-            }
-            unsafe { write8(COM1_BASE + DATA_REG, byte) };
-            if byte == b'\n' {
-                while unsafe { read8(COM1_BASE + LSR_REG) } & LSR_THR_EMPTY == 0 {
-                    core::hint::spin_loop();
-                }
-                //unsafe { write8(COM1_BASE + DATA_REG, b'\n') };
-            }
-
-            self.state.buffer.lock().write(&[byte]);
-            any = true;
-        }
-
-        if any {
-            self.state.rd_queue.wake_one();
+            self.tty.input_byte(byte);
         }
 
         crate::irq::Status::Handled
@@ -159,22 +121,12 @@ fn SERIAL_STAGE() {
     ],
 )]
 fn SERIAL_FILE_STAGE() {
-    let state = Arc::new(SerialState {
-        buffer: SpinMutex::new(RingBuffer::new(0x1000)),
-        rd_queue: Event::new(),
-    });
+    let tty = Tty::new(String::from("com1"), Arc::new(SerialTtyDriver));
 
     let irq = super::apic::get_isa_irq(4).unwrap() as Arc<dyn IrqLine>;
-    irq.attach(Box::new(SerialIrqHandler {
-        state: state.clone(),
-    }));
+    irq.attach(Box::new(SerialIrqHandler { tty: tty.clone() }));
     unsafe { write8(COM1_BASE + 1, 0x01) };
     irq.unmask();
 
-    devtmpfs::register_device(
-        b"serial",
-        crate::vfs::inode::Device::CharacterDevice(Arc::new(SerialDevice { state })),
-        Mode::from_bits_truncate(0o666),
-    )
-    .expect("Unable to create serial file");
+    tty.register_device().expect("Unable to create com1");
 }

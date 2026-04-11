@@ -265,7 +265,7 @@ impl FileOps for Ext2Regular {
         offset: uapi::off_t,
     ) -> EResult<VirtAddr> {
         let object: Arc<dyn MemoryObject> = if flags.contains(MmapFlags::Private) {
-            self.cache.make_private(len, offset)?
+            self.cache.make_private(len, offset as _)?
         } else {
             self.cache.clone()
         };
@@ -817,21 +817,50 @@ impl DirectoryOps for Ext2Dir {
         _self_node: &Arc<INode>,
         path: PathNode,
         target: &Arc<INode>,
-        _target_path: PathNode,
+        target_path: PathNode,
         _identity: &Identity,
     ) -> EResult<()> {
-        // Simple rename: remove old entry, add new entry.
-        let old_name = &path.entry.name;
-        let _removed_ino = self.remove_entry(old_name)?;
+        let old_inode = path.entry.get_inode().ok_or(Errno::ENOENT)?;
+        let ino = old_inode.id as u32;
 
-        let _target_dir = match &target.node_ops {
-            NodeOps::Directory(_d) => {
-                // Try to downcast to Ext2Dir.
-                // Since we can't easily downcast, use the target entry's parent dir.
-                return Err(Errno::ENOSYS);
-            }
-            _ => return Err(Errno::ENOTDIR),
+        let ft = match &old_inode.node_ops {
+            NodeOps::Regular(_) => EXT2_FT_REG_FILE,
+            NodeOps::Directory(_) => EXT2_FT_DIR,
+            NodeOps::SymbolicLink(_) => EXT2_FT_SYMLINK,
+            _ => EXT2_FT_UNKNOWN,
         };
+
+        let NodeOps::Directory(target_dir_ops) = &target.node_ops else {
+            return Err(Errno::ENOTDIR);
+        };
+        let target_dir: Arc<Ext2Dir> =
+            Arc::downcast(target_dir_ops.clone()).map_err(|_| Errno::EXDEV)?;
+
+        // If target already exists, remove its directory entry and decrement link count.
+        if let Some(existing) = target_path.entry.get_inode() {
+            target_dir.remove_entry(&target_path.entry.name)?;
+
+            let existing_ino = existing.id as u32;
+            let mut raw = self.sb.read_inode(existing_ino)?;
+            raw.i_links_count = raw.i_links_count.saturating_sub(1);
+            self.sb.write_inode(existing_ino, &raw)?;
+        }
+
+        // Remove old directory entry.
+        self.remove_entry(&path.entry.name)?;
+
+        // Add new directory entry in the target directory.
+        target_dir.add_entry(ino, ft, &target_path.entry.name)?;
+
+        // Update dcache.
+        target_path.entry.set_inode(old_inode);
+        *path.entry.inode.lock() = EntryState::NotPresent;
+
+        // Transfer children for directory renames.
+        let children = core::mem::take(&mut *path.entry.children.lock());
+        *target_path.entry.children.lock() = children;
+
+        Ok(())
     }
 
     fn mknod(

@@ -25,6 +25,10 @@ pub const _VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID: u32 = 0x010b;
 pub const _VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 pub const _VIRTIO_GPU_CMD_SET_SCANOUT_BLOB: u32 = 0x010d;
 
+// Cursor queue command types
+pub const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
+pub const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
+
 // Response types
 pub const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 pub const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
@@ -43,9 +47,9 @@ pub const _VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
 
 // Formats
 pub const _VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
-pub const _VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
+pub const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 pub const _VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM: u32 = 3;
-pub const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
+pub const _VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
 pub const _VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM: u32 = 67;
 pub const _VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM: u32 = 68;
 pub const _VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM: u32 = 121;
@@ -174,5 +178,25 @@ pub struct VirtioGpuResourceAttachBacking {
 pub struct _VirtioGpuResourceDetachBacking {
     pub hdr: VirtioGpuCtrlHdr,
     pub resource_id: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VirtioGpuUpdateCursor {
+    pub hdr: VirtioGpuCtrlHdr,
+    pub pos: VirtioGpuCursorPos,
+    pub resource_id: u32,
+    pub hot_x: u32,
+    pub hot_y: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VirtioGpuCursorPos {
+    pub scanout_id: u32,
+    pub x: u32,
+    pub y: u32,
     pub padding: u32,
 }

@@ -1,7 +1,9 @@
 pub mod block;
 pub mod cmdline;
-pub mod console;
 pub mod drm;
 pub mod fbcon;
 pub mod input;
+pub mod kmsg;
 pub mod memfiles;
+pub mod net;
+pub mod tty;

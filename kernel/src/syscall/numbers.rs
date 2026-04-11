@@ -40,7 +40,6 @@ pub const FTRUNCATE: usize = 38;
 pub const FALLOCATE: usize = 39;
 pub const UTIMENSAT: usize = 40;
 pub const MKNODAT: usize = 41;
-pub const READDIR: usize = 42;
 pub const GETCWD: usize = 43;
 pub const CHDIR: usize = 44;
 pub const FCHDIR: usize = 45;

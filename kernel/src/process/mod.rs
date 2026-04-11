@@ -2,14 +2,16 @@ pub mod signal;
 pub mod task;
 
 use crate::{
+    INIT,
     arch::sched::Context,
+    device::tty::Tty,
     memory::{VirtAddr, virt::AddressSpace},
     percpu::CpuData,
     posix::errno::{EResult, Errno},
     process::{signal::SignalState, task::Task},
     sched::Scheduler,
     uapi,
-    util::{mutex::spin::SpinMutex, once::Once},
+    util::{event::Event, mutex::spin::SpinMutex, once::Once},
     vfs::{
         self,
         cache::PathNode,
@@ -34,6 +36,43 @@ pub enum ProcessState {
     Running,
     Exited(u8),
     // TODO: SIGSTOP
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IntervalTimerState {
+    interval_ns: usize,
+    next_deadline_ns: Option<usize>,
+}
+
+impl IntervalTimerState {
+    fn snapshot(&self, now: usize) -> uapi::time::itimerval {
+        uapi::time::itimerval {
+            it_interval: ns_to_timeval(self.interval_ns),
+            it_value: ns_to_timeval(
+                self.next_deadline_ns
+                    .map(|deadline| deadline.saturating_sub(now))
+                    .unwrap_or(0),
+            ),
+        }
+    }
+
+    fn replace(
+        &mut self,
+        now: usize,
+        value: uapi::time::itimerval,
+    ) -> EResult<uapi::time::itimerval> {
+        let old = self.snapshot(now);
+        self.interval_ns = timeval_to_ns(value.it_interval)?;
+
+        let initial_ns = timeval_to_ns(value.it_value)?;
+        self.next_deadline_ns = if initial_ns == 0 {
+            None
+        } else {
+            Some(now.checked_add(initial_ns).ok_or(Errno::EINVAL)?)
+        };
+
+        Ok(old)
+    }
 }
 
 pub struct Process {
@@ -63,6 +102,16 @@ pub struct Process {
     pub signal_actions: SpinMutex<SignalState>,
     /// A pointer to the next free memory region.
     pub mmap_head: SpinMutex<VirtAddr>,
+    /// Process group ID.
+    pub pgrp: SpinMutex<Pid>,
+    /// Session ID.
+    pub session: SpinMutex<Pid>,
+    /// Controlling terminal, if any.
+    pub controlling_tty: SpinMutex<Option<Arc<Tty>>>,
+    /// Process-wide real-time interval timer.
+    pub real_timer: SpinMutex<IntervalTimerState>,
+    /// Event that is signalled when a child process exits.
+    pub child_event: Event,
 }
 
 impl Process {
@@ -74,6 +123,18 @@ impl Process {
 
     pub fn get_name(&self) -> &str {
         &self.name
+    }
+
+    pub fn get_real_timer(&self, now: usize) -> uapi::time::itimerval {
+        self.real_timer.lock().snapshot(now)
+    }
+
+    pub fn set_real_timer(
+        &self,
+        now: usize,
+        value: uapi::time::itimerval,
+    ) -> EResult<uapi::time::itimerval> {
+        self.real_timer.lock().replace(now, value)
     }
 
     /// Gets the parent process of this process.
@@ -106,6 +167,11 @@ impl Process {
             open_files: SpinMutex::new(self.open_files.lock().clone()),
             signal_actions: SpinMutex::new(self.signal_actions.lock().clone()),
             mmap_head: SpinMutex::new(*self.mmap_head.lock()),
+            pgrp: SpinMutex::new(*self.pgrp.lock()),
+            session: SpinMutex::new(*self.session.lock()),
+            controlling_tty: SpinMutex::new(self.controlling_tty.lock().clone()),
+            real_timer: SpinMutex::new(*self.real_timer.lock()),
+            child_event: Event::new(),
         });
 
         // Create a heap allocated context that we can pass to the entry point.
@@ -117,6 +183,9 @@ impl Process {
         let forked_thread = Arc::new(Task::new(to_user_context, raw_ctx as _, 0, &forked, true)?);
         forked.threads.lock().push(forked_thread.clone());
         self.children.lock().push(forked.clone());
+        PROCESS_TABLE
+            .lock()
+            .insert(forked.get_pid(), Arc::downgrade(&forked));
 
         Ok((forked, forked_thread))
     }
@@ -126,22 +195,36 @@ impl Process {
         parent: Option<Arc<Self>>,
         space: AddressSpace,
     ) -> EResult<Self> {
-        let (root, cwd, identity) = match &parent {
+        let (root, cwd, identity, pgrp, session, ctty) = match &parent {
             Some(x) => (
                 x.root_dir.lock().clone(),
                 x.working_dir.lock().clone(),
                 x.identity.lock().clone(),
+                *x.pgrp.lock(),
+                *x.session.lock(),
+                x.controlling_tty.lock().clone(),
             ),
-            None => (vfs::get_root(), vfs::get_root(), Identity::default()),
+            None => (
+                vfs::get_root(),
+                vfs::get_root(),
+                Identity::default(),
+                0,
+                0,
+                None,
+            ),
         };
 
-        // Save the child in the parent process.
-        if let Some(x) = &parent {
-            x.children.lock().push(x.clone())
-        }
+        // NOTE: The child is not yet an Arc here, so we cannot add it to the
+        // parent's children list. Callers that wrap this in Arc (e.g. fork)
+        // are responsible for registering the child.
+
+        let id = PID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // For the very first processes (kernel, init) pgrp/session default to their own PID.
+        let pgrp = if pgrp == 0 { id } else { pgrp };
+        let session = if session == 0 { id } else { session };
 
         Ok(Self {
-            id: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            id,
             name,
             parent: parent.map(|x| Arc::downgrade(&x)),
             threads: SpinMutex::new(Vec::new()),
@@ -155,6 +238,11 @@ impl Process {
             signal_actions: SpinMutex::new(SignalState::new()),
             // TODO: This address should be determined from the highest loaded segment.
             mmap_head: SpinMutex::new(VirtAddr::new(0x1_0000_0000)),
+            pgrp: SpinMutex::new(pgrp),
+            session: SpinMutex::new(session),
+            controlling_tty: SpinMutex::new(ctty),
+            real_timer: SpinMutex::new(IntervalTimerState::default()),
+            child_event: Event::new(),
         })
     }
 
@@ -203,11 +291,20 @@ impl Process {
         Scheduler::kill_current();
     }
 
-    pub fn exit(self: Arc<Self>, code: u8) {
+    /// Exits the current process.
+    pub fn exit(code: u8) -> ! {
+        let task = Scheduler::get_current();
+        let proc = task.get_process();
+
+        if proc.get_pid() <= 1 {
+            panic!("Attempted to kill init with error code {code}");
+        }
+
+        PROCESS_TABLE.lock().remove(&proc.get_pid());
         {
-            let mut open_files = self.open_files.lock();
-            let mut threads = self.threads.lock();
-            let mut status = self.status.lock();
+            let mut open_files = proc.open_files.lock();
+            let mut threads = proc.threads.lock();
+            let mut status = proc.status.lock();
 
             // Kill all threads.
             for thread in threads.iter() {
@@ -220,6 +317,32 @@ impl Process {
 
             *status = ProcessState::Exited(code);
         }
+
+        // Reparent orphaned children to the init process.
+        {
+            let mut our_children = proc.children.lock();
+            if !our_children.is_empty() {
+                let init = INIT.get();
+                let mut init_children = init.children.lock();
+                for child in our_children.drain(..) {
+                    init_children.push(child);
+                }
+                // Wake init in case any of these children are already exited.
+                init.child_event.wake_all();
+            }
+        }
+
+        // Notify the parent that a child has exited.
+        if let Some(parent) = proc.get_parent() {
+            // Send SIGCHLD so the parent is notified asynchronously (e.g. shells
+            // waiting on terminal input need this to notice background jobs exiting).
+            let parent_thread = parent.threads.lock().first().cloned();
+            if let Some(thread) = parent_thread {
+                signal::send_signal_to_thread(&thread, signal::Signal::SIGCHLD);
+            }
+            parent.child_event.wake_all();
+        }
+
         Scheduler::kill_current();
     }
 }
@@ -370,6 +493,84 @@ impl Identity {
 static PID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static KERNEL_PROCESS: Once<Arc<Process>> = Once::new();
 
+/// Global table of all live processes, keyed by PID.
+/// Used to iterate processes for signal delivery to process groups.
+pub static PROCESS_TABLE: SpinMutex<BTreeMap<Pid, Weak<Process>>> = SpinMutex::new(BTreeMap::new());
+
+pub fn poll_interval_timers(now: usize) {
+    let processes: Vec<_> = {
+        let table = PROCESS_TABLE.lock();
+        table.values().filter_map(Weak::upgrade).collect()
+    };
+
+    for proc in processes {
+        let should_signal = {
+            let mut timer = proc.real_timer.lock();
+            match timer.next_deadline_ns {
+                Some(deadline) if deadline <= now => {
+                    if timer.interval_ns == 0 {
+                        timer.next_deadline_ns = None;
+                    } else {
+                        let mut next_deadline = deadline;
+                        loop {
+                            let Some(candidate) = next_deadline.checked_add(timer.interval_ns)
+                            else {
+                                timer.next_deadline_ns = None;
+                                break;
+                            };
+
+                            if candidate > now {
+                                timer.next_deadline_ns = Some(candidate);
+                                break;
+                            }
+
+                            next_deadline = candidate;
+                        }
+                    }
+
+                    true
+                }
+                Some(_) | None => false,
+            }
+        };
+
+        if !should_signal {
+            continue;
+        }
+
+        let thread = {
+            let threads = proc.threads.lock();
+            threads.first().cloned()
+        };
+
+        if let Some(thread) = thread {
+            signal::send_signal_to_thread(&thread, signal::Signal::SIGALRM);
+        }
+    }
+}
+
+fn timeval_to_ns(value: uapi::time::timeval) -> EResult<usize> {
+    if value.tv_sec < 0 || value.tv_usec < 0 || value.tv_usec >= 1_000_000 {
+        return Err(Errno::EINVAL);
+    }
+
+    let seconds = (value.tv_sec as usize)
+        .checked_mul(1_000_000_000)
+        .ok_or(Errno::EINVAL)?;
+    let micros = (value.tv_usec as usize)
+        .checked_mul(1_000)
+        .ok_or(Errno::EINVAL)?;
+
+    seconds.checked_add(micros).ok_or(Errno::EINVAL)
+}
+
+fn ns_to_timeval(value: usize) -> uapi::time::timeval {
+    uapi::time::timeval {
+        tv_sec: (value / 1_000_000_000) as _,
+        tv_usec: ((value % 1_000_000_000) / 1_000) as _,
+    }
+}
+
 #[initgraph::task(
     name = "generic.process",
     depends = [crate::memory::MEMORY_STAGE, crate::vfs::VFS_STAGE],
@@ -389,4 +590,9 @@ pub fn PROCESS_STAGE() {
             .expect("Unable to create the main kernel process"),
         ))
     };
+
+    let kproc = KERNEL_PROCESS.get();
+    PROCESS_TABLE
+        .lock()
+        .insert(kproc.get_pid(), Arc::downgrade(&kproc));
 }

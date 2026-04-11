@@ -2,9 +2,9 @@ use crate::{
     boot::BootInfo,
     memory::IovecIter,
     posix::errno::{EResult, Errno},
-    process::PROCESS_STAGE,
+    process::{Identity, PROCESS_STAGE},
     vfs::{
-        File,
+        self, File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
         inode::{Device, Mode},
@@ -29,10 +29,15 @@ impl FileOps for CmdlineFile {
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
 fn CMDLINE_STAGE() {
-    devtmpfs::register_device(
+    let root = devtmpfs::get_root();
+
+    vfs::mknod(
+        root.clone(),
+        root.clone(),
         b"cmdline",
-        Device::CharacterDevice(Arc::new(CmdlineFile)),
         Mode::from_bits_truncate(0o666),
+        Some(Device::CharacterDevice(Arc::new(CmdlineFile))),
+        &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/cmdline");
 }

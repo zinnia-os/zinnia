@@ -41,20 +41,26 @@ impl Event {
         }
     }
 
-    pub fn wake_one(&self) {
+    pub fn wake_one(&self) -> usize {
         let mut waiters = self.waiters.lock();
         if let Some(waiter) = waiters.pop_front() {
             CpuData::get().scheduler.add_task(waiter.task.clone());
+            1
+        } else {
+            0
         }
     }
 
-    pub fn wake_all(&self) {
+    pub fn wake_all(&self) -> usize {
         let mut waiters = self.waiters.lock();
+        let mut woke = 0;
         for waiter in waiters.iter() {
             CpuData::get().scheduler.add_task(waiter.task.clone());
+            woke += 1;
         }
         // UnsafeRefs are non-owning, so this just unlinks the nodes without freeing the Waiters (the guards own them).
         waiters.clear();
+        woke
     }
 }
 

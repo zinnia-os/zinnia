@@ -4,16 +4,16 @@ use crate::{
     },
     memory::{AddressSpace, IovecIter, UserPtr, VirtAddr, VmFlags},
     posix::errno::{EResult, Errno},
+    process::Identity,
     uapi::{
         self,
         drm::{self, DRM_FORMAT_XRGB8888, drm_mode_modeinfo},
-        poll::{POLLIN, POLLRDNORM},
     },
-    util::mutex::spin::SpinMutex,
+    util::{event::Event, mutex::spin::SpinMutex},
     vfs::{
-        File,
-        file::{FileOps, MmapFlags},
-        fs::devtmpfs::register_device,
+        self, File,
+        file::{FileOps, MmapFlags, OpenFlags, PollEventSet, PollFlags},
+        fs::devtmpfs,
         inode::Mode,
     },
 };
@@ -99,6 +99,23 @@ pub trait Device: Send + Sync {
     }
 
     fn commit(&self, state: &AtomicState);
+
+    /// Set the cursor image for a CRTC. `buffer` contains ARGB8888 pixel data.
+    /// If `buffer` is None, the cursor should be hidden.
+    fn set_cursor(
+        &self,
+        _crtc_id: u32,
+        _buffer: Option<Arc<dyn BufferObject>>,
+        _width: u32,
+        _height: u32,
+    ) -> EResult<()> {
+        Err(Errno::ENOSYS)
+    }
+
+    /// Move the cursor to a new position on the given CRTC.
+    fn move_cursor(&self, _crtc_id: u32, _x: i32, _y: i32) -> EResult<()> {
+        Err(Errno::ENOSYS)
+    }
 }
 
 /// Represents a user-facing DRM card in form of a file.
@@ -108,6 +125,7 @@ pub struct DrmFile {
     buffers: SpinMutex<Vec<Arc<dyn BufferObject>>>,
     active_fb: SpinMutex<Option<(u32, Arc<Framebuffer>)>>,
     events: SpinMutex<Vec<PageFlipEvent>>,
+    rd_event: Event,
 }
 
 #[repr(C)]
@@ -128,6 +146,7 @@ impl DrmFile {
             buffers: SpinMutex::new(Vec::new()),
             active_fb: SpinMutex::new(None),
             events: SpinMutex::new(Vec::new()),
+            rd_event: Event::new(),
         })
     }
 
@@ -147,33 +166,59 @@ impl DrmFile {
 
 impl FileOps for DrmFile {
     fn read(&self, _file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let mut events = self.events.lock();
-        if events.is_empty() {
-            return Err(Errno::EAGAIN);
+        let guard = self.rd_event.guard();
+
+        loop {
+            let event = {
+                let mut events = self.events.lock();
+                if events.is_empty() {
+                    None
+                } else {
+                    Some(events.remove(0))
+                }
+            };
+
+            if let Some(event) = event {
+                let event_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &event as *const PageFlipEvent as *const u8,
+                        core::mem::size_of::<PageFlipEvent>(),
+                    )
+                };
+
+                let copy_len = event_bytes.len().min(buf.len());
+                buf.copy_from_slice(&event_bytes[..copy_len])?;
+                return Ok(copy_len as isize);
+            }
+
+            if _file.flags.lock().contains(OpenFlags::NonBlocking) {
+                return Err(Errno::EAGAIN);
+            }
+
+            guard.wait();
+            if crate::sched::Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
+            }
         }
-
-        let event = events.remove(0);
-        let event_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &event as *const PageFlipEvent as *const u8,
-                core::mem::size_of::<PageFlipEvent>(),
-            )
-        };
-
-        let copy_len = event_bytes.len().min(buf.len());
-        buf.copy_from_slice(&event_bytes[..copy_len])?;
-        Ok(copy_len as isize)
     }
 
-    fn poll(&self, _file: &File, mask: i16) -> EResult<i16> {
+    fn poll(&self, _file: &File, mask: PollFlags) -> EResult<PollFlags> {
         let events = self.events.lock();
-        let mut result = 0;
+        let mut result = PollFlags::empty();
 
         // If there are events available, mark as readable
-        if !events.is_empty() && (mask & (POLLIN | POLLRDNORM)) != 0 {
-            result |= POLLIN | POLLRDNORM;
+        if !events.is_empty() && mask.intersects(PollFlags::In | PollFlags::Rdnorm) {
+            result |= PollFlags::In | PollFlags::Rdnorm;
         }
         Ok(result)
+    }
+
+    fn poll_events(&self, _file: &File, mask: PollFlags) -> PollEventSet<'_> {
+        if mask.intersects(PollFlags::Read) {
+            PollEventSet::one(&self.rd_event)
+        } else {
+            PollEventSet::new()
+        }
     }
 
     fn ioctl(&self, _file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
@@ -221,7 +266,7 @@ impl FileOps for DrmFile {
                 match val.capability {
                     drm::DRM_CAP_DUMB_BUFFER => val.value = 1,
                     drm::DRM_CAP_DUMB_PREFERRED_DEPTH => val.value = 24,
-                    drm::DRM_CAP_DUMB_PREFER_SHADOW => val.value = 0,
+                    drm::DRM_CAP_DUMB_PREFER_SHADOW => val.value = 1,
                     drm::DRM_CAP_CURSOR_WIDTH => val.value = 64,
                     drm::DRM_CAP_CURSOR_HEIGHT => val.value = 64,
                     drm::DRM_CAP_TIMESTAMP_MONOTONIC => val.value = 1,
@@ -495,20 +540,58 @@ impl FileOps for DrmFile {
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
             drm::DRM_IOCTL_MODE_RMFB => {
-                warn!("DRM_IOCTL_MODE_RMFB is a stub!");
-                let mut ptr = UserPtr::<drm::drm_mode_fb_cmd>::new(arg);
-                let val = ptr.read().ok_or(Errno::EFAULT)?;
+                let ptr = UserPtr::<u32>::new(arg);
+                let fb_id = ptr.read().ok_or(Errno::EFAULT)?;
 
-                // TODO
+                let state = self.device.state();
+                let mut framebuffers = state.framebuffers.lock();
+                let index = framebuffers
+                    .iter()
+                    .position(|x| x.id == fb_id)
+                    .ok_or(Errno::ENOENT)?;
+                framebuffers.remove(index);
 
-                ptr.write(val).ok_or(Errno::EFAULT)?;
+                // If this was the active framebuffer, clear it
+                let mut active = self.active_fb.lock();
+                if let Some((_, ref fb)) = *active {
+                    if fb.id == fb_id {
+                        *active = None;
+                    }
+                }
             }
             drm::DRM_IOCTL_MODE_GETCRTC => {
-                warn!("DRM_IOCTL_MODE_GETCRTC is a stub!");
                 let mut ptr = UserPtr::<drm::drm_mode_crtc>::new(arg);
-                let val = ptr.read().ok_or(Errno::EFAULT)?;
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+                let state = self.device.state();
 
-                // TODO
+                // Validate CRTC exists
+                {
+                    let crtcs = state.crtcs.lock();
+                    crtcs
+                        .iter()
+                        .find(|x| x.id() == val.crtc_id)
+                        .ok_or(Errno::EINVAL)?;
+                }
+
+                // Fill in current state from active_fb
+                let active = self.active_fb.lock();
+                if let Some((crtc_id, ref fb)) = *active {
+                    if crtc_id == val.crtc_id {
+                        val.fb_id = fb.id;
+
+                        // Check if there's a mode on the connector
+                        let connectors = state.connectors.lock();
+                        if let Some(conn) = connectors.first() {
+                            if let Some(mode) = conn.modes.first() {
+                                val.mode = *mode;
+                                val.mode_valid = 1;
+                            }
+                        }
+                    }
+                } else {
+                    val.fb_id = 0;
+                    val.mode_valid = 0;
+                }
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
@@ -789,6 +872,8 @@ impl FileOps for DrmFile {
                     .clone();
                 drop(framebuffers);
 
+                *self.active_fb.lock() = Some((val.crtc_id, fb.clone()));
+
                 // Create an atomic state and commit it
                 let mut state = AtomicState::new(self.device.clone());
                 state.set_crtc_framebuffer(val.crtc_id, fb);
@@ -807,7 +892,61 @@ impl FileOps for DrmFile {
                         reserved: 0,
                     };
                     self.events.lock().push(event);
+                    self.rd_event.wake_all();
                 }
+            }
+            drm::DRM_IOCTL_CRTC_GET_SEQUENCE => {
+                return Err(Errno::ENOTTY);
+            }
+            drm::DRM_IOCTL_CRTC_QUEUE_SEQUENCE => {
+                return Err(Errno::ENOTTY);
+            }
+            drm::DRM_IOCTL_MODE_CURSOR => {
+                let ptr = UserPtr::<drm::drm_mode_cursor>::new(arg);
+                let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                const DRM_MODE_CURSOR_BO: u32 = 0x01;
+                const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
+
+                if val.flags & DRM_MODE_CURSOR_BO != 0 {
+                    if val.handle == 0 {
+                        // Hide cursor
+                        self.device.set_cursor(val.crtc_id, None, 0, 0)?;
+                    } else {
+                        // Set cursor image
+                        let buffers = self.buffers.lock();
+                        let buffer = buffers
+                            .iter()
+                            .find(|b| b.id() == val.handle)
+                            .ok_or(Errno::EINVAL)?
+                            .clone();
+                        drop(buffers);
+                        self.device
+                            .set_cursor(val.crtc_id, Some(buffer), val.width, val.height)?;
+                    }
+                }
+                if val.flags & DRM_MODE_CURSOR_MOVE != 0 {
+                    self.device.move_cursor(val.crtc_id, val.x, val.y)?;
+                }
+            }
+            drm::DRM_IOCTL_MODE_SETGAMMA => {
+                warn!("DRM_IOCTL_MODE_SETGAMMA is a stub!");
+                let ptr = UserPtr::<drm::drm_mode_crtc_lut>::new(arg);
+                let _val = ptr.read().ok_or(Errno::EFAULT)?;
+                // TODO: Implement gamma LUT support
+            }
+            drm::DRM_IOCTL_MODE_SETPROPERTY => {
+                warn!("DRM_IOCTL_MODE_SETPROPERTY is a stub!");
+                let ptr = UserPtr::<drm::drm_mode_connector_set_property>::new(arg);
+                let _val = ptr.read().ok_or(Errno::EFAULT)?;
+                // TODO: Implement connector property setting
+            }
+            drm::DRM_IOCTL_MODE_LIST_LESSEES => {
+                let mut ptr = UserPtr::<drm::drm_mode_list_lessees>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+                // No leases supported yet, return empty list
+                val.count_lessees = 0;
+                ptr.write(val).ok_or(Errno::EFAULT)?;
             }
             x => {
                 error!("Unknown ioctl {x:x}");
@@ -854,9 +993,15 @@ static CARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub fn register(card: Arc<DrmFile>) -> EResult<()> {
     log!("Registering new DRM card");
-    register_device(
+
+    let root = devtmpfs::get_root();
+
+    vfs::mknod(
+        root.clone(),
+        root.clone(),
         format!("drmcard{}", CARD_COUNTER.fetch_add(1, Ordering::SeqCst)).as_bytes(),
-        crate::vfs::inode::Device::CharacterDevice(card),
         Mode::from_bits_truncate(0o660),
+        Some(crate::vfs::inode::Device::CharacterDevice(card)),
+        &Identity::get_kernel(),
     )
 }

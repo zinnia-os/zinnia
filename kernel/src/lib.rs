@@ -51,7 +51,7 @@ use crate::{
     vfs::{
         File,
         file::{FileDescription, OpenFlags},
-        fs::initramfs,
+        fs::{devtmpfs, initramfs},
         inode::Mode,
     },
 };
@@ -71,7 +71,7 @@ pub fn init() -> ! {
     unreachable!("The scheduler got back to zinnia::init?");
 }
 
-static INIT: Once<Arc<Process>> = Once::new();
+pub(crate) static INIT: Once<Arc<Process>> = Once::new();
 
 /// The high-level kernel entry point.
 pub extern "C" fn main(_: usize, _: usize) {
@@ -112,21 +112,43 @@ pub extern "C" fn main(_: usize, _: usize) {
 
     unsafe {
         INIT.init(Arc::new(
-            Process::new("init".into(), None).expect("Unable to create init process"),
+            Process::new("init".into(), Some(Process::get_kernel().clone()))
+                .expect("Unable to create init process"),
         ))
     };
 
     let init_proc = INIT.get();
-    // Open /dev/console for stdio for init.
+    Process::get_kernel()
+        .children
+        .lock()
+        .push(init_proc.clone());
+    process::PROCESS_TABLE
+        .lock()
+        .insert(init_proc.get_pid(), Arc::downgrade(&init_proc));
+
+    let tty = match BootInfo::get().command_line.get_string("console") {
+        Some(x) => device::tty::get_tty_by_name(x),
+        None => device::tty::get_tty(0),
+    }
+    .expect("Unable to open TTY for init");
+
+    {
+        *tty.session.lock() = Some(init_proc.get_pid());
+        *tty.foreground_pgrp.lock() = Some(*init_proc.pgrp.lock());
+        *init_proc.controlling_tty.lock() = Some(tty);
+    }
+
+    // Open tty for stdio for init.
     {
         let mut open_files = init_proc.open_files.lock();
+        let dev = devtmpfs::get_root();
         let console = File::open(
-            init_proc.root_dir.lock().clone(),
-            init_proc.working_dir.lock().clone(),
+            dev.clone(),
+            dev,
             BootInfo::get()
                 .command_line
                 .get_string("console")
-                .unwrap_or("/dev/console")
+                .unwrap_or("com1")
                 .as_bytes(),
             OpenFlags::ReadWrite,
             Mode::empty(),

@@ -16,7 +16,10 @@ use zinnia::{
     error, log,
     memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
-    uapi::drm::{drm_mode_connector_state, drm_mode_modeinfo},
+    uapi::drm::{
+        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, drm_mode_connector_state,
+        drm_mode_modeinfo,
+    },
     util::mutex::spin::SpinMutex,
 };
 
@@ -25,12 +28,15 @@ pub struct VirtioGpuDevice {
     virtio: SpinMutex<VirtioDevice>,
     ctrl_queue: SpinMutex<VirtQueue>,
     ctrl_notify_off: u16,
-    _cursor_queue: SpinMutex<VirtQueue>,
-    _cursor_notify_off: u16,
+    cursor_queue: SpinMutex<VirtQueue>,
+    cursor_notify_off: u16,
     resource_id_counter: AtomicU32,
     scanouts: SpinMutex<Vec<ScanoutInfo>>,
     active_resource: AtomicU32, // Track which resource is active
     obj_counter: IdAllocator,
+    cursor_resource: AtomicU32, // Resource ID of current cursor image (0 = none)
+    cursor_x: AtomicU32,
+    cursor_y: AtomicU32,
 }
 
 struct ScanoutInfo {
@@ -53,12 +59,15 @@ impl VirtioGpuDevice {
             virtio: SpinMutex::new(virtio),
             ctrl_queue,
             ctrl_notify_off,
-            _cursor_queue: cursor_queue,
-            _cursor_notify_off: cursor_notify_off,
+            cursor_queue,
+            cursor_notify_off,
             resource_id_counter: AtomicU32::new(1),
             scanouts: SpinMutex::new(Vec::new()),
             active_resource: AtomicU32::new(0),
             obj_counter: IdAllocator::new(),
+            cursor_resource: AtomicU32::new(0),
+            cursor_x: AtomicU32::new(0),
+            cursor_y: AtomicU32::new(0),
         };
 
         // Get display info
@@ -336,10 +345,20 @@ impl VirtioGpuDevice {
             let plane = Arc::new(Plane::new(
                 plane_id,
                 vec![crtc.clone()],
-                1,                // DRM_PLANE_TYPE_PRIMARY
-                vec![0x34325258], // XR24 (XRGB8888) fourcc format
+                1, // DRM_PLANE_TYPE_PRIMARY
+                vec![DRM_FORMAT_XRGB8888],
             ));
             all_planes.push(plane);
+
+            // Create a cursor plane per CRTC
+            let cursor_plane_id = self.obj_counter.alloc();
+            let cursor_plane = Arc::new(Plane::new(
+                cursor_plane_id,
+                vec![crtc.clone()],
+                DRM_PLANE_TYPE_CURSOR,
+                vec![DRM_FORMAT_ARGB8888],
+            ));
+            all_planes.push(cursor_plane);
         }
 
         // Create connectors and encoders
@@ -383,6 +402,36 @@ impl VirtioGpuDevice {
 
         Ok(())
     }
+
+    fn send_cursor_command(&self, cmd: &VirtioGpuUpdateCursor) -> EResult<()> {
+        let cmd_ptr = cmd as *const VirtioGpuUpdateCursor as *const u8;
+        let cmd_phys = VirtAddr::from(cmd_ptr).as_hhdm().ok_or(Errno::EFAULT)?;
+
+        let buffers = vec![(
+            cmd_phys,
+            core::mem::size_of::<VirtioGpuUpdateCursor>(),
+            false,
+        )];
+
+        {
+            let mut queue = self.cursor_queue.lock();
+            queue.add_buffer(&buffers)?;
+        }
+
+        self.virtio.lock().notify_queue(self.cursor_notify_off);
+
+        // Wait for completion
+        loop {
+            let mut queue = self.cursor_queue.lock();
+            if queue.get_used().is_some() {
+                break;
+            }
+            drop(queue);
+            core::hint::spin_loop();
+        }
+
+        Ok(())
+    }
 }
 
 impl Device for VirtioGpuDevice {
@@ -418,7 +467,7 @@ impl Device for VirtioGpuDevice {
 
         let resource_id = self.alloc_resource_id();
         let format = match bpp {
-            32 => VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM, // XRGB format to match test program
+            32 => VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
             _ => return Err(Errno::EINVAL),
         };
         log!("Using format {} for resource", format);
@@ -528,6 +577,96 @@ impl Device for VirtioGpuDevice {
         } else {
             error!("Failed to transfer resource {} to host", resource_id);
         }
+    }
+
+    fn set_cursor(
+        &self,
+        _crtc_id: u32,
+        buffer: Option<Arc<dyn BufferObject>>,
+        width: u32,
+        height: u32,
+    ) -> EResult<()> {
+        let scanout_id = {
+            let scanouts = self.scanouts.lock();
+            scanouts.first().map(|s| s.id).unwrap_or(0)
+        };
+
+        match buffer {
+            Some(buf) => {
+                let virtio_buf = (buf.as_ref() as &dyn Any)
+                    .downcast_ref::<VirtioGpuBuffer>()
+                    .ok_or(Errno::EINVAL)?;
+                let resource_id = virtio_buf.resource_id;
+
+                // Transfer cursor image data to host
+                self.transfer_to_host_2d(resource_id, 0, 0, width, height)?;
+
+                self.cursor_resource.store(resource_id, Ordering::SeqCst);
+
+                let cmd = VirtioGpuUpdateCursor {
+                    hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_UPDATE_CURSOR),
+                    pos: VirtioGpuCursorPos {
+                        scanout_id,
+                        x: self.cursor_x.load(Ordering::SeqCst),
+                        y: self.cursor_y.load(Ordering::SeqCst),
+                        padding: 0,
+                    },
+                    resource_id,
+                    hot_x: 0,
+                    hot_y: 0,
+                    padding: 0,
+                };
+                self.send_cursor_command(&cmd)?;
+            }
+            None => {
+                // Hide cursor by setting resource_id to 0
+                self.cursor_resource.store(0, Ordering::SeqCst);
+
+                let cmd = VirtioGpuUpdateCursor {
+                    hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_UPDATE_CURSOR),
+                    pos: VirtioGpuCursorPos {
+                        scanout_id,
+                        x: 0,
+                        y: 0,
+                        padding: 0,
+                    },
+                    resource_id: 0,
+                    hot_x: 0,
+                    hot_y: 0,
+                    padding: 0,
+                };
+                self.send_cursor_command(&cmd)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn move_cursor(&self, _crtc_id: u32, x: i32, y: i32) -> EResult<()> {
+        let scanout_id = {
+            let scanouts = self.scanouts.lock();
+            scanouts.first().map(|s| s.id).unwrap_or(0)
+        };
+
+        self.cursor_x.store(x as u32, Ordering::SeqCst);
+        self.cursor_y.store(y as u32, Ordering::SeqCst);
+
+        let resource_id = self.cursor_resource.load(Ordering::SeqCst);
+
+        let cmd = VirtioGpuUpdateCursor {
+            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_MOVE_CURSOR),
+            pos: VirtioGpuCursorPos {
+                scanout_id,
+                x: x as u32,
+                y: y as u32,
+                padding: 0,
+            },
+            resource_id,
+            hot_x: 0,
+            hot_y: 0,
+            padding: 0,
+        };
+        self.send_cursor_command(&cmd)?;
+        Ok(())
     }
 }
 

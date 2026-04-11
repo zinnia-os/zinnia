@@ -3,7 +3,7 @@ use crate::{
     memory::{UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
     process::{
-        Process,
+        PROCESS_TABLE, Pid, Process,
         signal::{self, SigAction, Signal, SignalSet},
     },
     sched::Scheduler,
@@ -101,10 +101,59 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
 
             Ok(0)
         }
-        // pid == 0: send to every process in the caller's process group.
-        // pid == -1: send to every process (except init).
-        // pid < -1: send to every process in process group |pid|.
-        _ => Err(Errno::ESRCH),
+        0 => {
+            // Send to every process in the caller's process group.
+            let pgrp = *Scheduler::get_current().get_process().pgrp.lock();
+
+            if sig_num == 0 {
+                return Ok(0);
+            }
+
+            let sig = Signal::from_raw(sig_num).unwrap();
+            signal::send_signal_to_pgrp(pgrp, sig);
+            Ok(0)
+        }
+        -1 => {
+            // Send to every process except PID 1 (init) and PID 0 (kernel).
+            if sig_num == 0 {
+                return Ok(0);
+            }
+
+            let sig = Signal::from_raw(sig_num).unwrap();
+            let table = PROCESS_TABLE.lock();
+            for (&target_pid, proc) in table.iter() {
+                if target_pid <= 1 {
+                    continue;
+                }
+                let proc = proc.upgrade().ok_or(Errno::ESRCH)?;
+                let threads = proc.threads.lock();
+                if let Some(t) = threads.first() {
+                    signal::send_signal_to_thread(t, sig);
+                }
+            }
+            Ok(0)
+        }
+        _ => {
+            // pid < -1: send to every process in process group |pid|.
+            let pgrp = (-pid) as Pid;
+
+            if sig_num == 0 {
+                // Check if any process exists in this group.
+                let table = PROCESS_TABLE.lock();
+                let exists = table.values().any(|p| {
+                    let Some(p) = p.upgrade() else { return false };
+                    *p.pgrp.lock() == pgrp
+                });
+                if !exists {
+                    return Err(Errno::ESRCH);
+                }
+                return Ok(0);
+            }
+
+            let sig = Signal::from_raw(sig_num).unwrap();
+            signal::send_signal_to_pgrp(pgrp, sig);
+            Ok(0)
+        }
     }
 }
 
@@ -114,27 +163,8 @@ pub fn sigreturn(frame: &mut Context) -> EResult<usize> {
     Ok(0)
 }
 
-/// Walk the process tree from the kernel process to find a process by PID.
+/// Find a process by PID using the global process table.
 fn find_process_by_pid(pid: usize) -> Option<Arc<Process>> {
-    let kernel = Process::get_kernel();
-
-    // Check the kernel process itself.
-    if kernel.get_pid() == pid {
-        return Some(kernel.clone());
-    }
-
-    find_in_children(kernel, pid)
-}
-
-fn find_in_children(proc: &Arc<Process>, pid: usize) -> Option<Arc<Process>> {
-    let children = proc.children.lock();
-    for child in children.iter() {
-        if child.get_pid() == pid {
-            return Some(child.clone());
-        }
-        if let Some(found) = find_in_children(child, pid) {
-            return Some(found);
-        }
-    }
-    None
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid)?.upgrade()
 }

@@ -6,7 +6,10 @@ use crate::{
     process::signal::ThreadSignalState,
     util::mutex::spin::SpinMutex,
 };
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    string::String,
+    sync::{Arc, Weak},
+};
 use core::{
     alloc::Layout,
     panic,
@@ -55,6 +58,8 @@ pub struct Task {
     pub uar: AtomicPtr<UserAccessRegion>,
     /// Per-thread signal state (pending signals and signal mask).
     pub signal: SpinMutex<ThreadSignalState>,
+    /// The display name of this thread.
+    pub name: SpinMutex<String>,
 }
 
 const STACK_LAYOUT: Layout = match Layout::from_size_align(KERNEL_STACK_SIZE, 0x1000) {
@@ -86,6 +91,7 @@ impl Task {
             user_stack: AtomicUsize::new(0),
             ticks: 0,
             priority: 0,
+            name: SpinMutex::new(String::new()),
         };
 
         {
@@ -123,6 +129,12 @@ impl Task {
         } else {
             todo!()
         }
+    }
+
+    /// Returns true if this task has any pending signals that are not blocked.
+    pub fn has_pending_signals(&self) -> bool {
+        let state = self.signal.lock();
+        !(state.pending & !state.mask).is_empty()
     }
 }
 

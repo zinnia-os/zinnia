@@ -5,8 +5,7 @@ use crate::{
         PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
     },
-    posix::errno::EResult,
-    uapi,
+    posix::errno::{EResult, Errno},
     util::mutex::spin::SpinMutex,
 };
 use alloc::{
@@ -56,7 +55,7 @@ impl PagedMemoryObject {
             if let Some(&addr) = pages.get(&idx) {
                 self.source
                     .try_put_page(addr, idx)
-                    .map_err(|_| crate::posix::errno::Errno::EIO)?;
+                    .map_err(|_| Errno::EIO)?;
             }
         }
         dirty.clear();
@@ -67,13 +66,17 @@ impl PagedMemoryObject {
     pub fn make_private(
         self: &Arc<Self>,
         length: NonZeroUsize,
-        offset: uapi::off_t,
+        offset: usize,
     ) -> EResult<Arc<dyn MemoryObject>> {
         // Private mapping means we need to do a unique allocation.
         let phys = Arc::new(PagedMemoryObject::new_phys());
-        let mut buf = vec![0u8; length.into()];
-        (self.as_ref() as &dyn MemoryObject).read(&mut buf, offset as _);
-        (phys.as_ref() as &dyn MemoryObject).write(&buf, offset as _);
+        (phys.as_ref() as &dyn MemoryObject).copy(
+            offset as _,
+            self.as_ref() as &dyn MemoryObject,
+            offset as _,
+            length.get(),
+        );
+
         Ok(phys)
     }
 }
@@ -123,6 +126,53 @@ impl dyn MemoryObject {
             let page_slice: &mut [u8] =
                 unsafe { slice::from_raw_parts_mut(page_addr.as_hhdm(), page_size) };
             page_slice[misalign..][..copy_size].copy_from_slice(&buffer[progress..][..copy_size]);
+            progress += copy_size;
+        }
+
+        progress
+    }
+
+    /// Copies from another memory object directly into [`self`].
+    pub fn copy(
+        &self,
+        self_offset: usize,
+        src: &dyn MemoryObject,
+        src_offset: usize,
+        len: usize,
+    ) -> usize {
+        let page_size = get_page_size();
+        let mut progress = 0;
+
+        while progress < len {
+            let target_misalign = (progress + self_offset) % page_size;
+            let src_misalign = (progress + src_offset) % page_size;
+
+            let target_page_index = (progress + self_offset) / page_size;
+            let src_page_index = (progress + src_offset) / page_size;
+
+            let copy_size = (page_size - target_misalign)
+                .min(page_size - src_misalign)
+                .min(len - progress);
+
+            let target_page = match self.try_get_page(target_page_index) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let src_page = match src.try_get_page(src_page_index) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let target_slice: &mut [u8] =
+                unsafe { slice::from_raw_parts_mut(target_page.as_hhdm(), page_size) };
+
+            let src_slice: &mut [u8] =
+                unsafe { slice::from_raw_parts_mut(src_page.as_hhdm(), page_size) };
+
+            target_slice[target_misalign..][..copy_size]
+                .copy_from_slice(&src_slice[src_misalign..][..copy_size]);
+
             progress += copy_size;
         }
 

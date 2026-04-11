@@ -1,35 +1,29 @@
 use crate::{
-    log::GLOBAL_LOGGERS,
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    process::PROCESS_STAGE,
+    process::{Identity, PROCESS_STAGE},
     uapi::{self, termios::winsize},
     vfs::{
-        File,
+        self, File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::Mode,
+        inode::{Device, Mode},
     },
 };
 use alloc::sync::Arc;
-use core::fmt::Write;
 
 #[derive(Debug)]
 struct Console;
 
 impl FileOps for Console {
     fn read(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
+        // TODO: Read into buffer
         Err(Errno::EBADF)
     }
 
-    fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
-        let mut writer = GLOBAL_LOGGERS.lock();
-        for _ in 0..buffer.len() {
-            let mut ch = [0u8];
-            buffer.copy_to_slice(&mut ch)?;
-            _ = writer.write_char(ch[0] as char);
-        }
-        Ok(buffer.len() as _)
+    fn write(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
+        // TODO: Clear buffer
+        Err(Errno::EBADF)
     }
 
     fn ioctl(&self, _: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
@@ -53,11 +47,16 @@ impl FileOps for Console {
     name = "generic.device.console",
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
-fn CONSOLE_STAGE() {
-    devtmpfs::register_device(
-        b"console",
-        crate::vfs::inode::Device::CharacterDevice(Arc::new(Console)),
+fn KMSG_STAGE() {
+    let root = devtmpfs::get_root();
+
+    vfs::mknod(
+        root.clone(),
+        root.clone(),
+        b"kmsg",
         Mode::from_bits_truncate(0o666),
+        Some(Device::CharacterDevice(Arc::new(Console))),
+        &Identity::get_kernel(),
     )
-    .expect("Unable to create console");
+    .expect("Unable to create /dev/kmsg");
 }
