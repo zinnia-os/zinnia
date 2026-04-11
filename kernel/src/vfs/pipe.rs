@@ -90,7 +90,7 @@ impl FileOps for PipeBuffer {
             let mut inner = self.inner.lock();
             let mut v = vec![0u8; buf.len()];
             let len = inner.buffer.read(&mut v);
-            buf.copy_from_slice(&v)?;
+            buf.copy_from_slice(&v[..len])?;
 
             // If there was at least one byte written to the pipe
             if len > 0 {
@@ -129,7 +129,8 @@ impl FileOps for PipeBuffer {
                     return Err(Errno::EPIPE);
                 }
 
-                let mut v = vec![0u8; buf.len()];
+                let to_write = buf.len().min(inner.buffer.get_available_len());
+                let mut v = vec![0u8; to_write];
                 buf.copy_to_slice(&mut v)?;
                 inner.buffer.write(&v)
             };
