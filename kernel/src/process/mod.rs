@@ -332,14 +332,8 @@ impl Process {
             }
         }
 
-        // Notify the parent that a child has exited.
+        // Wake the parent so that waitpid can collect this child.
         if let Some(parent) = proc.get_parent() {
-            // Send SIGCHLD so the parent is notified asynchronously (e.g. shells
-            // waiting on terminal input need this to notice background jobs exiting).
-            let parent_thread = parent.threads.lock().first().cloned();
-            if let Some(thread) = parent_thread {
-                signal::send_signal_to_thread(&thread, signal::Signal::SIGCHLD);
-            }
             parent.child_event.wake_all();
         }
 

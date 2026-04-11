@@ -328,26 +328,7 @@ pub struct ThreadSignalState {
 }
 
 /// Queue a signal on the given thread and wake it if it is sleeping.
-///
-/// Signals whose effective disposition is "ignore" (either explicitly via
-/// `SIG_IGN` or implicitly via `SIG_DFL` when the default action is
-/// [`DefaultAction::Ignore`]) are silently dropped per POSIX semantics.
-/// This prevents ignored signals from generating spurious `EINTR` returns
-/// on blocking syscalls.
 pub fn send_signal_to_thread(task: &alloc::sync::Arc<crate::process::task::Task>, sig: Signal) {
-    // Drop signals that would be ignored — they must not interrupt
-    // blocking syscalls or be delivered to userspace.
-    {
-        let proc = task.get_process();
-        let actions = proc.signal_actions.lock();
-        let action = actions.get_action(sig);
-        if action.is_ignore()
-            || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
-        {
-            return;
-        }
-    }
-
     {
         let mut state = task.signal.lock();
         state.pending.set(sig, true);
