@@ -37,6 +37,8 @@ pub struct VirtioGpuDevice {
     cursor_resource: AtomicU32, // Resource ID of current cursor image (0 = none)
     cursor_x: AtomicU32,
     cursor_y: AtomicU32,
+    cursor_hot_x: AtomicU32,
+    cursor_hot_y: AtomicU32,
 }
 
 struct ScanoutInfo {
@@ -68,6 +70,8 @@ impl VirtioGpuDevice {
             cursor_resource: AtomicU32::new(0),
             cursor_x: AtomicU32::new(0),
             cursor_y: AtomicU32::new(0),
+            cursor_hot_x: AtomicU32::new(0),
+            cursor_hot_y: AtomicU32::new(0),
         };
 
         // Get display info
@@ -585,11 +589,17 @@ impl Device for VirtioGpuDevice {
         buffer: Option<Arc<dyn BufferObject>>,
         width: u32,
         height: u32,
+        hot_x: i32,
+        hot_y: i32,
     ) -> EResult<()> {
         let scanout_id = {
             let scanouts = self.scanouts.lock();
             scanouts.first().map(|s| s.id).unwrap_or(0)
         };
+
+        // Store hotspot values
+        self.cursor_hot_x.store(hot_x as u32, Ordering::SeqCst);
+        self.cursor_hot_y.store(hot_y as u32, Ordering::SeqCst);
 
         match buffer {
             Some(buf) => {
@@ -612,8 +622,8 @@ impl Device for VirtioGpuDevice {
                         padding: 0,
                     },
                     resource_id,
-                    hot_x: 0,
-                    hot_y: 0,
+                    hot_x: hot_x as u32,
+                    hot_y: hot_y as u32,
                     padding: 0,
                 };
                 self.send_cursor_command(&cmd)?;
@@ -661,8 +671,8 @@ impl Device for VirtioGpuDevice {
                 padding: 0,
             },
             resource_id,
-            hot_x: 0,
-            hot_y: 0,
+            hot_x: self.cursor_hot_x.load(Ordering::SeqCst),
+            hot_y: self.cursor_hot_y.load(Ordering::SeqCst),
             padding: 0,
         };
         self.send_cursor_command(&cmd)?;

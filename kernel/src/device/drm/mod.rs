@@ -102,12 +102,15 @@ pub trait Device: Send + Sync {
 
     /// Set the cursor image for a CRTC. `buffer` contains ARGB8888 pixel data.
     /// If `buffer` is None, the cursor should be hidden.
+    /// `hot_x` and `hot_y` are the hotspot offsets (pixels from top-left of cursor image).
     fn set_cursor(
         &self,
         _crtc_id: u32,
         _buffer: Option<Arc<dyn BufferObject>>,
         _width: u32,
         _height: u32,
+        _hot_x: i32,
+        _hot_y: i32,
     ) -> EResult<()> {
         Err(Errno::ENOSYS)
     }
@@ -895,6 +898,10 @@ impl FileOps for DrmFile {
                     self.rd_event.wake_all();
                 }
             }
+            drm::DRM_IOCTL_WAIT_VBLANK => {
+                warn!("DRM_IOCTL_WAIT_VBLANK is not supported");
+                return Err(Errno::ENOTTY);
+            }
             drm::DRM_IOCTL_CRTC_GET_SEQUENCE => {
                 return Err(Errno::ENOTTY);
             }
@@ -911,7 +918,7 @@ impl FileOps for DrmFile {
                 if val.flags & DRM_MODE_CURSOR_BO != 0 {
                     if val.handle == 0 {
                         // Hide cursor
-                        self.device.set_cursor(val.crtc_id, None, 0, 0)?;
+                        self.device.set_cursor(val.crtc_id, None, 0, 0, 0, 0)?;
                     } else {
                         // Set cursor image
                         let buffers = self.buffers.lock();
@@ -921,8 +928,48 @@ impl FileOps for DrmFile {
                             .ok_or(Errno::EINVAL)?
                             .clone();
                         drop(buffers);
-                        self.device
-                            .set_cursor(val.crtc_id, Some(buffer), val.width, val.height)?;
+                        self.device.set_cursor(
+                            val.crtc_id,
+                            Some(buffer),
+                            val.width,
+                            val.height,
+                            0,
+                            0,
+                        )?;
+                    }
+                }
+                if val.flags & DRM_MODE_CURSOR_MOVE != 0 {
+                    self.device.move_cursor(val.crtc_id, val.x, val.y)?;
+                }
+            }
+            drm::DRM_IOCTL_MODE_CURSOR2 => {
+                let ptr = UserPtr::<drm::drm_mode_cursor2>::new(arg);
+                let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                const DRM_MODE_CURSOR_BO: u32 = 0x01;
+                const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
+
+                if val.flags & DRM_MODE_CURSOR_BO != 0 {
+                    if val.handle == 0 {
+                        // Hide cursor
+                        self.device.set_cursor(val.crtc_id, None, 0, 0, 0, 0)?;
+                    } else {
+                        // Set cursor image with hotspot
+                        let buffers = self.buffers.lock();
+                        let buffer = buffers
+                            .iter()
+                            .find(|b| b.id() == val.handle)
+                            .ok_or(Errno::EINVAL)?
+                            .clone();
+                        drop(buffers);
+                        self.device.set_cursor(
+                            val.crtc_id,
+                            Some(buffer),
+                            val.width,
+                            val.height,
+                            val.hot_x,
+                            val.hot_y,
+                        )?;
                     }
                 }
                 if val.flags & DRM_MODE_CURSOR_MOVE != 0 {

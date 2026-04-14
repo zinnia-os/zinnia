@@ -25,6 +25,8 @@ struct CursorState {
     y: i32,
     width: u32,
     height: u32,
+    hot_x: i32,
+    hot_y: i32,
 }
 
 struct PlainDevice {
@@ -183,11 +185,15 @@ impl Device for PlainDevice {
         buffer: Option<Arc<dyn BufferObject>>,
         width: u32,
         height: u32,
+        hot_x: i32,
+        hot_y: i32,
     ) -> EResult<()> {
         let mut cursor = self.cursor.lock();
         cursor.buffer = buffer;
         cursor.width = width;
         cursor.height = height;
+        cursor.hot_x = hot_x;
+        cursor.hot_y = hot_y;
         Ok(())
     }
 
@@ -264,6 +270,8 @@ fn PLAINFB_STAGE() {
             y: 0,
             width: 0,
             height: 0,
+            hot_x: 0,
+            hot_y: 0,
         }),
     });
 
