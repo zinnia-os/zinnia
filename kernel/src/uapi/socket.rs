@@ -127,6 +127,7 @@ pub const MSG_TRUNC: u32 = 0x40;
 pub const MSG_WAITALL: u32 = 0x80;
 pub const MSG_FIN: u32 = 0x200;
 pub const MSG_CONFIRM: u32 = 0x800;
+pub const MSG_CMSG_CLOEXEC: u32 = 0x2000;
 
 pub const AF_INET: u32 = 1;
 pub const AF_INET6: u32 = 2;

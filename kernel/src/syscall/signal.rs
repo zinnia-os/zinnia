@@ -1,5 +1,5 @@
 use crate::{
-    arch::sched::Context,
+    arch::sched::{Context, jump_to_context},
     memory::{UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
     process::{
@@ -93,10 +93,8 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
             }
 
             let sig = Signal::from_raw(sig_num).unwrap();
-            // Send to the first thread of the target process.
-            let threads = target.threads.lock();
-            if let Some(thread) = threads.first() {
-                signal::send_signal_to_thread(thread, sig);
+            if !signal::send_signal_to_process(&target, sig) {
+                return Err(Errno::ESRCH);
             }
 
             Ok(0)
@@ -110,7 +108,9 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
             }
 
             let sig = Signal::from_raw(sig_num).unwrap();
-            signal::send_signal_to_pgrp(pgrp, sig);
+            if signal::send_signal_to_pgrp(pgrp, sig) == 0 {
+                return Err(Errno::ESRCH);
+            }
             Ok(0)
         }
         -1 => {
@@ -121,16 +121,21 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
 
             let sig = Signal::from_raw(sig_num).unwrap();
             let table = PROCESS_TABLE.lock();
+            let mut delivered = 0;
             for (&target_pid, proc) in table.iter() {
                 if target_pid <= 1 {
                     continue;
                 }
-                let proc = proc.upgrade().ok_or(Errno::ESRCH)?;
-                let threads = proc.threads.lock();
-                if let Some(t) = threads.first() {
-                    signal::send_signal_to_thread(t, sig);
+                let Some(proc) = proc.upgrade() else { continue };
+                if signal::send_signal_to_process(&proc, sig) {
+                    delivered += 1;
                 }
             }
+
+            if delivered == 0 {
+                return Err(Errno::ESRCH);
+            }
+
             Ok(0)
         }
         _ => {
@@ -151,16 +156,19 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
             }
 
             let sig = Signal::from_raw(sig_num).unwrap();
-            signal::send_signal_to_pgrp(pgrp, sig);
+            if signal::send_signal_to_pgrp(pgrp, sig) == 0 {
+                return Err(Errno::ESRCH);
+            }
             Ok(0)
         }
     }
 }
 
-pub fn sigreturn(frame: &mut Context) -> EResult<usize> {
-    crate::arch::sched::restore_signal_frame(frame)?;
-    // The return value is embedded in the restored context, so this value is ignored.
-    Ok(0)
+pub fn sigreturn(frame: &mut Context) -> ! {
+    crate::arch::sched::restore_signal_frame(frame);
+
+    unsafe { jump_to_context(frame) };
+    unreachable!();
 }
 
 /// Find a process by PID using the global process table.

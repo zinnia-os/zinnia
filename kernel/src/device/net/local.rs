@@ -1,25 +1,88 @@
 use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 use core::cmp::min;
+use core::sync::atomic::AtomicBool;
 
 use crate::device::net::ShutdownFlags;
 use crate::{
     memory::IovecIter,
     posix::errno::{EResult, Errno},
+    process::signal::{Signal, send_signal_to_thread},
     sched::Scheduler,
     uapi::socket::*,
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
     vfs::{
-        self, PathNode,
+        self, File, PathNode,
         cache::LookupFlags,
-        file::{PollEventSet, PollFlags},
+        file::{FileDescription, PollEventSet, PollFlags},
         inode::{Device, Mode, NodeOps},
     },
 };
 
 use super::{Socket, SocketOps};
 
-const BUFFER_SIZE: usize = 0x1000;
+const BUFFER_SIZE: usize = 0x4000;
+
+/// Ancillary-data barrier section: fds that arrived alongside the first
+/// `bytes` bytes currently at the head of the peer's recv queue.
+///
+/// `files` may be empty; that just means this section has no pending fds
+/// to deliver. Sections are created either by a `sendmsg` with SCM_RIGHTS
+/// or extended by plain data-only sends.
+struct InflightSection {
+    files: Vec<Arc<File>>,
+    bytes: usize,
+}
+
+/// CMSG_ALIGN: align to alignof(size_t). Matches the layout mlibc emits.
+const fn cmsg_align(x: usize) -> usize {
+    let a = align_of::<usize>();
+    (x + a - 1) & !(a - 1)
+}
+
+fn cmsg_len(payload: usize) -> usize {
+    cmsg_align(size_of::<cmsghdr>()) + payload
+}
+
+/// Record a send of `bytes` bytes (and optionally fds) into the peer's
+/// inflight section queue. Data-only sends extend the trailing section's
+/// byte count; a send that carries fds always starts a fresh section so
+/// the reader can deliver those fds with the corresponding data range.
+fn push_inflight(
+    inflight: &mut VecDeque<InflightSection>,
+    files: &mut Vec<Arc<File>>,
+    bytes: usize,
+) {
+    if files.is_empty() {
+        if bytes == 0 {
+            return;
+        }
+        match inflight.back_mut() {
+            Some(back) if back.files.is_empty() => back.bytes += bytes,
+            _ => inflight.push_back(InflightSection {
+                files: Vec::new(),
+                bytes,
+            }),
+        }
+        return;
+    }
+
+    let taken = core::mem::take(files);
+    // If the tail has no data yet (e.g. a previous sendmsg that copied zero
+    // bytes), merge into it rather than leaving an empty slot.
+    if let Some(back) = inflight.back_mut()
+        && back.bytes == 0
+        && back.files.is_empty()
+    {
+        back.files = taken;
+        back.bytes = bytes;
+    } else {
+        inflight.push_back(InflightSection {
+            files: taken,
+            bytes,
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
@@ -36,6 +99,7 @@ struct LocalInner {
     peer: Option<Arc<LocalSocket>>,
     self_ref: Weak<LocalSocket>,
     recv_buf: RingBuffer,
+    inflight: VecDeque<InflightSection>,
     backlog: VecDeque<Arc<Socket>>,
     backlog_limit: usize,
     shutdown: ShutdownFlags,
@@ -58,6 +122,7 @@ fn make_socket(state: State, sock_type: u32) -> EResult<Arc<LocalSocket>> {
             peer: None,
             self_ref: Weak::new(),
             recv_buf: RingBuffer::new(BUFFER_SIZE),
+            inflight: VecDeque::new(),
             backlog: VecDeque::new(),
             backlog_limit: 0,
             shutdown: ShutdownFlags::empty(),
@@ -110,6 +175,162 @@ impl LocalSocket {
         addr[..family_size].copy_from_slice(&family.to_ne_bytes());
         addr[family_size..family_size + path.len()].copy_from_slice(path);
         addr
+    }
+
+    fn maybe_sigpipe(&self, flags: u32) {
+        if flags & MSG_NOSIGNAL != 0 {
+            return;
+        }
+        send_signal_to_thread(&Scheduler::get_current(), Signal::SigPipe);
+    }
+
+    /// Walk a user-layout cmsg blob, collecting SCM_RIGHTS fds as owned `Arc<File>`.
+    /// Unknown cmsgs are ignored (matches glibc/Astral behaviour).
+    fn parse_scm_rights(
+        control: &[u8],
+        files: &mut Vec<Arc<File>>,
+        has_rights: &mut bool,
+    ) -> EResult<()> {
+        let hdr_size = size_of::<cmsghdr>();
+        let mut off = 0usize;
+        let proc = Scheduler::get_current().get_process();
+        let fdtable = proc.open_files.lock();
+
+        while off + hdr_size <= control.len() {
+            let mut hdr = cmsghdr {
+                cmsg_len: 0,
+                cmsg_level: 0,
+                cmsg_type: 0,
+            };
+            // Safety: cmsghdr is #[repr(C)] Copy of plain scalars.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    control.as_ptr().add(off),
+                    &mut hdr as *mut _ as *mut u8,
+                    hdr_size,
+                );
+            }
+
+            let cmsg_len = hdr.cmsg_len as usize;
+            if cmsg_len < hdr_size || off + cmsg_len > control.len() {
+                break;
+            }
+
+            if hdr.cmsg_level == SOL_SOCKET as i32 && hdr.cmsg_type == SCM_RIGHTS as i32 {
+                *has_rights = true;
+                let data_off = off + cmsg_align(hdr_size);
+                let payload_len = cmsg_len - cmsg_align(hdr_size);
+                let fd_count = payload_len / size_of::<i32>();
+                for i in 0..fd_count {
+                    let mut fd_bytes = [0u8; 4];
+                    fd_bytes.copy_from_slice(&control[data_off + i * 4..data_off + i * 4 + 4]);
+                    let fd = i32::from_ne_bytes(fd_bytes);
+                    let desc = fdtable.get_fd(fd).ok_or(Errno::EBADF)?;
+                    files.push(desc.file);
+                }
+            }
+
+            // Advance past this cmsg, padded to alignof(size_t).
+            off += cmsg_align(cmsg_len);
+        }
+
+        Ok(())
+    }
+
+    fn build_cmsg(
+        inflight: &mut VecDeque<InflightSection>,
+        control: &mut [u8],
+        flags: u32,
+        out_flags: &mut u32,
+    ) -> EResult<usize> {
+        // A caller that didn't ask for ancillary data (plain read / recv)
+        // leaves fds pending for a future recvmsg rather than dropping them.
+        if control.is_empty() {
+            return Ok(0);
+        }
+
+        let Some(section) = inflight.front_mut() else {
+            return Ok(0);
+        };
+        if section.files.is_empty() {
+            return Ok(0);
+        }
+
+        let hdr_size = size_of::<cmsghdr>();
+        let header_aligned = cmsg_align(hdr_size);
+
+        let available = control.len();
+        if available <= header_aligned {
+            // Userspace gave us a buffer too small even for one fd — drop
+            // them all and signal truncation, matching Linux behaviour.
+            let _ = core::mem::take(&mut section.files);
+            *out_flags |= MSG_CTRUNC;
+            return Ok(0);
+        }
+
+        let fd_slot_count = (available - header_aligned) / size_of::<i32>();
+        let n = min(section.files.len(), fd_slot_count);
+
+        let cloexec = flags & MSG_CMSG_CLOEXEC != 0;
+
+        let proc = Scheduler::get_current().get_process();
+        let mut installed_fds: Vec<i32> = Vec::with_capacity(n);
+
+        let taken: Vec<Arc<File>> = section.files.drain(..n).collect();
+        {
+            let mut fdtable = proc.open_files.lock();
+            for file in taken {
+                let desc = FileDescription {
+                    file,
+                    close_on_exec: AtomicBool::new(cloexec),
+                };
+                match fdtable.open_file(desc, 0) {
+                    Some(fd) => installed_fds.push(fd),
+                    None => {
+                        // Out of fds: stop here, truncate the remainder.
+                        *out_flags |= MSG_CTRUNC;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Discard any fds in this section that we could not (or chose not to) deliver.
+        // Dropping the Arc<File> runs File::close when the last ref goes away.
+        if !section.files.is_empty() {
+            *out_flags |= MSG_CTRUNC;
+            section.files.clear();
+        }
+
+        let installed = installed_fds.len();
+        let payload = installed * size_of::<i32>();
+        let total_len = header_aligned + payload;
+
+        let hdr = cmsghdr {
+            cmsg_len: cmsg_len(payload) as socklen_t,
+            cmsg_level: SOL_SOCKET as i32,
+            cmsg_type: SCM_RIGHTS as i32,
+        };
+
+        // Write header.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &hdr as *const _ as *const u8,
+                control.as_mut_ptr(),
+                hdr_size,
+            );
+        }
+        // Zero any header padding up to the data offset.
+        for b in &mut control[hdr_size..header_aligned] {
+            *b = 0;
+        }
+        // Write fds.
+        for (i, fd) in installed_fds.iter().enumerate() {
+            let off = header_aligned + i * size_of::<i32>();
+            control[off..off + 4].copy_from_slice(&fd.to_ne_bytes());
+        }
+
+        Ok(total_len)
     }
 
     fn write_addr(addr: &Option<Vec<u8>>, buf: &mut [u8]) -> usize {
@@ -260,8 +481,23 @@ impl SocketOps for LocalSocket {
         Ok(())
     }
 
-    fn send(&self, buf: &mut IovecIter, _flags: u32, nonblocking: bool) -> EResult<isize> {
-        if buf.is_empty() {
+    fn send(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize> {
+        self.sendmsg(buf, &[], flags, nonblocking)
+    }
+
+    fn recv(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize> {
+        let (n, _, _) = self.recvmsg(buf, &mut [], flags, nonblocking)?;
+        Ok(n)
+    }
+
+    fn sendmsg(
+        &self,
+        buf: &mut IovecIter,
+        control: &[u8],
+        flags: u32,
+        nonblocking: bool,
+    ) -> EResult<isize> {
+        if buf.is_empty() && control.is_empty() {
             return Ok(0);
         }
 
@@ -271,46 +507,80 @@ impl SocketOps for LocalSocket {
                 return Err(Errno::ENOTCONN);
             }
             if inner.shutdown.contains(ShutdownFlags::Write) {
+                self.maybe_sigpipe(flags);
                 return Err(Errno::EPIPE);
             }
             inner.peer.clone().ok_or(Errno::ENOTCONN)?
         };
 
-        let guard = peer.wr_event.guard();
+        // Resolve any SCM_RIGHTS fds up-front so we can fail cleanly without
+        // having partially committed data to the peer's recv buffer.
+        let mut files_to_send: Vec<Arc<File>> = Vec::new();
+        let mut has_rights_cmsg = false;
+        Self::parse_scm_rights(control, &mut files_to_send, &mut has_rights_cmsg)?;
+
+        // Zero-length send: still deliver any fds to the peer's inflight
+        // queue (attached to the next data that arrives) and return.
+        if buf.is_empty() {
+            let mut peer_inner = peer.inner.lock();
+            if peer_inner.peer_closed || peer_inner.shutdown.contains(ShutdownFlags::Read) {
+                self.maybe_sigpipe(flags);
+                return Err(Errno::EPIPE);
+            }
+            if has_rights_cmsg {
+                push_inflight(&mut peer_inner.inflight, &mut files_to_send, 0);
+            }
+            return Ok(0);
+        }
+
+        let wr_guard = self.wr_event.guard();
         loop {
             {
                 let mut peer_inner = peer.inner.lock();
                 if peer_inner.peer_closed || peer_inner.shutdown.contains(ShutdownFlags::Read) {
+                    self.maybe_sigpipe(flags);
                     return Err(Errno::EPIPE);
                 }
 
-                let mut v = vec![0u8; buf.len()];
-                buf.copy_to_slice(&mut v)?;
-                let written = peer_inner.recv_buf.write(&v);
-                if written > 0 {
-                    peer.rd_event.wake_one();
-                    return Ok(written as isize);
+                let available = peer_inner.recv_buf.get_available_len();
+                if available > 0 {
+                    let want = min(buf.len() - buf.total_offset(), available);
+                    let mut scratch = vec![0u8; min(want, BUFFER_SIZE)];
+                    buf.copy_to_slice(&mut scratch)?;
+                    let written = peer_inner.recv_buf.write(&scratch);
+
+                    if written > 0 {
+                        push_inflight(&mut peer_inner.inflight, &mut files_to_send, written);
+                        peer.rd_event.wake_one();
+                        return Ok(written as isize);
+                    }
                 }
             }
 
             if nonblocking {
                 return Err(Errno::EAGAIN);
             }
-            guard.wait();
-            if crate::sched::Scheduler::get_current().has_pending_signals() {
+            wr_guard.wait();
+            if Scheduler::get_current().has_pending_signals() {
                 return Err(Errno::EINTR);
             }
         }
     }
 
-    fn recv(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize> {
-        if buf.is_empty() {
-            return Ok(0);
+    fn recvmsg(
+        &self,
+        buf: &mut IovecIter,
+        control: &mut [u8],
+        flags: u32,
+        nonblocking: bool,
+    ) -> EResult<(isize, usize, u32)> {
+        if buf.is_empty() && control.is_empty() {
+            return Ok((0, 0, 0));
         }
 
         let peek = flags & MSG_PEEK != 0;
 
-        let guard = self.rd_event.guard();
+        let rd_guard = self.rd_event.guard();
         loop {
             {
                 let mut inner = self.inner.lock();
@@ -318,33 +588,63 @@ impl SocketOps for LocalSocket {
                     return Err(Errno::ENOTCONN);
                 }
 
-                let mut v = vec![0u8; buf.len()];
-                let len = if peek {
-                    inner.recv_buf.peek(&mut v)
-                } else {
-                    inner.recv_buf.read(&mut v)
-                };
+                let data_len = inner.recv_buf.get_data_len();
 
-                if len > 0 {
-                    buf.copy_from_slice(&v[..len])?;
-                    if !peek {
-                        if let Some(peer) = &inner.peer {
-                            peer.wr_event.wake_one();
-                        }
+                if data_len > 0 {
+                    let mut recvcount = min(buf.len(), data_len);
+                    // Clamp to the current barrier section so we don't read
+                    // past data that belongs to a later fd-carrying message.
+                    if let Some(front) = inner.inflight.front()
+                        && front.bytes > 0
+                    {
+                        recvcount = min(recvcount, front.bytes);
                     }
-                    return Ok(len as isize);
+
+                    let mut scratch = vec![0u8; min(recvcount, BUFFER_SIZE)];
+                    let len = inner.recv_buf.peek(&mut scratch);
+
+                    if len > 0 {
+                        buf.copy_from_slice(&scratch[..len])?;
+                    }
+
+                    // Data made it to userspace (or there was none). Now
+                    // commit: install cmsg fds and advance the ring cursor.
+                    let mut out_flags = 0u32;
+                    let ctrl_written =
+                        Self::build_cmsg(&mut inner.inflight, control, flags, &mut out_flags)?;
+
+                    if len > 0 && !peek {
+                        let mut drop = vec![0u8; len];
+                        inner.recv_buf.read(&mut drop);
+
+                        if let Some(front) = inner.inflight.front_mut() {
+                            front.bytes = front.bytes.saturating_sub(len);
+                            // Advance to the next section once this one's data range is drained.
+                            // Any fds still sitting here were not delivered (caller didn't pass a control buffer).
+                            if front.bytes == 0 && inner.inflight.len() > 1 {
+                                inner.inflight.pop_front();
+                            }
+                        }
+                        self.wr_event.wake_one();
+                    }
+
+                    return Ok((len as isize, ctrl_written, out_flags));
                 }
 
                 if inner.shutdown.contains(ShutdownFlags::Read) || inner.peer_closed {
-                    return Ok(0);
+                    // Even on EOF, hand back any remaining inflight fds.
+                    let mut out_flags = 0u32;
+                    let ctrl_written =
+                        Self::build_cmsg(&mut inner.inflight, control, flags, &mut out_flags)?;
+                    return Ok((0, ctrl_written, out_flags));
                 }
             }
 
             if nonblocking {
                 return Err(Errno::EAGAIN);
             }
-            guard.wait();
-            if crate::sched::Scheduler::get_current().has_pending_signals() {
+            rd_guard.wait();
+            if Scheduler::get_current().has_pending_signals() {
                 return Err(Errno::EINTR);
             }
         }
@@ -490,11 +790,24 @@ impl SocketOps for LocalSocket {
     }
 
     fn release(&self) -> EResult<()> {
-        let peer = {
+        let (peer, inflight) = {
             let mut inner = self.inner.lock();
             inner.state = State::Unconnected;
-            inner.peer.take()
+            let peer = inner.peer.take();
+            // Drain any in-flight sections.
+            let inflight: Vec<InflightSection> = inner.inflight.drain(..).collect();
+            inner.backlog.clear();
+            (peer, inflight)
         };
+
+        // Close any undelivered in-flight files. If we hold the last Arc, File::close runs the underlying ops.release.
+        for section in inflight {
+            for file in section.files {
+                if Arc::strong_count(&file) == 1 {
+                    let _ = file.close();
+                }
+            }
+        }
 
         if let Some(peer) = peer {
             peer.inner.lock().peer_closed = true;

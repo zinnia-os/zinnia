@@ -64,6 +64,39 @@ pub trait SocketOps: Send + Sync + Any {
     /// Receive data.
     fn recv(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize>;
 
+    /// Send data with optional ancillary (control) data.
+    ///
+    /// `control` is the raw cmsg blob exactly as the caller wrote it.
+    /// Default implementation discards `control` and forwards to `send`.
+    fn sendmsg(
+        &self,
+        buf: &mut IovecIter,
+        control: &[u8],
+        flags: u32,
+        nonblocking: bool,
+    ) -> EResult<isize> {
+        let _ = control;
+        self.send(buf, flags, nonblocking)
+    }
+
+    /// Receive data with optional ancillary (control) data.
+    ///
+    /// Writes up to `control.len()` bytes of cmsg output into `control`.
+    /// Returns `(data_bytes, control_bytes, out_msg_flags)`. `out_msg_flags`
+    /// may include `MSG_CTRUNC` if ancillary data did not fit.
+    /// Default implementation writes no control and forwards to `recv`.
+    fn recvmsg(
+        &self,
+        buf: &mut IovecIter,
+        control: &mut [u8],
+        flags: u32,
+        nonblocking: bool,
+    ) -> EResult<(isize, usize, u32)> {
+        let _ = control;
+        let n = self.recv(buf, flags, nonblocking)?;
+        Ok((n, 0, 0))
+    }
+
     /// Shutdown read/write/both.
     fn shutdown(&self, how: u32) -> EResult<()>;
 

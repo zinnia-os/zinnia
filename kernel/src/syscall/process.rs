@@ -1,3 +1,5 @@
+use core::sync::atomic::Ordering;
+
 use crate::{
     arch::{self, sched::Context},
     memory::{UserCStr, VirtAddr, user::UserPtr},
@@ -228,102 +230,123 @@ pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> 
     unreachable!("fexecve should never return on success");
 }
 
-const WNOHANG: i32 = 1;
+fn waitpid_matches(pid: uapi::pid_t, caller_pgrp: usize, child: &Process) -> bool {
+    match pid as isize {
+        p if p > 0 => child.get_pid() == pid,
+        -1 => true,
+        0 => *child.pgrp.lock() == caller_pgrp,
+        p => *child.pgrp.lock() == (-p) as usize,
+    }
+}
+
+fn encode_exit(code: u8) -> i32 {
+    (code as i32) << 8
+}
+
+fn encode_stopped(sig: u32) -> i32 {
+    0x7f | ((sig as i32) << 8)
+}
 
 pub fn waitpid(pid: uapi::pid_t, stat_loc: VirtAddr, options: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-    let mut stat_loc: UserPtr<i32> = UserPtr::new(stat_loc);
-    let nohang = (options & WNOHANG) != 0;
+    let caller_pgrp = *proc.pgrp.lock();
+    let mut stat_ptr: UserPtr<i32> = UserPtr::new(stat_loc);
+
+    let write_status = |p: &mut UserPtr<i32>, s: i32| -> EResult<()> {
+        if stat_loc.is_null() {
+            Ok(())
+        } else {
+            p.write(s).ok_or(Errno::EFAULT).map(|_| ())
+        }
+    };
+
     loop {
         let guard = proc.child_event.guard();
-        let mut inner = proc.children.lock();
-        if inner.is_empty() {
+        let mut children = proc.children.lock();
+
+        if children.is_empty() {
             return Err(Errno::ECHILD);
         }
-        match pid as isize {
-            // Any child process whose process group ID is equal to the absolute value of pid.
-            ..=-2 => {
-                let target_pgrp = (-(pid as isize)) as usize;
-                let mut waitee = None;
-                for (idx, child) in inner.iter().enumerate() {
-                    if *child.pgrp.lock() != target_pgrp {
-                        continue;
-                    }
-                    let child_inner = child.status.lock();
-                    if let ProcessState::Exited(code) = *child_inner {
-                        stat_loc.write((code as i32) << 8).ok_or(Errno::EFAULT)?;
-                        waitee = Some((idx, child.get_pid()));
-                        break;
-                    }
-                }
 
-                if let Some((w, child_pid)) = waitee {
-                    inner.remove(w);
-                    return Ok(child_pid);
-                }
+        let mut saw_match = false;
+        let mut reap: Option<(usize, usize, i32)> = None;
+        let mut report: Option<(usize, i32)> = None;
 
-                // Check if any child matches the process group at all.
-                let has_match = inner.iter().any(|c| *c.pgrp.lock() == target_pgrp);
-                if !has_match {
-                    return Err(Errno::ECHILD);
-                }
+        for (idx, child) in children.iter().enumerate() {
+            if !waitpid_matches(pid, caller_pgrp, child) {
+                continue;
             }
-            -1 | 0 => {
-                let mut waitee = None;
-                for (idx, child) in inner.iter().enumerate() {
-                    let child_inner = child.status.lock();
-                    if let ProcessState::Exited(code) = *child_inner {
-                        stat_loc.write((code as i32) << 8).ok_or(Errno::EFAULT)?;
-                        waitee = Some((idx, child.get_pid()));
-                        break;
-                    }
-                }
+            saw_match = true;
 
-                if let Some((w, child_pid)) = waitee {
-                    inner.remove(w);
-                    return Ok(child_pid);
-                }
-            }
-            _ => {
-                let mut found_child = false;
-                let mut waitee = None;
-                for (idx, child) in inner.iter().enumerate() {
-                    if child.get_pid() != pid {
-                        continue;
-                    }
-                    found_child = true;
-
-                    let child_inner = child.status.lock();
-                    if let ProcessState::Exited(code) = *child_inner {
-                        stat_loc.write((code as i32) << 8).ok_or(Errno::EFAULT)?;
-                        waitee = Some((idx, child.get_pid()));
-                    }
+            let state = child.status.lock();
+            match *state {
+                ProcessState::Exited(code) => {
+                    reap = Some((idx, child.get_pid(), encode_exit(code)));
                     break;
                 }
-
-                if !found_child {
-                    return Err(Errno::ECHILD);
+                ProcessState::Stopped(sig)
+                    if (options & uapi::wait::WUNTRACED) != 0
+                        && child.stop_unwaited.swap(false, Ordering::AcqRel) =>
+                {
+                    report = Some((child.get_pid(), encode_stopped(sig.as_raw())));
+                    break;
                 }
-
-                if let Some((w, child_pid)) = waitee {
-                    inner.remove(w);
-                    return Ok(child_pid);
+                _ if (options & uapi::wait::WCONTINUED) != 0
+                    && child.continue_unwaited.swap(false, Ordering::AcqRel) =>
+                {
+                    report = Some((child.get_pid(), 0xffff));
+                    break;
                 }
+                _ => {}
             }
         }
-        if nohang {
+
+        if let Some((idx, child_pid, status)) = reap {
+            write_status(&mut stat_ptr, status)?;
+            children.remove(idx);
+            return Ok(child_pid);
+        }
+
+        if let Some((child_pid, status)) = report {
+            write_status(&mut stat_ptr, status)?;
+            return Ok(child_pid);
+        }
+
+        if !saw_match {
+            return Err(Errno::ECHILD);
+        }
+
+        if (options & uapi::wait::WNOHANG) != 0 {
             return Ok(0);
         }
-        drop(inner);
+
+        drop(children);
         guard.wait();
-        // Check if we were woken by a signal rather than a child event.
+
+        // On wakeup, re-scan the child list first. Only surface EINTR if the
+        // rescan turns up nothing and we have a pending signal.
+        // Otherwise a SIGCHLD arriving in parallel with a child transition would race the legitimate reap and steal it.
         if Scheduler::get_current().has_pending_signals() {
-            return Err(Errno::EINTR);
+            let children = proc.children.lock();
+            let any_ready = children.iter().any(|child| {
+                if !waitpid_matches(pid, caller_pgrp, child) {
+                    return false;
+                }
+                let state = child.status.lock();
+                matches!(*state, ProcessState::Exited(_))
+                    || ((options & uapi::wait::WUNTRACED) != 0
+                        && child.stop_unwaited.load(Ordering::Acquire))
+                    || ((options & uapi::wait::WCONTINUED) != 0
+                        && child.continue_unwaited.load(Ordering::Acquire))
+            });
+            drop(children);
+            if !any_ready {
+                return Err(Errno::EINTR);
+            }
         }
     }
 }
 
-/// Maximum thread name length (including null terminator), matching Linux's TASK_COMM_LEN.
 const THREAD_NAME_MAX: usize = 16;
 
 pub fn thread_create(entry: usize, stack: usize) -> EResult<usize> {

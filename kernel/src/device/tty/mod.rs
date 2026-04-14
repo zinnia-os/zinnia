@@ -85,21 +85,21 @@ impl LineDiscipline {
         // Signal generation.
         if self.is_isig() {
             if byte == self.cc(VINTR) {
-                tty.signal_foreground(Signal::SIGINT);
+                tty.signal_foreground(Signal::SigInt);
                 if self.is_echo() {
                     self.echo(b"^C\n", tty);
                 }
                 return;
             }
             if byte == self.cc(VQUIT) {
-                tty.signal_foreground(Signal::SIGQUIT);
+                tty.signal_foreground(Signal::SigQuit);
                 if self.is_echo() {
                     self.echo(b"^\\\n", tty);
                 }
                 return;
             }
             if byte == self.cc(VSUSP) {
-                tty.signal_foreground(Signal::SIGTSTP);
+                tty.signal_foreground(Signal::SigTstp);
                 if self.is_echo() {
                     self.echo(b"^Z\n", tty);
                 }

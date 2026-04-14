@@ -88,7 +88,7 @@ pub fn setup_signal_frame(
 
 /// Restores the original context from a signal frame on the user stack.
 /// Called by the sigreturn syscall.
-pub fn restore_signal_frame(context: &mut Context) -> EResult<()> {
+pub fn restore_signal_frame(context: &mut Context) {
     internal::sched::restore_signal_frame(context)
 }
 

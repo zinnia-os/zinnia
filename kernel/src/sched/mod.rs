@@ -40,21 +40,41 @@ impl Scheduler {
         self.run_queue.lock().push_back(task);
     }
 
-    /// Adds a task to the run queue of the CPU with the lowest load.
-    /// This is used for new process creation to balance load across CPUs.
-    pub fn add_task_to_best_cpu(task: Arc<Task>) {
+    fn choose_target_cpu() -> &'static CpuData {
+        let current_cpu = CpuData::get();
         let mut min_load = usize::MAX;
-        let mut least_loaded_cpu = CpuData::get();
+        let mut least_loaded_cpu = current_cpu;
 
-        // Find the CPU with the minimum runqueue length
         for cpu_data in CpuData::iter() {
+            if cpu_data.id != current_cpu.id && !cpu_data.online.load(Ordering::Acquire) {
+                continue;
+            }
+
             let load = cpu_data.scheduler.run_queue.lock().len();
             if load < min_load {
                 min_load = load;
                 least_loaded_cpu = cpu_data;
             }
         }
+
+        least_loaded_cpu
+    }
+
+    /// Adds a task to the run queue of the CPU with the lowest load.
+    /// This is used for new process creation to balance load across CPUs.
+    pub fn add_task_to_best_cpu(task: Arc<Task>) {
+        let least_loaded_cpu = Self::choose_target_cpu();
         least_loaded_cpu.scheduler.add_task(task);
+    }
+
+    pub fn wake_task(task: Arc<Task>) {
+        let current_cpu = CpuData::get();
+        let target_cpu = Self::choose_target_cpu();
+        target_cpu.scheduler.add_task(task);
+
+        if target_cpu.id != current_cpu.id {
+            unsafe { arch::sched::remote_reschedule(target_cpu.id as u32) };
+        }
     }
 
     /// Returns the task currently running on this CPU.

@@ -216,10 +216,8 @@ pub fn sendmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     let socket = get_socket(fd)?;
     let nonblocking = is_fd_nonblocking(fd)?;
 
-    // Read the msghdr from user memory.
     let msg = hdr_ptr.read().ok_or(Errno::EFAULT)?;
 
-    // Build the iovec array.
     let iovcnt = msg.msg_iovlen as usize;
     let mut iovecs = Vec::with_capacity(iovcnt);
     for i in 0..iovcnt {
@@ -227,7 +225,19 @@ pub fn sendmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     }
     let mut iter = IovecIter::new(&iovecs)?;
 
-    let sent = socket.ops.send(&mut iter, flags as u32, nonblocking)?;
+    let ctrl_len = msg.msg_controllen as usize;
+    let ctrl_buf = if ctrl_len > 0 && !msg.msg_control.is_null() {
+        let ptr = UserPtr::<u8>::new(msg.msg_control.addr());
+        let mut v = vec![0u8; ctrl_len];
+        ptr.read_slice(&mut v).ok_or(Errno::EFAULT)?;
+        v
+    } else {
+        Vec::new()
+    };
+
+    let sent = socket
+        .ops
+        .sendmsg(&mut iter, &ctrl_buf, flags as u32, nonblocking)?;
 
     Ok(sent as usize)
 }
@@ -238,23 +248,41 @@ pub fn recvmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     let socket = get_socket(fd)?;
     let nonblocking = is_fd_nonblocking(fd)?;
 
-    // Read the msghdr from user memory.
     let msg = hdr_ptr.read().ok_or(Errno::EFAULT)?;
 
-    // Build the iovec array.
     let iovcnt = msg.msg_iovlen as usize;
     let mut iovecs = Vec::with_capacity(iovcnt);
     for i in 0..iovcnt {
         iovecs.push(msg.msg_iov.offset(i).read().ok_or(Errno::EFAULT)?);
     }
-
     let mut iter = IovecIter::new(&iovecs)?;
-    let received = socket.ops.recv(&mut iter, flags as u32, nonblocking)?;
 
-    // Write back msg_flags (clear it for now, no ancillary data support).
+    let ctrl_cap = msg.msg_controllen as usize;
+    let mut ctrl_buf = vec![0u8; ctrl_cap];
+
+    let (received, ctrl_written, out_flags) =
+        socket
+            .ops
+            .recvmsg(&mut iter, &mut ctrl_buf, flags as u32, nonblocking)?;
+
+    if ctrl_written > 0 && !msg.msg_control.is_null() {
+        let mut ptr = UserPtr::<u8>::new(msg.msg_control.addr());
+        ptr.write_slice(&ctrl_buf[..ctrl_written])
+            .ok_or(Errno::EFAULT)?;
+    }
+
+    // Write back msg_controllen and msg_flags so userspace doesn't parse
+    // uninitialized control memory.
+    let mut controllen_ptr = UserPtr::<socklen_t>::new(
+        hdr_ptr.addr() + VirtAddr::new(offset_of!(msghdr, msg_controllen)),
+    );
+    controllen_ptr
+        .write(ctrl_written as socklen_t)
+        .ok_or(Errno::EFAULT)?;
+
     let mut flags_ptr =
         UserPtr::<i32>::new(hdr_ptr.addr() + VirtAddr::new(offset_of!(msghdr, msg_flags)));
-    flags_ptr.write(0).ok_or(Errno::EFAULT)?;
+    flags_ptr.write(out_flags as i32).ok_or(Errno::EFAULT)?;
 
     Ok(received as usize)
 }

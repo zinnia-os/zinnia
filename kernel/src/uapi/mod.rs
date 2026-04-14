@@ -21,6 +21,7 @@ pub mod termios;
 pub mod time;
 pub mod uio;
 pub mod utsname;
+pub mod wait;
 
 pub type off_t = isize;
 pub type off64_t = isize;

@@ -112,8 +112,7 @@ pub fn handler(info: &PageFaultInfo) -> bool {
     if info.caused_by_user {
         // Force SIGSEGV to the faulting user process. Using force_signal ensures the signal
         // cannot be masked or caught in a loop (handler is reset to SIG_DFL).
-        let task = crate::sched::Scheduler::get_current();
-        crate::process::signal::force_signal_to_thread(&task, Signal::SIGSEGV);
+        crate::process::signal::force_signal_to_thread(&task, Signal::SigSegv);
         return true; // Will be delivered on return to userspace.
     }
 

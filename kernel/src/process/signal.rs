@@ -1,133 +1,135 @@
+use alloc::sync::Arc;
+
 use crate::{
     arch::sched::Context,
-    process::Process,
+    process::{Pid, Process, ProcessState, task::Task},
     sched::Scheduler,
     uapi::signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
 };
-use core::ops;
+use core::{ops, sync::atomic::Ordering};
 
 /// POSIX signals represented as an enum.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
-    SIGABRT = signal::SIGABRT,
-    SIGALRM = signal::SIGALRM,
-    SIGBUS = signal::SIGBUS,
-    SIGCHLD = signal::SIGCHLD,
-    SIGCONT = signal::SIGCONT,
-    SIGFPE = signal::SIGFPE,
-    SIGHUP = signal::SIGHUP,
-    SIGILL = signal::SIGILL,
-    SIGINT = signal::SIGINT,
-    SIGKILL = signal::SIGKILL,
-    SIGPIPE = signal::SIGPIPE,
-    SIGQUIT = signal::SIGQUIT,
-    SIGSEGV = signal::SIGSEGV,
-    SIGSTOP = signal::SIGSTOP,
-    SIGTERM = signal::SIGTERM,
-    SIGTSTP = signal::SIGTSTP,
-    SIGTTIN = signal::SIGTTIN,
-    SIGTTOU = signal::SIGTTOU,
-    SIGUSR1 = signal::SIGUSR1,
-    SIGUSR2 = signal::SIGUSR2,
-    SIGWINCH = signal::SIGWINCH,
-    SIGSYS = signal::SIGSYS,
-    SIGTRAP = signal::SIGTRAP,
-    SIGURG = signal::SIGURG,
-    SIGVTALRM = signal::SIGVTALRM,
-    SIGXCPU = signal::SIGXCPU,
-    SIGXFSZ = signal::SIGXFSZ,
-    SIGIO = signal::SIGIO,
-    SIGPOLL = signal::SIGPOLL,
-    SIGPROF = signal::SIGPROF,
-    SIGPWR = signal::SIGPWR,
-    SIGIOT = signal::SIGIOT,
-    SIGCANCEL = signal::SIGCANCEL,
+    SigAbrt = signal::SIGABRT,
+    SigAlrm = signal::SIGALRM,
+    SigBus = signal::SIGBUS,
+    SigChld = signal::SIGCHLD,
+    SigCont = signal::SIGCONT,
+    SigFpe = signal::SIGFPE,
+    SigHup = signal::SIGHUP,
+    SigIll = signal::SIGILL,
+    SigInt = signal::SIGINT,
+    SigKill = signal::SIGKILL,
+    SigPipe = signal::SIGPIPE,
+    SigQuit = signal::SIGQUIT,
+    SigSegv = signal::SIGSEGV,
+    SigStop = signal::SIGSTOP,
+    SigTerm = signal::SIGTERM,
+    SigTstp = signal::SIGTSTP,
+    SigTtin = signal::SIGTTIN,
+    SigTtou = signal::SIGTTOU,
+    SigUsr1 = signal::SIGUSR1,
+    SigUsr2 = signal::SIGUSR2,
+    SigWinch = signal::SIGWINCH,
+    SigSys = signal::SIGSYS,
+    SigTrap = signal::SIGTRAP,
+    SigUrg = signal::SIGURG,
+    SigVtAlarm = signal::SIGVTALRM,
+    SigXCpu = signal::SIGXCPU,
+    SigXFsz = signal::SIGXFSZ,
+    SigIo = signal::SIGIO,
+    SigPoll = signal::SIGPOLL,
+    SigProf = signal::SIGPROF,
+    SigPwr = signal::SIGPWR,
+    SigIot = signal::SIGIOT,
+    SigCancel = signal::SIGCANCEL,
 }
 
 impl Signal {
     /// Try to convert a raw signal number to a [`Signal`].
-    pub fn from_raw(num: u32) -> Option<Self> {
+    pub const fn from_raw(num: u32) -> Option<Self> {
         match num {
-            signal::SIGABRT => Some(Self::SIGABRT),
-            signal::SIGALRM => Some(Self::SIGALRM),
-            signal::SIGBUS => Some(Self::SIGBUS),
-            signal::SIGCHLD => Some(Self::SIGCHLD),
-            signal::SIGCONT => Some(Self::SIGCONT),
-            signal::SIGFPE => Some(Self::SIGFPE),
-            signal::SIGHUP => Some(Self::SIGHUP),
-            signal::SIGILL => Some(Self::SIGILL),
-            signal::SIGINT => Some(Self::SIGINT),
-            signal::SIGKILL => Some(Self::SIGKILL),
-            signal::SIGPIPE => Some(Self::SIGPIPE),
-            signal::SIGQUIT => Some(Self::SIGQUIT),
-            signal::SIGSEGV => Some(Self::SIGSEGV),
-            signal::SIGSTOP => Some(Self::SIGSTOP),
-            signal::SIGTERM => Some(Self::SIGTERM),
-            signal::SIGTSTP => Some(Self::SIGTSTP),
-            signal::SIGTTIN => Some(Self::SIGTTIN),
-            signal::SIGTTOU => Some(Self::SIGTTOU),
-            signal::SIGUSR1 => Some(Self::SIGUSR1),
-            signal::SIGUSR2 => Some(Self::SIGUSR2),
-            signal::SIGWINCH => Some(Self::SIGWINCH),
-            signal::SIGSYS => Some(Self::SIGSYS),
-            signal::SIGTRAP => Some(Self::SIGTRAP),
-            signal::SIGURG => Some(Self::SIGURG),
-            signal::SIGVTALRM => Some(Self::SIGVTALRM),
-            signal::SIGXCPU => Some(Self::SIGXCPU),
-            signal::SIGXFSZ => Some(Self::SIGXFSZ),
-            signal::SIGIO => Some(Self::SIGIO),
-            signal::SIGPOLL => Some(Self::SIGPOLL),
-            signal::SIGPROF => Some(Self::SIGPROF),
-            signal::SIGPWR => Some(Self::SIGPWR),
-            signal::SIGIOT => Some(Self::SIGIOT),
-            signal::SIGCANCEL => Some(Self::SIGCANCEL),
+            signal::SIGABRT => Some(Self::SigAbrt),
+            signal::SIGALRM => Some(Self::SigAlrm),
+            signal::SIGBUS => Some(Self::SigBus),
+            signal::SIGCHLD => Some(Self::SigChld),
+            signal::SIGCONT => Some(Self::SigCont),
+            signal::SIGFPE => Some(Self::SigFpe),
+            signal::SIGHUP => Some(Self::SigHup),
+            signal::SIGILL => Some(Self::SigIll),
+            signal::SIGINT => Some(Self::SigInt),
+            signal::SIGKILL => Some(Self::SigKill),
+            signal::SIGPIPE => Some(Self::SigPipe),
+            signal::SIGQUIT => Some(Self::SigQuit),
+            signal::SIGSEGV => Some(Self::SigSegv),
+            signal::SIGSTOP => Some(Self::SigStop),
+            signal::SIGTERM => Some(Self::SigTerm),
+            signal::SIGTSTP => Some(Self::SigTstp),
+            signal::SIGTTIN => Some(Self::SigTtin),
+            signal::SIGTTOU => Some(Self::SigTtou),
+            signal::SIGUSR1 => Some(Self::SigUsr1),
+            signal::SIGUSR2 => Some(Self::SigUsr2),
+            signal::SIGWINCH => Some(Self::SigWinch),
+            signal::SIGSYS => Some(Self::SigSys),
+            signal::SIGTRAP => Some(Self::SigTrap),
+            signal::SIGURG => Some(Self::SigUrg),
+            signal::SIGVTALRM => Some(Self::SigVtAlarm),
+            signal::SIGXCPU => Some(Self::SigXCpu),
+            signal::SIGXFSZ => Some(Self::SigXFsz),
+            signal::SIGIO => Some(Self::SigIo),
+            signal::SIGPOLL => Some(Self::SigPoll),
+            signal::SIGPROF => Some(Self::SigProf),
+            signal::SIGPWR => Some(Self::SigPwr),
+            signal::SIGIOT => Some(Self::SigIot),
+            signal::SIGCANCEL => Some(Self::SigCancel),
             _ => None,
         }
     }
 
-    pub fn as_raw(self) -> u32 {
+    pub const fn as_raw(self) -> u32 {
         self as u32
     }
 
     /// Returns the default action for this signal.
-    pub fn default_action(self) -> DefaultAction {
+    pub const fn default_action(self) -> DefaultAction {
         match self {
-            Signal::SIGHUP
-            | Signal::SIGINT
-            | Signal::SIGPIPE
-            | Signal::SIGALRM
-            | Signal::SIGTERM
-            | Signal::SIGUSR1
-            | Signal::SIGUSR2
-            | Signal::SIGPROF
-            | Signal::SIGVTALRM
-            | Signal::SIGIO
-            | Signal::SIGPOLL
-            | Signal::SIGPWR => DefaultAction::Terminate,
-            Signal::SIGQUIT
-            | Signal::SIGABRT
-            | Signal::SIGBUS
-            | Signal::SIGFPE
-            | Signal::SIGILL
-            | Signal::SIGSEGV
-            | Signal::SIGSYS
-            | Signal::SIGTRAP
-            | Signal::SIGXCPU
-            | Signal::SIGXFSZ
-            | Signal::SIGIOT => DefaultAction::CoreDump,
-            Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU => {
+            Signal::SigHup
+            | Signal::SigInt
+            | Signal::SigPipe
+            | Signal::SigAlrm
+            | Signal::SigTerm
+            | Signal::SigUsr1
+            | Signal::SigUsr2
+            | Signal::SigProf
+            | Signal::SigVtAlarm
+            | Signal::SigIo
+            | Signal::SigPoll
+            | Signal::SigPwr => DefaultAction::Terminate,
+            Signal::SigQuit
+            | Signal::SigAbrt
+            | Signal::SigBus
+            | Signal::SigFpe
+            | Signal::SigIll
+            | Signal::SigSegv
+            | Signal::SigSys
+            | Signal::SigTrap
+            | Signal::SigXCpu
+            | Signal::SigXFsz
+            | Signal::SigIot => DefaultAction::CoreDump,
+            Signal::SigStop | Signal::SigTstp | Signal::SigTtin | Signal::SigTtou => {
                 DefaultAction::Stop
             }
-            Signal::SIGCONT => DefaultAction::Continue,
-            Signal::SIGCHLD | Signal::SIGURG | Signal::SIGWINCH => DefaultAction::Ignore,
-            Signal::SIGKILL | Signal::SIGCANCEL => DefaultAction::Terminate,
+            Signal::SigCont => DefaultAction::Continue,
+            Signal::SigChld | Signal::SigUrg | Signal::SigWinch => DefaultAction::Ignore,
+            Signal::SigKill | Signal::SigCancel => DefaultAction::Terminate,
         }
     }
 
     /// Returns true if this signal cannot be caught or ignored.
     pub fn is_uncatchable(self) -> bool {
-        matches!(self, Signal::SIGKILL | Signal::SIGSTOP)
+        matches!(self, Signal::SigKill | Signal::SigStop)
     }
 }
 
@@ -149,7 +151,12 @@ pub struct SignalSet {
 }
 
 /// Signals that can never be blocked.
-const UNBLOCKABLE: u64 = (1u64 << signal::SIGKILL) | (1u64 << signal::SIGSTOP);
+const UNBLOCKABLE: SignalSet = {
+    let mut set = SignalSet::new();
+    set.set(Signal::SigKill, true);
+    set.set(Signal::SigStop, true);
+    set
+};
 
 impl SignalSet {
     pub const fn new() -> Self {
@@ -164,7 +171,7 @@ impl SignalSet {
         self.inner
     }
 
-    pub fn set(&mut self, sig: Signal, state: bool) {
+    pub const fn set(&mut self, sig: Signal, state: bool) {
         let bit = 1u64 << sig.as_raw();
         if state {
             self.inner |= bit;
@@ -173,16 +180,16 @@ impl SignalSet {
         }
     }
 
-    pub fn is_set(&self, sig: Signal) -> bool {
+    pub const fn is_set(&self, sig: Signal) -> bool {
         self.inner & (1u64 << sig.as_raw()) != 0
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.inner == 0
     }
 
     /// Returns the lowest signal number that is set, or None.
-    pub fn first_set(&self) -> Option<Signal> {
+    pub const fn first_set(&self) -> Option<Signal> {
         if self.inner == 0 {
             return None;
         }
@@ -192,7 +199,7 @@ impl SignalSet {
 
     /// Remove the unblockable signals (SIGKILL, SIGSTOP) from this set.
     pub fn sanitize_mask(&mut self) {
-        self.inner &= !UNBLOCKABLE;
+        *self &= !UNBLOCKABLE;
     }
 }
 
@@ -328,23 +335,75 @@ pub struct ThreadSignalState {
 }
 
 /// Queue a signal on the given thread and wake it if it is sleeping.
-pub fn send_signal_to_thread(task: &alloc::sync::Arc<crate::process::task::Task>, sig: Signal) {
+pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
+    let proc = task.get_process();
+
+    if !sig.is_uncatchable() {
+        let action = *proc.signal_actions.lock().get_action(sig);
+        if action.is_ignore()
+            || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
+        {
+            return;
+        }
+    }
+
+    // SIGCONT (and SIGKILL) must unblock a stopped process so it can run again.
+    if sig == Signal::SigCont || sig == Signal::SigKill {
+        let was_stopped = {
+            let mut state = proc.status.lock();
+            if matches!(*state, ProcessState::Stopped(_)) {
+                *state = ProcessState::Running;
+                proc.continue_unwaited.store(true, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        };
+        if was_stopped {
+            proc.cont_event.wake_all();
+            notify_parent_of_child_state_change(&proc, false);
+        }
+    }
+
     {
         let mut state = task.signal.lock();
         state.pending.set(sig, true);
     }
-    // Wake the task so it can process the signal. If it's already on the
-    // run queue this is harmless — the scheduler will just see it twice
-    // and the second pick will find it Dead/not-Ready and skip it.
-    crate::percpu::CpuData::get()
-        .scheduler
-        .add_task(task.clone());
+    Scheduler::wake_task(task.clone());
 }
 
-/// Force-deliver a synchronous signal (e.g., from a hardware fault like SIGSEGV/SIGBUS/SIGFPE).
-/// This unmasks the signal and resets its handler to SIG_DFL, ensuring it cannot be blocked
-/// or caught in a way that causes an infinite fault loop.
-pub fn force_signal_to_thread(task: &alloc::sync::Arc<crate::process::task::Task>, sig: Signal) {
+pub fn send_signal_to_process(proc: &Arc<Process>, sig: Signal) -> bool {
+    let thread = {
+        let threads = proc.threads.lock();
+        threads.first().cloned()
+    };
+
+    let Some(thread) = thread else {
+        return false;
+    };
+
+    send_signal_to_thread(&thread, sig);
+    true
+}
+
+pub fn notify_parent_of_child_state_change(proc: &Arc<Process>, stopped: bool) {
+    let Some(parent) = proc.get_parent() else {
+        return;
+    };
+
+    parent.child_event.wake_all();
+
+    if stopped {
+        let action = *parent.signal_actions.lock().get_action(Signal::SigChld);
+        if action.flags & signal::SA_NOCLDSTOP != 0 {
+            return;
+        }
+    }
+
+    send_signal_to_process(&parent, Signal::SigChld);
+}
+
+pub fn force_signal_to_thread(task: &Task, sig: Signal) {
     // Unmask the signal so it's deliverable.
     {
         let mut state = task.signal.lock();
@@ -360,102 +419,78 @@ pub fn force_signal_to_thread(task: &alloc::sync::Arc<crate::process::task::Task
 }
 
 /// Send a signal to every process in the given process group.
-pub fn send_signal_to_pgrp(pgrp: crate::process::Pid, sig: Signal) {
+pub fn send_signal_to_pgrp(pgrp: Pid, sig: Signal) -> usize {
     let table = crate::process::PROCESS_TABLE.lock();
+    let mut delivered = 0;
+
     for proc in table.values() {
         let Some(proc) = proc.upgrade() else { continue }; // TODO: Should entries be removed?
-        if *proc.pgrp.lock() == pgrp {
-            // Send to the first thread of each matching process.
-            let threads = proc.threads.lock();
-            if let Some(t) = threads.first() {
-                send_signal_to_thread(t, sig);
-            }
+        if *proc.pgrp.lock() == pgrp && send_signal_to_process(&proc, sig) {
+            delivered += 1;
         }
     }
+
+    delivered
 }
 
-/// Deliver pending signals to the current thread. Called before returning to userspace.
-/// This may modify the context to redirect execution to a signal handler.
+/// Deliver pending signals to the current thread. Called before returning to
+/// userspace. May modify the context to redirect execution to a user handler,
+/// terminate the process, or block until SIGCONT (for stop signals).
+///
+/// At most one user handler is set up per call; ignored and default-ignore
+/// signals are consumed in the same pass so a later important signal behind
+/// them in the bitmap is not delayed.
 pub fn deliver_pending_signals(context: &mut Context) {
     loop {
         let task = Scheduler::get_current();
         let proc = task.get_process();
 
-        let deliverable = {
-            let sig_state = task.signal.lock();
-            let pending = sig_state.pending;
-            let mask = sig_state.mask;
-            // Deliverable = pending & ~mask
-            pending & !mask
+        let sig = {
+            let state = task.signal.lock();
+            match (state.pending & !state.mask).first_set() {
+                Some(s) => s,
+                None => return,
+            }
         };
 
-        if deliverable.is_empty() {
-            return;
-        }
-
-        let sig = match deliverable.first_set() {
-            Some(s) => s,
-            None => return,
-        };
-
-        log!("Delivering signal: {:?}", sig);
-
-        // Clear this signal from pending.
         task.signal.lock().pending.set(sig, false);
 
-        let action = {
-            let actions = proc.signal_actions.lock();
-            *actions.get_action(sig)
-        };
+        let action = *proc.signal_actions.lock().get_action(sig);
 
-        if action.is_default() {
-            match sig.default_action() {
-                DefaultAction::Terminate | DefaultAction::CoreDump => {
-                    // Terminate the process with exit code 128 + signal number (POSIX convention).
-                    Process::exit((128 + sig.as_raw()) as u8);
-                    // exit() never returns.
-                }
-                DefaultAction::Stop => {
-                    // TODO: implement process stopping (SIGSTOP/SIGTSTP).
-                    continue;
-                }
-                DefaultAction::Continue => {
-                    // TODO: implement process continuation.
-                    continue;
-                }
-                DefaultAction::Ignore => {
-                    continue;
-                }
-            }
-        } else if action.is_ignore() {
+        if action.is_ignore() {
             continue;
         }
 
-        // Custom handler: set up a signal frame on the user stack.
-        // Save the current mask before modifying it (will be restored on sigreturn).
-        let old_mask = {
-            let sig_state = task.signal.lock();
-            sig_state.mask
-        };
-
-        // Block the signal being delivered (and the action's mask) during handler execution.
-        {
-            let mut sig_state = task.signal.lock();
-            if action.flags & signal::SA_NODEFER == 0 {
-                sig_state.mask.set(sig, true);
+        if action.is_default() {
+            match sig.default_action() {
+                DefaultAction::Ignore | DefaultAction::Continue => continue,
+                DefaultAction::Terminate | DefaultAction::CoreDump => {
+                    Process::exit(0x7f + sig.as_raw() as u8);
+                }
+                DefaultAction::Stop => {
+                    enter_stopped_state(&proc, sig);
+                    continue;
+                }
             }
-            sig_state.mask |= action.mask;
-            sig_state.mask.sanitize_mask();
         }
 
-        // If SA_RESETHAND, reset handler to SIG_DFL.
+        let old_mask = task.signal.lock().mask;
+
+        {
+            let mut state = task.signal.lock();
+            if action.flags & signal::SA_NODEFER == 0 {
+                state.mask.set(sig, true);
+            }
+            state.mask |= action.mask;
+            state.mask.sanitize_mask();
+        }
+
         if action.flags & signal::SA_RESETHAND != 0 {
             proc.signal_actions
                 .lock()
                 .set_action(sig, SigAction::default());
         }
 
-        // Architecture-specific: set up the signal frame on the user stack.
         crate::arch::sched::setup_signal_frame(
             context,
             action.handler,
@@ -464,7 +499,23 @@ pub fn deliver_pending_signals(context: &mut Context) {
             action.restorer,
         );
 
-        // Only deliver one signal per return-to-user transition.
         return;
+    }
+}
+
+/// Transition the process into the Stopped state and block until SIGCONT.
+/// Called from  [`deliver_pending_signals`] when a stop signal's default action fires.
+fn enter_stopped_state(proc: &Arc<Process>, sig: Signal) {
+    *proc.status.lock() = ProcessState::Stopped(sig);
+    proc.stop_unwaited.store(true, Ordering::Release);
+    notify_parent_of_child_state_change(proc, true);
+
+    // Park on cont_event until SIGCONT (or SIGKILL) flips us back to Running.
+    loop {
+        let guard = proc.cont_event.guard();
+        if !matches!(*proc.status.lock(), ProcessState::Stopped(_)) {
+            break;
+        }
+        guard.wait();
     }
 }

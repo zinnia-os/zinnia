@@ -10,8 +10,12 @@ use crate::{
     irq::lock::{IrqGuard, IrqLock},
     memory::{UserPtr, VirtAddr, virt::KERNEL_STACK_SIZE},
     percpu::CpuData,
-    posix::errno::{EResult, Errno},
-    process::{Process, signal::SignalSet, task::Task},
+    posix::errno::EResult,
+    process::{
+        Process,
+        signal::{Signal, SignalSet},
+        task::Task,
+    },
     sched::Scheduler,
 };
 use alloc::boxed::Box;
@@ -158,7 +162,7 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task, irq_gua
 
         drop(from_context);
         drop(to_context);
-        drop(irq_guard);
+        core::mem::forget(irq_guard);
         perform_switch(old_rsp, new_rsp);
     }
 }
@@ -182,6 +186,7 @@ unsafe extern "C" fn perform_switch(old_rsp: *mut u64, new_rsp: u64) {
         "mov r14, [rsp + {r14}]",
         "mov r15, [rsp + {r15}]",
         "add rsp, 0x30",
+        "call {finish}",
         "ret", // This will conveniently move us to the RIP we put at this stack entry.
         rbx = const offset_of!(TaskFrame, rbx),
         rbp = const offset_of!(TaskFrame, rbp),
@@ -189,7 +194,12 @@ unsafe extern "C" fn perform_switch(old_rsp: *mut u64, new_rsp: u64) {
         r13 = const offset_of!(TaskFrame, r13),
         r14 = const offset_of!(TaskFrame, r14),
         r15 = const offset_of!(TaskFrame, r15),
+        finish = sym finish_switch,
     );
+}
+
+extern "C" fn finish_switch() {
+    let _ = unsafe { IrqGuard::new_fake() };
 }
 
 pub(in crate::arch) fn init_task(
@@ -356,12 +366,7 @@ pub(in crate::arch) fn setup_signal_frame(
 
     let mut ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_sp));
     if ptr.write(frame).is_none() {
-        // If we can't write the signal frame, force-kill the process.
-        warn!(
-            "Failed to write signal frame to user stack at {:#x}, killing process",
-            frame_sp
-        );
-        Process::exit(128 + signal as u8);
+        Process::exit(0x7f + Signal::SigSegv as u8);
     }
 
     // Place the restorer return address BELOW the signal frame so the
@@ -370,45 +375,28 @@ pub(in crate::arch) fn setup_signal_frame(
     let ret_sp = frame_sp - 8;
     let mut ret_ptr = UserPtr::<u64>::new(VirtAddr::new(ret_sp));
     if ret_ptr.write(restorer as u64).is_none() {
-        warn!(
-            "Failed to write restorer address to user stack at {:#x}, killing process",
-            ret_sp
-        );
-        Process::exit(128 + signal as u8);
+        Process::exit(0x7f + signal as u8);
     }
 
     // Modify context to jump to the handler.
     context.rip = handler as u64;
     context.rdi = signal as u64; // First argument: signal number.
     context.rsp = ret_sp as u64;
-    // Clear direction flag, as required by x86_64 ABI.
     context.rflags &= !consts::RFLAGS_DF;
-    // Force iretq return path instead of sysretq. sysretq uses RCX/R11
-    // which don't match the modified RIP/RFLAGS/RSP.
-    context.isr = 0xFF;
 }
 
-pub(in crate::arch) fn restore_signal_frame(context: &mut Context) -> EResult<()> {
-    // After the handler's `ret` pops the restorer address, RSP = ret_sp + 8 = frame_sp.
-    // The restorer then calls sigreturn without modifying RSP further.
-    let rsp = context.rsp as usize;
-    let frame_addr = rsp;
-
-    let ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_addr));
-    let frame = ptr.read().ok_or(Errno::EFAULT)?;
+pub(in crate::arch) fn restore_signal_frame(context: &mut Context) {
+    let ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(context.rsp as usize));
+    let Some(frame) = ptr.read() else {
+        Process::exit(0x7f + Signal::SigSegv as u8);
+    };
 
     // Restore the saved context.
     *context = frame.saved_context;
-
-    // Force iretq return path instead of sysretq. The restored context
-    // may have come from an IDT entry where RCX/R11 don't match RIP/RFLAGS.
-    context.isr = 0xFF;
 
     // Restore the signal mask.
     let task = Scheduler::get_current();
     let mut sig_state = task.signal.lock();
     sig_state.mask = SignalSet::from_raw(frame.saved_mask);
     sig_state.mask.sanitize_mask();
-
-    Ok(())
 }

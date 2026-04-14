@@ -1,53 +1,55 @@
 use crate::arch;
 use core::{
-    hint::likely,
     marker::PhantomData,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 per_cpu!(
-    static IRQ_MUTEX: IrqLock = IrqLock {
+    static IRQ_STATE: IrqState = IrqState {
         depth: AtomicUsize::new(0),
-        in_interrupt: AtomicBool::new(false),
+        saved_if: AtomicBool::new(false),
     };
 );
 
-pub struct IrqLock {
+struct IrqState {
     depth: AtomicUsize,
-    in_interrupt: AtomicBool,
+    saved_if: AtomicBool,
 }
+
+pub struct IrqLock;
 
 impl IrqLock {
-    pub fn lock<'a>() -> IrqGuard<'a> {
-        let cpu = IRQ_MUTEX.get();
-
-        if !cpu.in_interrupt.load(Ordering::Acquire) {
-            unsafe { arch::irq::set_irq_state(false) };
-            cpu.depth.fetch_add(1, Ordering::Acquire);
+    pub fn lock() -> IrqGuard {
+        let prev = unsafe { arch::irq::set_irq_state(false) };
+        let state = IRQ_STATE.get();
+        if state.depth.fetch_add(1, Ordering::Relaxed) == 0 {
+            state.saved_if.store(prev, Ordering::Relaxed);
         }
-
         IrqGuard { _p: PhantomData }
     }
+}
 
-    pub fn set_interrupted(value: bool) -> bool {
-        IRQ_MUTEX.get().in_interrupt.swap(value, Ordering::Release)
+pub struct IrqGuard {
+    _p: PhantomData<*const ()>,
+}
+
+impl IrqGuard {
+    /// Creates a fake IrqGuard that will re-enable interrupts on drop.
+    /// # Safety
+    /// Intended to be used during rescheduling, where a newly scheduled task
+    /// must begin execution with interrupts enabled.
+    pub unsafe fn new_fake() -> Self {
+        Self { _p: PhantomData }
     }
 }
 
-pub struct IrqGuard<'a> {
-    _p: PhantomData<&'a ()>,
-}
-
-impl<'a> Drop for IrqGuard<'a> {
+impl Drop for IrqGuard {
     fn drop(&mut self) {
-        let cpu = IRQ_MUTEX.get();
-        if !cpu.in_interrupt.load(Ordering::Acquire) {
-            let old_depth = cpu.depth.fetch_sub(1, Ordering::Acquire);
-
-            // If the depth is now 0, re-enable IRQs.
-            if likely(old_depth == 1) {
-                unsafe { arch::irq::set_irq_state(true) };
-            }
+        let state = IRQ_STATE.get();
+        if state.depth.fetch_sub(1, Ordering::Relaxed) == 1
+            && state.saved_if.load(Ordering::Relaxed)
+        {
+            unsafe { arch::irq::set_irq_state(true) };
         }
     }
 }
