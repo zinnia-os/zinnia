@@ -9,6 +9,18 @@ pub const fn ioc(inout: u32, group: u8, num: u8, len: u16) -> u32 {
     inout | ((len as u32 & IOCPARM_MASK) << 16) | ((group as u32) << 8) | num as u32
 }
 
+pub const fn ioc_nr(cmd: u32) -> u8 {
+    (cmd & 0xFF) as u8
+}
+
+pub const fn ioc_size(cmd: u32) -> u32 {
+    (cmd >> 16) & 0x3FFF
+}
+
+pub const fn ioc_type(cmd: u32) -> u8 {
+    ((cmd >> 8) & 0xFF) as u8
+}
+
 pub const fn io(group: u8, num: u8) -> u32 {
     ioc(IOC_VOID, group, num, 0)
 }
