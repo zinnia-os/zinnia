@@ -37,6 +37,7 @@ impl<T: Default> Default for SpinMutex<T> {
 }
 
 impl<T: ?Sized> SpinMutex<T> {
+    #[track_caller]
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
         let irq_guard = IrqLock::lock();
         let inner = unsafe { &mut *self.inner.get() };
@@ -60,6 +61,7 @@ impl<T: ?Sized> SpinMutex<T> {
 }
 
 impl<T> SpinMutex<T> {
+    #[track_caller]
     pub fn into_inner(self) -> T {
         let _irq = IrqLock::lock();
         let inner = unsafe { &mut *self.inner.get() };
@@ -80,7 +82,7 @@ impl<T: ?Sized> Debug for SpinMutex<T> {
 /// This struct is returned by [`SpinMutex::lock`] and is used to safely control mutex locking state.
 pub struct SpinMutexGuard<'m, T: 'm + ?Sized> {
     parent: &'m SpinMutex<T>,
-    _irq_guard: IrqGuard<'m>,
+    _irq_guard: IrqGuard,
 }
 
 impl<T: ?Sized> Deref for SpinMutexGuard<'_, T> {

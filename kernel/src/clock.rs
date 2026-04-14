@@ -35,6 +35,7 @@ pub enum ClockError {
 }
 
 /// Gets the elapsed nanoseconds since initialization of this timer.
+#[track_caller]
 pub fn get_elapsed() -> usize {
     let guard = CLOCK.lock();
     match &guard.current {
@@ -112,7 +113,7 @@ pub fn timeout_at(deadline: usize) -> TimeoutGuard {
 pub fn handle_tick() {
     let now = get_elapsed();
     wake_timeout_waiters(now);
-    process::poll_interval_timers(now);
+    process::itimer::poll_interval_timers(now);
 }
 
 /// Blocking wait for a given amount of nanoseconds.

@@ -1,3 +1,5 @@
+#[cfg(feature = "track_spinlock_callers")]
+use core::panic::Location;
 use core::{
     hint,
     sync::atomic::{AtomicU32, Ordering},
@@ -7,6 +9,8 @@ use core::{
 pub struct SpinLock {
     next: AtomicU32,
     owner: AtomicU32,
+    #[cfg(feature = "track_spinlock_callers")]
+    acquired_at: Option<&'static Location<'static>>,
 }
 
 impl SpinLock {
@@ -14,19 +18,30 @@ impl SpinLock {
         Self {
             next: AtomicU32::new(0),
             owner: AtomicU32::new(0),
+            #[cfg(feature = "track_spinlock_callers")]
+            acquired_at: None,
         }
     }
 
     #[inline(always)]
+    #[track_caller]
     pub fn lock(&mut self) {
         let my = self.next.fetch_add(1, Ordering::Relaxed);
         while self.owner.load(Ordering::Acquire) != my {
             hint::spin_loop();
         }
+        #[cfg(feature = "track_spinlock_callers")]
+        {
+            self.acquired_at = Some(Location::caller());
+        }
     }
 
     #[inline(always)]
     pub fn unlock(&mut self) {
+        #[cfg(feature = "track_spinlock_callers")]
+        {
+            self.acquired_at = None;
+        }
         let val = self.owner.load(Ordering::Relaxed);
         self.owner.store(val.wrapping_add(1), Ordering::Release);
     }

@@ -25,6 +25,9 @@ intrusive-collections = { version = "0.9.7", features = ["nightly"] }
 [features]
 default = ["acpi", "boot_limine"]
 
+# Debug features
+track_spinlock_callers = []
+
 # Boot protocols
 boot_limine = ["dep:limine"]
 boot_uefi = []

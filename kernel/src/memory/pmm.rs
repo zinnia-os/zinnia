@@ -81,6 +81,7 @@ static PMM: SpinMutex<Pmm> = SpinMutex::new(Pmm { head: None });
 
 pub struct KernelAlloc;
 impl PageAllocator for KernelAlloc {
+    #[track_caller]
     fn alloc(pages: usize, flags: AllocFlags) -> Result<PhysAddr, AllocError> {
         let mut head = PMM.lock();
         let bytes = pages * arch::virt::get_page_size();
@@ -142,6 +143,7 @@ impl PageAllocator for KernelAlloc {
         }
     }
 
+    #[track_caller]
     unsafe fn dealloc(addr: PhysAddr, pages: usize) {
         // If we have an empty allocation, there's nothing to free.
         if pages == 0 {
