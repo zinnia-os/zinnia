@@ -4,8 +4,10 @@ use crate::{
     sched::Scheduler,
     uapi::limits::PATH_MAX,
     vfs::{File, file::OpenFlags, inode::Mode},
+    wrap_syscall,
 };
 
+#[wrap_syscall]
 pub fn module_insert(path: VirtAddr, cmdline: VirtAddr) -> EResult<()> {
     let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
     let cmdline = UserCStr::new(cmdline).as_vec(4096).ok_or(Errno::EFAULT)?;

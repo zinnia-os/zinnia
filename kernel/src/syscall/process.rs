@@ -11,18 +11,21 @@ use crate::{
     },
     sched::Scheduler,
     uapi::{self, limits::PATH_MAX, uid_t},
-    vfs::{File, file::OpenFlags, inode::Mode},
+    vfs::{File, file::OpenFlags, inode::Mode}, wrap_syscall,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
+#[wrap_syscall]
 pub fn gettid() -> usize {
     Scheduler::get_current().get_id()
 }
 
+#[wrap_syscall]
 pub fn getpid() -> usize {
     Scheduler::get_current().get_process().get_pid()
 }
 
+#[wrap_syscall]
 pub fn getppid() -> usize {
     Scheduler::get_current()
         .get_process()
@@ -30,26 +33,31 @@ pub fn getppid() -> usize {
         .map_or(0, |x| x.get_pid())
 }
 
+#[wrap_syscall]
 pub fn getuid() -> usize {
     let proc = Scheduler::get_current().get_process();
     proc.identity.lock().user_id as _
 }
 
+#[wrap_syscall]
 pub fn geteuid() -> usize {
     let proc = Scheduler::get_current().get_process();
     proc.identity.lock().effective_user_id as _
 }
 
+#[wrap_syscall]
 pub fn getgid() -> usize {
     let proc = Scheduler::get_current().get_process();
     proc.identity.lock().group_id as _
 }
 
+#[wrap_syscall]
 pub fn getegid() -> usize {
     let proc = Scheduler::get_current().get_process();
     proc.identity.lock().effective_group_id as _
 }
 
+#[wrap_syscall]
 pub fn getresuid(ruid: VirtAddr, euid: VirtAddr, suid: VirtAddr) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let ident = proc.identity.lock();
@@ -67,6 +75,7 @@ pub fn getresuid(ruid: VirtAddr, euid: VirtAddr, suid: VirtAddr) -> EResult<()> 
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn getresgid(rgid: VirtAddr, egid: VirtAddr, sgid: VirtAddr) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let ident = proc.identity.lock();
@@ -84,6 +93,7 @@ pub fn getresgid(rgid: VirtAddr, egid: VirtAddr, sgid: VirtAddr) -> EResult<()> 
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn getpgid(pid: usize) -> EResult<usize> {
     let proc = if pid == 0 {
         Scheduler::get_current().get_process()
@@ -99,6 +109,7 @@ pub fn getpgid(pid: usize) -> EResult<usize> {
     Ok(*proc.pgrp.lock())
 }
 
+#[wrap_syscall]
 pub fn setpgid(pid: usize, pgid: usize) -> EResult<usize> {
     let current = Scheduler::get_current().get_process();
     let target = if pid == 0 {
@@ -135,6 +146,7 @@ pub fn setpgid(pid: usize, pgid: usize) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn getsid(pid: usize) -> EResult<usize> {
     let proc = if pid == 0 {
         Scheduler::get_current().get_process()
@@ -150,6 +162,7 @@ pub fn getsid(pid: usize) -> EResult<usize> {
     Ok(*proc.session.lock())
 }
 
+#[wrap_syscall]
 pub fn setsid() -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let pid = proc.get_pid();
@@ -184,6 +197,7 @@ pub fn fork(ctx: &Context) -> EResult<usize> {
     Ok(new_proc.get_pid())
 }
 
+#[wrap_syscall]
 pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let path_str = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
@@ -247,6 +261,7 @@ fn encode_stopped(sig: u32) -> i32 {
     0x7f | ((sig as i32) << 8)
 }
 
+#[wrap_syscall]
 pub fn waitpid(pid: uapi::pid_t, stat_loc: VirtAddr, options: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let caller_pgrp = *proc.pgrp.lock();
@@ -349,6 +364,7 @@ pub fn waitpid(pid: uapi::pid_t, stat_loc: VirtAddr, options: i32) -> EResult<us
 
 const THREAD_NAME_MAX: usize = 16;
 
+#[wrap_syscall]
 pub fn thread_create(entry: usize, stack: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let task = Arc::new(crate::process::task::Task::new(
@@ -378,6 +394,7 @@ pub fn thread_exit() -> ! {
     Scheduler::kill_current();
 }
 
+#[wrap_syscall]
 pub fn thread_kill(pid: usize, tid: usize, sig: usize) -> EResult<usize> {
     let sig_num = sig as u32;
 
@@ -413,6 +430,7 @@ pub fn thread_kill(pid: usize, tid: usize, sig: usize) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn thread_setname(tid: usize, name_ptr: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let thread = {
@@ -432,6 +450,7 @@ pub fn thread_setname(tid: usize, name_ptr: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn thread_getname(tid: usize, buf: VirtAddr, size: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let thread = {

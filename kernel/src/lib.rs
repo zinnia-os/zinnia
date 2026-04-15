@@ -9,6 +9,8 @@
 #![feature(const_index)]
 #![feature(const_trait_impl)]
 #![feature(const_cmp)]
+#![feature(macro_attr)]
+#![feature(macro_metavar_expr)]
 // Clippy lints
 #![allow(clippy::needless_return)]
 #![allow(clippy::new_without_default)]

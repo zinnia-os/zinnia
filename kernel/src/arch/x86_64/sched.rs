@@ -72,6 +72,34 @@ pub struct Context {
 static_assert!(size_of::<Context>() == 22 * size_of::<u64>());
 
 impl Context {
+    pub fn syscall_number(&self) -> usize {
+        self.rax as usize
+    }
+
+    pub fn arg0(&self) -> usize {
+        self.rdi as usize
+    }
+
+    pub fn arg1(&self) -> usize {
+        self.rsi as usize
+    }
+
+    pub fn arg2(&self) -> usize {
+        self.rdx as usize
+    }
+
+    pub fn arg3(&self) -> usize {
+        self.r10 as usize
+    }
+
+    pub fn arg4(&self) -> usize {
+        self.r8 as usize
+    }
+
+    pub fn arg5(&self) -> usize {
+        self.r9 as usize
+    }
+
     pub fn set_return(&mut self, val: usize, err: usize) {
         self.rax = val as _;
         self.rdx = err as _;

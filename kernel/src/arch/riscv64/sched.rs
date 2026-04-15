@@ -43,6 +43,34 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn syscall_number(&self) -> usize {
+        self.a7 as usize
+    }
+
+    pub fn arg0(&self) -> usize {
+        self.a0 as usize
+    }
+
+    pub fn arg1(&self) -> usize {
+        self.a1 as usize
+    }
+
+    pub fn arg2(&self) -> usize {
+        self.a2 as usize
+    }
+
+    pub fn arg3(&self) -> usize {
+        self.a3 as usize
+    }
+
+    pub fn arg4(&self) -> usize {
+        self.a4 as usize
+    }
+
+    pub fn arg5(&self) -> usize {
+        self.a5 as usize
+    }
+
     pub fn set_return(&mut self, val: usize, err: usize) {
         self.a0 = val as _;
         self.a1 = err as _;

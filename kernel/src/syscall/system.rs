@@ -8,6 +8,7 @@ use crate::{
     sched::Scheduler,
     uapi::{self, reboot::*, time::*},
     util::{event::Event, mutex::spin::SpinMutex},
+    wrap_syscall,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt::Write;
@@ -24,10 +25,12 @@ struct FutexQueue {
     event: Event,
 }
 
+#[wrap_syscall]
 pub fn archctl(cmd: usize, arg: usize) -> EResult<usize> {
     crate::arch::cpu::archctl(cmd, arg)
 }
 
+#[wrap_syscall]
 pub fn getuname(addr: VirtAddr) -> EResult<usize> {
     let mut addr = UserPtr::new(addr);
     addr.write(*UTSNAME.lock()).ok_or(Errno::EINVAL)?;
@@ -35,6 +38,7 @@ pub fn getuname(addr: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn setuname(addr: VirtAddr) -> EResult<usize> {
     let addr = UserPtr::new(addr);
 
@@ -50,6 +54,7 @@ pub fn setuname(addr: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn clock_get(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
     let _ = clockid; // TODO: Respect clockid
 
@@ -67,6 +72,7 @@ pub fn clock_get(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn futex_wait(pointer: VirtAddr, expected: i32, timeout: VirtAddr) -> EResult<usize> {
     let pointer = UserPtr::<i32>::new(pointer);
     let deadline = read_timeout_deadline(timeout)?;
@@ -95,6 +101,7 @@ pub fn futex_wait(pointer: VirtAddr, expected: i32, timeout: VirtAddr) -> EResul
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn futex_wake(pointer: VirtAddr, all: bool) -> EResult<usize> {
     let queue = get_futex_queue(pointer);
 
@@ -105,6 +112,7 @@ pub fn futex_wake(pointer: VirtAddr, all: bool) -> EResult<usize> {
     })
 }
 
+#[wrap_syscall]
 pub fn itimer_get(which: usize, curr_value: VirtAddr) -> EResult<usize> {
     if which != ITIMER_REAL {
         return Err(Errno::EINVAL);
@@ -118,6 +126,7 @@ pub fn itimer_get(which: usize, curr_value: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn itimer_set(which: usize, new_value: VirtAddr, old_value: VirtAddr) -> EResult<usize> {
     if which != ITIMER_REAL {
         return Err(Errno::EINVAL);
@@ -146,6 +155,7 @@ const LOG_NOTICE: usize = 5;
 const LOG_INFO: usize = 6;
 const LOG_DEBUG: usize = 7;
 
+#[wrap_syscall]
 pub fn syslog(level: usize, ptr: VirtAddr, len: usize) -> EResult<usize> {
     let ptr = UserPtr::<u8>::new(ptr);
     if ptr.is_null() {
@@ -182,6 +192,7 @@ pub fn syslog(level: usize, ptr: VirtAddr, len: usize) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn reboot(magic: u32, cmd: u32) -> EResult<usize> {
     if magic != 0xdeadbeef {
         return Err(Errno::EINVAL);
@@ -211,6 +222,7 @@ pub fn reboot(magic: u32, cmd: u32) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
     let request = UserPtr::new(request);
     // TODO

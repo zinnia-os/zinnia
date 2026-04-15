@@ -118,20 +118,7 @@ extern "C" fn syscall_handler(frame: *mut Context) {
     unsafe {
         let frame = frame.as_mut().unwrap();
 
-        // Arguments use the SYSV C ABI.
-        // Except for a3, since RCX is needed for sysret, we need a different register.
-        let result = crate::syscall::dispatch(
-            frame,
-            frame.rax as usize,
-            frame.rdi as usize,
-            frame.rsi as usize,
-            frame.rdx as usize,
-            frame.r10 as usize,
-            frame.r8 as usize,
-            frame.r9 as usize,
-        );
-        frame.rax = result.0 as u64;
-        frame.rdx = result.1 as u64;
+        crate::syscall::dispatch(frame);
 
         // Check for pending signals before returning to userspace.
         crate::process::signal::deliver_pending_signals(frame);

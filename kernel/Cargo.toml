@@ -21,6 +21,7 @@ num-traits = { version = "0.2.19", default-features = false }
 limine = { version = "0.5.0", optional = true }
 rustc-demangle = { version = "0.1.26" }
 intrusive-collections = { version = "0.9.7", features = ["nightly"] }
+paste = "1.0.15"
 
 [features]
 default = ["acpi", "boot_limine"]

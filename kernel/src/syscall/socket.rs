@@ -8,6 +8,7 @@ use crate::{
         File,
         file::{FileDescription, FileOps, OpenFlags},
     },
+    wrap_syscall,
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::{mem::offset_of, sync::atomic::AtomicBool};
@@ -66,6 +67,7 @@ fn write_sockaddr(
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn socket(family: i32, socket_type: i32, _protocol: i32) -> EResult<usize> {
     let flags = SocketFlags::from_bits_truncate(socket_type as u32);
     let sock_type = socket_type as u32 & !(SOCK_NONBLOCK | SOCK_CLOEXEC | SOCK_CLOFORK);
@@ -99,6 +101,7 @@ pub fn socket(family: i32, socket_type: i32, _protocol: i32) -> EResult<usize> {
     Ok(fd as usize)
 }
 
+#[wrap_syscall]
 pub fn socketpair(domain: i32, type_and_flags: u32, _protocol: i32) -> EResult<usize> {
     let flags = SocketFlags::from_bits_truncate(type_and_flags);
     let sock_type = type_and_flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC | SOCK_CLOFORK);
@@ -143,6 +146,7 @@ pub fn socketpair(domain: i32, type_and_flags: u32, _protocol: i32) -> EResult<u
     Ok((fd0 as usize) | ((fd1 as usize) << 32))
 }
 
+#[wrap_syscall]
 pub fn bind(fd: i32, addr_ptr: VirtAddr, addr_length: usize) -> EResult<()> {
     let addr_ptr = UserPtr::<u8>::new(addr_ptr);
     let addr = read_sockaddr(addr_ptr, addr_length)?;
@@ -150,11 +154,13 @@ pub fn bind(fd: i32, addr_ptr: VirtAddr, addr_length: usize) -> EResult<()> {
     socket.ops.bind(&addr, &socket)
 }
 
+#[wrap_syscall]
 pub fn listen(fd: i32, backlog: i32) -> EResult<()> {
     let socket = get_socket(fd)?;
     socket.ops.listen(backlog)
 }
 
+#[wrap_syscall]
 pub fn accept(
     fd: i32,
     newfd: VirtAddr,
@@ -202,6 +208,7 @@ pub fn accept(
     newfd_ptr.write(new_fd).ok_or(Errno::EFAULT)
 }
 
+#[wrap_syscall]
 pub fn connect(fd: i32, addr_ptr: VirtAddr, addr_length: usize) -> EResult<()> {
     let addr_ptr = UserPtr::<u8>::new(addr_ptr);
     let addr = read_sockaddr(addr_ptr, addr_length)?;
@@ -210,6 +217,7 @@ pub fn connect(fd: i32, addr_ptr: VirtAddr, addr_length: usize) -> EResult<()> {
     socket.ops.connect(&addr, nonblocking)
 }
 
+#[wrap_syscall]
 pub fn sendmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     let hdr_ptr = UserPtr::<msghdr>::new(hdr);
 
@@ -242,6 +250,7 @@ pub fn sendmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     Ok(sent as usize)
 }
 
+#[wrap_syscall]
 pub fn recvmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     let hdr_ptr = UserPtr::<msghdr>::new(hdr);
 
@@ -287,11 +296,13 @@ pub fn recvmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     Ok(received as usize)
 }
 
+#[wrap_syscall]
 pub fn shutdown(fd: i32, how: i32) -> EResult<()> {
     let socket = get_socket(fd)?;
     socket.ops.shutdown(how as u32)
 }
 
+#[wrap_syscall]
 pub fn getsockopt(
     fd: i32,
     layer: i32,
@@ -320,6 +331,7 @@ pub fn getsockopt(
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn setsockopt(fd: i32, layer: i32, number: i32, buffer: VirtAddr, size: usize) -> EResult<()> {
     let buf_ptr = UserPtr::<u8>::new(buffer);
 
@@ -333,6 +345,7 @@ pub fn setsockopt(fd: i32, layer: i32, number: i32, buffer: VirtAddr, size: usiz
     socket.ops.setsockopt(layer, number, &buf)
 }
 
+#[wrap_syscall]
 pub fn getsockname(fd: i32, addr_ptr: VirtAddr, max_addr_len: VirtAddr) -> EResult<()> {
     let addr_ptr = UserPtr::<u8>::new(addr_ptr);
     let len_ptr = UserPtr::<socklen_t>::new(max_addr_len);
@@ -343,6 +356,7 @@ pub fn getsockname(fd: i32, addr_ptr: VirtAddr, max_addr_len: VirtAddr) -> EResu
     write_sockaddr(addr_ptr, len_ptr, &buf[..len])
 }
 
+#[wrap_syscall]
 pub fn getpeername(fd: i32, addr_ptr: VirtAddr, max_addr_len: VirtAddr) -> EResult<()> {
     let addr_ptr = UserPtr::<u8>::new(addr_ptr);
     let len_ptr = UserPtr::<socklen_t>::new(max_addr_len);

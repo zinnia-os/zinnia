@@ -7,200 +7,281 @@ mod socket;
 mod system;
 mod vfs;
 
-use super::posix::errno::Errno;
-use crate::arch::sched::Context;
+use crate::{
+    arch::sched::Context,
+    memory::{UserPtr, VirtAddr},
+    posix::errno::{EResult, Errno},
+};
 
-macro_rules! sys_unimp {
-    ($name: literal, $sc: expr) => {{
-        warn!("Call to unimplemented syscall {}", $name);
-        $sc
+pub trait SyscallReturn {
+    fn into_ctx(self, ctx: &mut Context);
+}
+
+pub trait SyscallArg: Copy + Clone {
+    fn from_usize(arg: usize) -> EResult<Self>;
+}
+
+impl<T: SyscallReturn> SyscallReturn for EResult<T> {
+    fn into_ctx(self, ctx: &mut Context) {
+        match self {
+            Ok(res) => res.into_ctx(ctx),
+            Err(err) => ctx.set_return(0, err as usize),
+        }
+    }
+}
+
+macro_rules! impl_syscall_traits {
+    ($($typ:ty),*) => {
+        $(
+            impl SyscallReturn for $typ {
+                fn into_ctx(self, ctx: &mut Context) {
+                    ctx.set_return(self as usize, 0);
+                }
+            }
+            impl SyscallArg for $typ {
+                fn from_usize(arg: usize) -> EResult<$typ> {
+                    Ok(arg as $typ)
+                }
+            }
+        )*
+    }
+}
+
+impl_syscall_traits!(u8, u16, u32, u64, usize);
+impl_syscall_traits!(i8, i16, i32, i64, isize);
+
+impl SyscallReturn for () {
+    fn into_ctx(self, ctx: &mut Context) {
+        ctx.set_return(0, 0);
+    }
+}
+
+impl SyscallArg for bool {
+    fn from_usize(arg: usize) -> EResult<Self> {
+        Ok(arg != 0)
+    }
+}
+
+impl SyscallArg for VirtAddr {
+    fn from_usize(arg: usize) -> EResult<VirtAddr> {
+        Ok(VirtAddr::new(arg))
+    }
+}
+
+impl<T: Copy> SyscallArg for UserPtr<T> {
+    fn from_usize(arg: usize) -> EResult<UserPtr<T>> {
+        Ok(UserPtr::new(VirtAddr::new(arg)))
+    }
+}
+
+#[macro_export]
+macro_rules! wrap_syscall {
+    attr() {
+        $( #[ $($meta:meta)* ] )?
+        $vis:vis fn $name:ident (
+            $( $arg:ident : $arg_ty:ty ),* $(,)?
+        ) -> $ret:ty $body:block
+    } => {
+        $( #[ $($meta)* ] )?
+        $vis fn $name(ctx: &mut $crate::arch::sched::Context) {
+            fn inner($($arg : $arg_ty),*) -> $ret $body
+
+            fn inner_wrapper(ctx: &mut $crate::arch::sched::Context) -> $ret {
+                inner(
+                    $(
+                        paste::paste! {
+                            <$arg_ty as $crate::syscall::SyscallArg>::from_usize(
+                                ctx.[< arg ${index(0)} >]()
+                            )?
+                        }
+                    ),*
+                )
+            }
+
+            $crate::syscall::SyscallReturn::into_ctx(inner_wrapper(ctx), ctx);
+        }
+    }
+}
+
+macro_rules! sys_unimpl {
+    ($name:expr, $ret:expr) => {{
+        #[wrap_syscall]
+        fn do_unimplemented() -> $crate::posix::errno::EResult<usize> {
+            $crate::warn!("Call to unimplemented syscall {}", $name);
+            $ret
+        }
+        do_unimplemented
     }};
 }
 
 /// Executes the syscall as identified by `num`.
 /// Returns a tuple of (value, error) to the user. An error code of 0 inidcates success.
 /// If the error code is not 0, `value` is not valid and indicates failure.
-pub fn dispatch(
-    frame: &mut Context,
-    num: usize,
-    a0: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-) -> (usize, usize) {
-    // Execute a syscall based on the number.
-    // Note that the numbers might not be in order, but grouped logically.
-    let result = match num {
+pub fn dispatch(frame: &mut Context) {
+    let handler: fn(&mut Context) = match frame.syscall_number() {
         // System control
-        numbers::SYSLOG => system::syslog(a0, a1.into(), a2),
-        numbers::GETUNAME => system::getuname(a0.into()),
-        numbers::SETUNAME => system::setuname(a0.into()),
-        numbers::ARCHCTL => system::archctl(a0, a1),
-        numbers::REBOOT => system::reboot(a0 as _, a1 as _),
+        numbers::SYSLOG => system::syslog,
+        numbers::GETUNAME => system::getuname,
+        numbers::SETUNAME => system::setuname,
+        numbers::ARCHCTL => system::archctl,
+        numbers::REBOOT => system::reboot,
 
         // Mapped memory
-        numbers::MMAP => memory::mmap(a0.into(), a1, a2 as _, a3 as _, a4 as _, a5 as _),
-        numbers::MUNMAP => sys_unimp!("munmap", memory::munmap(a0.into(), a1)),
-        numbers::MPROTECT => memory::mprotect(a0.into(), a1, a2 as _),
-        numbers::MADVISE => sys_unimp!("madvise", Err(Errno::ENOSYS)),
+        numbers::MMAP => memory::mmap,
+        numbers::MUNMAP => sys_unimpl!("munmap", Ok(0)), // memory::munmap
+        numbers::MPROTECT => memory::mprotect,
+        numbers::MADVISE => sys_unimpl!("madvise", Err(Errno::ENOSYS)),
 
         // Signals
-        numbers::SIGPROCMASK => signal::sigprocmask(a0, a1.into(), a2.into()),
-        numbers::SIGSUSPEND => sys_unimp!("sigsuspend", Err(Errno::ENOSYS)),
-        numbers::SIGPENDING => sys_unimp!("sigpending", Err(Errno::ENOSYS)),
-        numbers::SIGACTION => signal::sigaction(a0 as _, a1.into(), a2.into()),
-        numbers::SIGTIMEDWAIT => sys_unimp!("sigtimedwait", Err(Errno::ENOSYS)),
-        numbers::SIGALTSTACK => sys_unimp!("sigaltstack", Err(Errno::ENOSYS)),
+        numbers::SIGPROCMASK => signal::sigprocmask,
+        numbers::SIGSUSPEND => sys_unimpl!("sigsuspend", Err(Errno::ENOSYS)),
+        numbers::SIGPENDING => sys_unimpl!("sigpending", Err(Errno::ENOSYS)),
+        numbers::SIGACTION => signal::sigaction,
+        numbers::SIGTIMEDWAIT => sys_unimpl!("sigtimedwait", Err(Errno::ENOSYS)),
+        numbers::SIGALTSTACK => sys_unimpl!("sigaltstack", Err(Errno::ENOSYS)),
         numbers::SIGRETURN => signal::sigreturn(frame),
 
         // Processes
-        numbers::EXIT => process::exit(a0),
-        numbers::EXECVE => process::execve(a0.into(), a1.into(), a2.into()),
-        numbers::FORK => process::fork(frame),
-        numbers::KILL => signal::kill(a0 as isize, a1),
-        numbers::GETTID => Ok(process::gettid()),
-        numbers::GETPID => Ok(process::getpid()),
-        numbers::GETPPID => Ok(process::getppid()),
-        numbers::WAITID => sys_unimp!("waitid", Err(Errno::ENOSYS)),
-        numbers::WAITPID => process::waitpid(a0 as _, a1.into(), a2 as _),
+        numbers::EXIT => process::exit(frame.arg0()),
+        numbers::EXECVE => process::execve,
+        numbers::FORK => {
+            SyscallReturn::into_ctx(process::fork(frame), frame);
+            return;
+        }
+        numbers::KILL => signal::kill,
+        numbers::GETTID => process::gettid,
+        numbers::GETPID => process::getpid,
+        numbers::GETPPID => process::getppid,
+        numbers::WAITID => sys_unimpl!("waitid", Err(Errno::ENOSYS)),
+        numbers::WAITPID => process::waitpid,
 
         // Threads
-        numbers::THREAD_CREATE => process::thread_create(a0, a1),
-        numbers::THREAD_KILL => process::thread_kill(a0, a1, a2),
+        numbers::THREAD_CREATE => process::thread_create,
+        numbers::THREAD_KILL => process::thread_kill,
         numbers::THREAD_EXIT => process::thread_exit(),
-        numbers::THREAD_SETNAME => process::thread_setname(a0, a1.into()),
-        numbers::THREAD_GETNAME => process::thread_getname(a0, a1.into(), a2),
+        numbers::THREAD_SETNAME => process::thread_setname,
+        numbers::THREAD_GETNAME => process::thread_getname,
 
         // VFS
-        numbers::PREAD => vfs::pread(a0 as _, a1.into(), a2, a3).map(|x| x as _),
-        numbers::READV => vfs::readv(a0 as _, a1.into(), a2).map(|x| x as _),
-        numbers::PWRITE => vfs::pwrite(a0 as _, a1.into(), a2, a3).map(|x| x as _),
-        numbers::WRITEV => vfs::writev(a0 as _, a1.into(), a2).map(|x| x as _),
-        numbers::SEEK => vfs::seek(a0 as _, a1, a2),
-        numbers::IOCTL => vfs::ioctl(a0 as _, a1, a2.into()),
-        numbers::OPENAT => vfs::openat(a0 as _, a1.into(), a2, a3 as _).map(|x| x as _),
-        numbers::CLOSE => vfs::close(a0 as _),
-        numbers::FSTAT => vfs::fstat(a0 as _, a1.into()).map(|_| 0),
-        numbers::FSTATAT => vfs::fstatat(a0 as _, a1.into(), a2.into(), a3).map(|_| 0),
-        numbers::STATVFS => vfs::statvfs(a0.into(), a1.into()).map(|_| 0),
-        numbers::FSTATVFS => vfs::fstatvfs(a0 as _, a1.into()).map(|_| 0),
-        numbers::FACCESSAT => vfs::faccessat(a0 as _, a1.into(), a2, a3).map(|_| 0),
-        numbers::FCNTL => vfs::fcntl(a0 as _, a1, a2),
-        numbers::FTRUNCATE => sys_unimp!("ftruncate", Err(Errno::ENOSYS)),
-        numbers::FALLOCATE => sys_unimp!("fallocate", Err(Errno::ENOSYS)),
-        numbers::UTIMENSAT => sys_unimp!("utimensat", Err(Errno::ENOSYS)),
-        numbers::MKNODAT => sys_unimp!("mknodat", Err(Errno::ENOSYS)),
-        numbers::GETCWD => vfs::getcwd(a0.into(), a1),
-        numbers::CHDIR => vfs::chdir(a0.into()).map(|_| 0),
-        numbers::FCHDIR => vfs::fchdir(a0 as _).map(|_| 0),
-        numbers::MKDIRAT => vfs::mkdirat(a0 as _, a1.into(), a2 as _).map(|x| x as _),
-        numbers::RMDIRAT => sys_unimp!("rmdirat", Err(Errno::ENOSYS)),
-        numbers::GETDENTS => vfs::getdents(a0 as _, a1.into(), a2),
-        numbers::RENAMEAT => vfs::renameat(a0 as _, a1.into(), a2 as _, a3.into()).map(|_| 0),
-        numbers::FCHMOD => vfs::fchmod(a0 as _, a1 as _).map(|_| 0),
-        numbers::FCHMODAT => vfs::fchmodat(a0 as _, a1.into(), a2 as _, a3).map(|_| 0),
-        numbers::FCHOWNAT => vfs::fchownat(a0 as _, a1.into(), a2 as _, a3 as _, a4).map(|_| 0),
-        numbers::LINKAT => vfs::linkat(a0 as _, a1.into(), a2 as _, a3.into(), a4 as _).map(|_| 0),
-        numbers::SYMLINKAT => sys_unimp!("symlinkat", Err(Errno::ENOSYS)),
-        numbers::UNLINKAT => vfs::unlinkat(a0 as _, a1.into(), a2).map(|_| 0),
-        numbers::READLINKAT => {
-            vfs::readlinkat(a0 as _, a1.into(), a2.into(), a3 as _).map(|x| x as _)
-        }
-        numbers::FLOCK => sys_unimp!("flock", Err(Errno::ENOSYS)),
-        numbers::PPOLL => vfs::ppoll(a0.into(), a1, a2.into(), a3.into()),
-        numbers::DUP => vfs::dup(a0 as _).map(|x| x as _),
-        numbers::DUP3 => vfs::dup3(a0 as _, a1 as _, a2).map(|x| x as _),
-        numbers::SYNC => sys_unimp!("sync", Err(Errno::ENOSYS)),
-        numbers::FSYNC => sys_unimp!("fsync", Err(Errno::ENOSYS)),
-        numbers::FDATASYNC => sys_unimp!("fdatasync", Err(Errno::ENOSYS)),
-        numbers::CHROOT => vfs::chroot(a0.into()),
-        numbers::MOUNT => vfs::mount(a0.into(), a1.into(), a2 as _, a3.into()),
-        numbers::UMOUNT => vfs::umount(a0.into(), a1 as _),
-        numbers::PIPE => vfs::pipe(a0.into()).map(|_| 0),
+        numbers::PREAD => vfs::pread,
+        numbers::READV => vfs::readv,
+        numbers::PWRITE => vfs::pwrite,
+        numbers::WRITEV => vfs::writev,
+        numbers::SEEK => vfs::seek,
+        numbers::IOCTL => vfs::ioctl,
+        numbers::OPENAT => vfs::openat,
+        numbers::CLOSE => vfs::close,
+        numbers::FSTAT => vfs::fstat,
+        numbers::FSTATAT => vfs::fstatat,
+        numbers::STATVFS => vfs::statvfs,
+        numbers::FSTATVFS => vfs::fstatvfs,
+        numbers::FACCESSAT => vfs::faccessat,
+        numbers::FCNTL => vfs::fcntl,
+        numbers::FTRUNCATE => sys_unimpl!("ftruncate", Err(Errno::ENOSYS)),
+        numbers::FALLOCATE => sys_unimpl!("fallocate", Err(Errno::ENOSYS)),
+        numbers::UTIMENSAT => sys_unimpl!("utimensat", Err(Errno::ENOSYS)),
+        numbers::MKNODAT => sys_unimpl!("mknodat", Err(Errno::ENOSYS)),
+        numbers::GETCWD => vfs::getcwd,
+        numbers::CHDIR => vfs::chdir,
+        numbers::FCHDIR => vfs::fchdir,
+        numbers::MKDIRAT => vfs::mkdirat,
+        numbers::RMDIRAT => sys_unimpl!("rmdirat", Err(Errno::ENOSYS)),
+        numbers::GETDENTS => vfs::getdents,
+        numbers::RENAMEAT => vfs::renameat,
+        numbers::FCHMOD => vfs::fchmod,
+        numbers::FCHMODAT => vfs::fchmodat,
+        numbers::FCHOWNAT => vfs::fchownat,
+        numbers::LINKAT => vfs::linkat,
+        numbers::SYMLINKAT => sys_unimpl!("symlinkat", Err(Errno::ENOSYS)),
+        numbers::UNLINKAT => vfs::unlinkat,
+        numbers::READLINKAT => vfs::readlinkat,
+        numbers::FLOCK => sys_unimpl!("flock", Err(Errno::ENOSYS)),
+        numbers::PPOLL => vfs::ppoll,
+        numbers::DUP => vfs::dup,
+        numbers::DUP3 => vfs::dup3,
+        numbers::SYNC => sys_unimpl!("sync", Err(Errno::ENOSYS)),
+        numbers::FSYNC => sys_unimpl!("fsync", Err(Errno::ENOSYS)),
+        numbers::FDATASYNC => sys_unimpl!("fdatasync", Err(Errno::ENOSYS)),
+        numbers::CHROOT => vfs::chroot,
+        numbers::MOUNT => vfs::mount,
+        numbers::UMOUNT => vfs::umount,
+        numbers::PIPE => vfs::pipe,
 
         // Sockets
-        numbers::SOCKET => socket::socket(a0 as _, a1 as _, a2 as _),
-        numbers::SOCKETPAIR => socket::socketpair(a0 as _, a1 as _, a2 as _),
-        numbers::SHUTDOWN => socket::shutdown(a0 as _, a1 as _).map(|_| 0),
-        numbers::BIND => socket::bind(a0 as _, a1.into(), a2 as _).map(|_| 0),
-        numbers::CONNECT => socket::connect(a0 as _, a1.into(), a2 as _).map(|_| 0),
-        numbers::ACCEPT => socket::accept(a0 as _, a1.into(), a2.into(), a3.into(), a4).map(|_| 0),
-        numbers::LISTEN => socket::listen(a0 as _, a1 as _).map(|_| 0),
-        numbers::GETPEERNAME => socket::getpeername(a0 as _, a1.into(), a2.into()).map(|_| 0),
-        numbers::GETSOCKNAME => socket::getsockname(a0 as _, a1.into(), a2.into()).map(|_| 0),
-        numbers::GETSOCKOPT => {
-            socket::getsockopt(a0 as _, a1 as _, a2 as _, a3.into(), a4.into()).map(|_| 0)
-        }
-        numbers::SETSOCKOPT => {
-            socket::setsockopt(a0 as _, a1 as _, a2 as _, a3.into(), a4).map(|_| 0)
-        }
-        numbers::SENDMSG => socket::sendmsg(a0 as _, a1.into(), a2 as _),
-        numbers::RECVMSG => socket::recvmsg(a0 as _, a1.into(), a2 as _),
+        numbers::SOCKET => socket::socket,
+        numbers::SOCKETPAIR => socket::socketpair,
+        numbers::SHUTDOWN => socket::shutdown,
+        numbers::BIND => socket::bind,
+        numbers::CONNECT => socket::connect,
+        numbers::ACCEPT => socket::accept,
+        numbers::LISTEN => socket::listen,
+        numbers::GETPEERNAME => socket::getpeername,
+        numbers::GETSOCKNAME => socket::getsockname,
+        numbers::GETSOCKOPT => socket::getsockopt,
+        numbers::SETSOCKOPT => socket::setsockopt,
+        numbers::SENDMSG => socket::sendmsg,
+        numbers::RECVMSG => socket::recvmsg,
 
         // Identity
-        numbers::GETGROUPS => sys_unimp!("getgroups", Ok(0)),
-        numbers::SETGROUPS => sys_unimp!("setgroups", Err(Errno::ENOSYS)),
-        numbers::GETSID => process::getsid(a0),
-        numbers::SETSID => process::setsid(),
-        numbers::SETUID => sys_unimp!("setuid", Ok(0)),
-        numbers::GETUID => Ok(process::getuid()),
-        numbers::SETGID => sys_unimp!("setgid", Ok(0)),
-        numbers::GETGID => Ok(process::getgid()),
-        numbers::GETEUID => Ok(process::geteuid()),
-        numbers::SETEUID => sys_unimp!("seteuid", Ok(0)),
-        numbers::GETEGID => Ok(process::getegid()),
-        numbers::SETEGID => sys_unimp!("setegid", Ok(0)),
-        numbers::GETPGID => process::getpgid(a0),
-        numbers::SETPGID => process::setpgid(a0, a1),
-        numbers::GETRESUID => process::getresuid(a0.into(), a1.into(), a2.into()).map(|_| 0),
-        numbers::SETRESUID => sys_unimp!("setresuid", Err(Errno::ENOSYS)),
-        numbers::GETRESGID => process::getresgid(a0.into(), a1.into(), a2.into()).map(|_| 0),
-        numbers::SETRESGID => sys_unimp!("setresgid", Err(Errno::ENOSYS)),
-        numbers::SETREUID => sys_unimp!("setreuid", Err(Errno::ENOSYS)),
-        numbers::SETREGID => sys_unimp!("setregid", Err(Errno::ENOSYS)),
-        numbers::UMASK => sys_unimp!("umask", Err(Errno::ENOSYS)),
+        numbers::GETGROUPS => sys_unimpl!("getgroups", Ok(0)),
+        numbers::SETGROUPS => sys_unimpl!("setgroups", Err(Errno::ENOSYS)),
+        numbers::GETSID => process::getsid,
+        numbers::SETSID => process::setsid,
+        numbers::SETUID => sys_unimpl!("setuid", Ok(0)),
+        numbers::GETUID => process::getuid,
+        numbers::SETGID => sys_unimpl!("setgid", Ok(0)),
+        numbers::GETGID => process::getgid,
+        numbers::GETEUID => process::geteuid,
+        numbers::SETEUID => sys_unimpl!("seteuid", Ok(0)),
+        numbers::GETEGID => process::getegid,
+        numbers::SETEGID => sys_unimpl!("setegid", Ok(0)),
+        numbers::GETPGID => process::getpgid,
+        numbers::SETPGID => process::setpgid,
+        numbers::GETRESUID => process::getresuid,
+        numbers::SETRESUID => sys_unimpl!("setresuid", Err(Errno::ENOSYS)),
+        numbers::GETRESGID => process::getresgid,
+        numbers::SETRESGID => sys_unimpl!("setresgid", Err(Errno::ENOSYS)),
+        numbers::SETREUID => sys_unimpl!("setreuid", Err(Errno::ENOSYS)),
+        numbers::SETREGID => sys_unimpl!("setregid", Err(Errno::ENOSYS)),
+        numbers::UMASK => sys_unimpl!("umask", Err(Errno::ENOSYS)),
 
         // Limits
-        numbers::GETRUSAGE => sys_unimp!("getrusage", Err(Errno::ENOSYS)),
-        numbers::GETRLIMIT => sys_unimp!("getrlimit", Err(Errno::ENOSYS)),
-        numbers::SETRLIMIT => sys_unimp!("setrlimit", Err(Errno::ENOSYS)),
+        numbers::GETRUSAGE => sys_unimpl!("getrusage", Err(Errno::ENOSYS)),
+        numbers::GETRLIMIT => sys_unimpl!("getrlimit", Err(Errno::ENOSYS)),
+        numbers::SETRLIMIT => sys_unimpl!("setrlimit", Err(Errno::ENOSYS)),
 
         // Futexes
-        numbers::FUTEX_WAIT => system::futex_wait(a0.into(), a1 as i32, a2.into()),
-        numbers::FUTEX_WAKE => system::futex_wake(a0.into(), a1 != 0),
+        numbers::FUTEX_WAIT => system::futex_wait,
+        numbers::FUTEX_WAKE => system::futex_wake,
 
         // Time
-        numbers::TIMER_CREATE => sys_unimp!("timer_create", Ok(0)),
-        numbers::TIMER_SET => sys_unimp!("timer_set", Err(Errno::ENOSYS)),
-        numbers::TIMER_DELETE => sys_unimp!("timer_delete", Err(Errno::ENOSYS)),
-        numbers::ITIMER_GET => system::itimer_get(a0, a1.into()),
-        numbers::ITIMER_SET => system::itimer_set(a0, a1.into(), a2.into()),
-        numbers::CLOCK_GET => system::clock_get(a0 as _, a1.into()),
-        numbers::CLOCK_GETRES => sys_unimp!("clock_getres", Err(Errno::ENOSYS)),
+        numbers::TIMER_CREATE => sys_unimpl!("timer_create", Ok(0)),
+        numbers::TIMER_SET => sys_unimpl!("timer_set", Err(Errno::ENOSYS)),
+        numbers::TIMER_DELETE => sys_unimpl!("timer_delete", Err(Errno::ENOSYS)),
+        numbers::ITIMER_GET => system::itimer_get,
+        numbers::ITIMER_SET => system::itimer_set,
+        numbers::CLOCK_GET => system::clock_get,
+        numbers::CLOCK_GETRES => sys_unimpl!("clock_getres", Err(Errno::ENOSYS)),
 
         // Scheduling
-        numbers::SLEEP => system::sleep(a0.into(), a1.into()),
-        numbers::YIELD => sys_unimp!("yield", Ok(0)),
-        numbers::GETPRIORITY => sys_unimp!("getpriority", Err(Errno::ENOSYS)),
-        numbers::SETPRIORITY => sys_unimp!("setpriority", Err(Errno::ENOSYS)),
-        numbers::SCHED_GETPARAM => sys_unimp!("sched_getparam", Err(Errno::ENOSYS)),
-        numbers::SCHED_SETPARAM => sys_unimp!("sched_setparam", Err(Errno::ENOSYS)),
-        numbers::GETENTROPY => sys_unimp!("getentropy", Ok(0)),
+        numbers::SLEEP => system::sleep,
+        numbers::YIELD => sys_unimpl!("yield", Ok(0)),
+        numbers::GETPRIORITY => sys_unimpl!("getpriority", Err(Errno::ENOSYS)),
+        numbers::SETPRIORITY => sys_unimpl!("setpriority", Err(Errno::ENOSYS)),
+        numbers::SCHED_GETPARAM => sys_unimpl!("sched_getparam", Err(Errno::ENOSYS)),
+        numbers::SCHED_SETPARAM => sys_unimpl!("sched_setparam", Err(Errno::ENOSYS)),
+        numbers::GETENTROPY => sys_unimpl!("getentropy", Ok(0)),
 
         // Modules
-        numbers::MODULE_INSERT => module::module_insert(a0.into(), a1.into()).map(|_| 0),
-        numbers::MODULE_REMOVE => sys_unimp!("module_remove", Err(Errno::ENOSYS)),
+        numbers::MODULE_INSERT => module::module_insert,
+        numbers::MODULE_REMOVE => sys_unimpl!("module_remove", Err(Errno::ENOSYS)),
 
-        _ => {
+        num => {
             warn!("Unknown syscall {num}");
-            Err(Errno::ENOSYS)
+            frame.set_return(0, Errno::ENOSYS as usize);
+            return;
         }
     };
 
-    match result {
-        Ok(x) => return (x, 0),
-        Err(x) => return (0, x as usize),
-    }
+    handler(frame);
 }

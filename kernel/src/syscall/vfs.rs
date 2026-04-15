@@ -13,10 +13,12 @@ use crate::{
         fs,
         inode::{INode, Mode, NodeOps},
     },
+    wrap_syscall,
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[wrap_syscall]
 pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
@@ -33,6 +35,7 @@ pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isiz
     file.pread(&mut iter, offset as _)
 }
 
+#[wrap_syscall]
 pub fn readv(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
@@ -54,6 +57,7 @@ pub fn readv(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
     file.read(&mut iter)
 }
 
+#[wrap_syscall]
 pub fn pwrite(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
@@ -70,6 +74,7 @@ pub fn pwrite(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isi
     file.pwrite(&mut iter, offset as _)
 }
 
+#[wrap_syscall]
 pub fn writev(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
     let file = {
         let proc = Scheduler::get_current().get_process();
@@ -91,6 +96,7 @@ pub fn writev(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
     file.write(&mut iter)
 }
 
+#[wrap_syscall]
 pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i32> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -137,6 +143,7 @@ pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i3
         .ok_or(Errno::EMFILE)
 }
 
+#[wrap_syscall]
 pub fn seek(fd: i32, offset: usize, whence: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
@@ -149,6 +156,7 @@ pub fn seek(fd: i32, offset: usize, whence: usize) -> EResult<usize> {
     file.seek(anchor).map(|x| x as _)
 }
 
+#[wrap_syscall]
 pub fn close(fd: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let mut proc_inner = proc.open_files.lock();
@@ -157,6 +165,7 @@ pub fn close(fd: i32) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn ioctl(fd: i32, request: usize, arg: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let proc_inner = proc.open_files.lock();
@@ -166,6 +175,7 @@ pub fn ioctl(fd: i32, request: usize, arg: VirtAddr) -> EResult<usize> {
     file.ioctl(request, arg)
 }
 
+#[wrap_syscall]
 pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
     let mut user_buf = UserPtr::new(user_buf);
     let proc = Scheduler::get_current().get_process();
@@ -238,6 +248,7 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
         .ok_or(Errno::EFAULT)
 }
 
+#[wrap_syscall]
 pub fn fstat(fd: i32, statbuf: VirtAddr) -> EResult<()> {
     let mut statbuf = UserPtr::new(statbuf);
     let proc = Scheduler::get_current().get_process();
@@ -251,6 +262,7 @@ pub fn fstat(fd: i32, statbuf: VirtAddr) -> EResult<()> {
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn fstatat(at: i32, path: VirtAddr, statbuf: VirtAddr, flags: usize) -> EResult<()> {
     let mut statbuf: UserPtr<stat> = UserPtr::new(statbuf);
     let path = UserCStr::new(path);
@@ -291,6 +303,7 @@ pub fn fstatat(at: i32, path: VirtAddr, statbuf: VirtAddr, flags: usize) -> ERes
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn dup(fd: i32) -> EResult<i32> {
     let proc = Scheduler::get_current().get_process();
     let mut proc_inner = proc.open_files.lock();
@@ -298,6 +311,7 @@ pub fn dup(fd: i32) -> EResult<i32> {
     proc_inner.open_file(file, fd).ok_or(Errno::EMFILE)
 }
 
+#[wrap_syscall]
 pub fn dup3(fd1: i32, fd2: i32, flags: usize) -> EResult<i32> {
     if fd1 == fd2 {
         return Ok(fd1);
@@ -319,6 +333,7 @@ pub fn dup3(fd1: i32, fd2: i32, flags: usize) -> EResult<i32> {
     proc_inner.open_file(file, fd2).ok_or(Errno::EMFILE)
 }
 
+#[wrap_syscall]
 pub fn mkdirat(fd: i32, path: VirtAddr, mode: mode_t) -> EResult<i32> {
     let path = UserCStr::new(path);
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
@@ -348,6 +363,7 @@ pub fn mkdirat(fd: i32, path: VirtAddr, mode: mode_t) -> EResult<i32> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn chdir(path: VirtAddr) -> EResult<()> {
     let path = UserCStr::new(path);
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
@@ -367,6 +383,7 @@ pub fn chdir(path: VirtAddr) -> EResult<()> {
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn fchdir(fd: i32) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let mut cwd = proc.working_dir.lock();
@@ -376,6 +393,7 @@ pub fn fchdir(fd: i32) -> EResult<()> {
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
     if len == 0 {
         return Err(Errno::EINVAL);
@@ -410,6 +428,7 @@ pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
     Ok(to_write * size_of::<dirent>())
 }
 
+#[wrap_syscall]
 pub fn fcntl(fd: i32, cmd: usize, arg: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let mut proc_inner = proc.open_files.lock();
@@ -499,6 +518,7 @@ pub fn fcntl(fd: i32, cmd: usize, arg: usize) -> EResult<usize> {
     }
 }
 
+#[wrap_syscall]
 pub fn ppoll(
     fds_ptr: VirtAddr,
     nfds: usize,
@@ -627,6 +647,7 @@ pub fn ppoll(
     }
 }
 
+#[wrap_syscall]
 pub fn pipe(filedes: VirtAddr) -> EResult<()> {
     let mut filedes = UserPtr::<[i32; 2]>::new(filedes);
     let fds = {
@@ -658,6 +679,7 @@ pub fn pipe(filedes: VirtAddr) -> EResult<()> {
     filedes.write(fds).ok_or(Errno::EFAULT)
 }
 
+#[wrap_syscall]
 pub fn faccessat(fd: i32, path: VirtAddr, amode: usize, flag: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -703,6 +725,7 @@ pub fn faccessat(fd: i32, path: VirtAddr, amode: usize, flag: usize) -> EResult<
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn statvfs(path: VirtAddr, buf: VirtAddr) -> EResult<()> {
     let mut buf: UserPtr<statvfs> = UserPtr::new(buf);
     let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
@@ -726,6 +749,7 @@ pub fn statvfs(path: VirtAddr, buf: VirtAddr) -> EResult<()> {
     buf.write(result).ok_or(Errno::EFAULT)
 }
 
+#[wrap_syscall]
 pub fn fstatvfs(fd: i32, buf: VirtAddr) -> EResult<()> {
     let mut buf: UserPtr<statvfs> = UserPtr::new(buf);
     let proc = Scheduler::get_current().get_process();
@@ -739,6 +763,7 @@ pub fn fstatvfs(fd: i32, buf: VirtAddr) -> EResult<()> {
     buf.write(result).ok_or(Errno::EFAULT)
 }
 
+#[wrap_syscall]
 pub fn renameat(old_fd: i32, old_path: VirtAddr, new_fd: i32, new_path: VirtAddr) -> EResult<()> {
     if old_path == VirtAddr::null() || new_path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -820,6 +845,7 @@ pub fn renameat(old_fd: i32, old_path: VirtAddr, new_fd: i32, new_path: VirtAddr
     }
 }
 
+#[wrap_syscall]
 pub fn fchmod(fd: i32, mode: mode_t) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let files = proc.open_files.lock();
@@ -830,6 +856,7 @@ pub fn fchmod(fd: i32, mode: mode_t) -> EResult<()> {
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn fchmodat(fd: i32, path: VirtAddr, mode: mode_t, flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -873,6 +900,7 @@ pub fn fchmodat(fd: i32, path: VirtAddr, mode: mode_t, flags: usize) -> EResult<
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -916,6 +944,7 @@ pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> ER
     Ok(())
 }
 
+#[wrap_syscall]
 pub fn unlinkat(fd: i32, path: VirtAddr, _flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -954,6 +983,7 @@ pub fn unlinkat(fd: i32, path: VirtAddr, _flags: usize) -> EResult<()> {
     }
 }
 
+#[wrap_syscall]
 pub fn linkat(
     old_fd: i32,
     old_path: VirtAddr,
@@ -1043,6 +1073,7 @@ pub fn linkat(
     }
 }
 
+#[wrap_syscall]
 pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> EResult<isize> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
@@ -1087,6 +1118,7 @@ pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> ERe
     Ok(read as _)
 }
 
+#[wrap_syscall]
 pub fn mount(
     type_ptr: VirtAddr,
     dir_ptr: VirtAddr,
@@ -1121,6 +1153,7 @@ pub fn mount(
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn chroot(path: VirtAddr) -> EResult<usize> {
     let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
@@ -1149,6 +1182,7 @@ pub fn chroot(path: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn umount(dir_ptr: VirtAddr, _flags: u32) -> EResult<usize> {
     let dir = UserCStr::new(dir_ptr)
         .as_vec(PATH_MAX)

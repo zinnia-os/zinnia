@@ -6,10 +6,12 @@ use crate::{
     uapi,
     util::align_up,
     vfs::file::MmapFlags,
+    wrap_syscall,
 };
 use core::num::NonZeroUsize;
 use uapi::mman::*;
 
+#[wrap_syscall]
 pub fn mmap(
     addr: VirtAddr,
     length: usize,
@@ -67,6 +69,7 @@ pub fn mmap(
     .map(|x| x.value())
 }
 
+#[wrap_syscall]
 pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
     let mut vm_prot = VmFlags::empty();
     vm_prot.set(VmFlags::Read, prot & PROT_READ != 0);
@@ -83,6 +86,7 @@ pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn munmap(addr: VirtAddr, size: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     proc.address_space

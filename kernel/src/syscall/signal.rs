@@ -7,10 +7,11 @@ use crate::{
         signal::{self, SigAction, Signal, SignalSet},
     },
     sched::Scheduler,
-    uapi,
+    uapi, wrap_syscall,
 };
 use alloc::sync::Arc;
 
+#[wrap_syscall]
 pub fn sigaction(sig: u32, act_ptr: VirtAddr, oact_ptr: VirtAddr) -> EResult<usize> {
     let sig = Signal::from_raw(sig).ok_or(Errno::EINVAL)?;
 
@@ -39,6 +40,7 @@ pub fn sigaction(sig: u32, act_ptr: VirtAddr, oact_ptr: VirtAddr) -> EResult<usi
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<usize> {
     let task = Scheduler::get_current();
     let mut sig_state = task.signal.lock();
@@ -76,6 +78,7 @@ pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<
     Ok(0)
 }
 
+#[wrap_syscall]
 pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
     let sig_num = sig as u32;
 
