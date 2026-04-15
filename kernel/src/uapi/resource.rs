@@ -19,9 +19,9 @@ pub const RLIMIT_RTPRIO: u32 = 14;
 pub const RLIMIT_RTTIME: u32 = 15;
 pub const RLIMIT_NLIMITS: u32 = 16;
 
-pub const PRIO_PROCESS: u32 = 1;
-pub const PRIO_PGRP: u32 = 2;
-pub const PRIO_USER: u32 = 3;
+pub const PRIO_PROCESS: u32 = 0;
+pub const PRIO_PGRP: u32 = 1;
+pub const PRIO_USER: u32 = 2;
 
 pub const PRIO_MIN: u32 = -20i32 as u32;
 pub const PRIO_MAX: u32 = 20;

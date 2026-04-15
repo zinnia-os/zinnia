@@ -117,11 +117,12 @@ pub union sigval {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct sigevent {
+    pub sigev_value: sigval,
     pub sigev_notify: i32,
     pub sigev_signo: i32,
-    pub sigev_value: sigval,
     pub sigev_notify_function: Option<extern "C" fn(sigval)>,
     pub sigev_notify_attributes: UserPtr<super::pthread_attr_t>,
+    pub sigev_notify_thread_id: super::pid_t,
 }
 
 #[repr(C)]
