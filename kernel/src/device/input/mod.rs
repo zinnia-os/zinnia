@@ -183,6 +183,32 @@ impl FileOps for EventDevice {
                 }
                 Ok(copy_len)
             }
+            // EVIOCGPHYS(len) / EVIOCGUNIQ(len)
+            0x07 | 0x08 => {
+                if size > 0 {
+                    let mut ptr: UserPtr<u8> = UserPtr::new(arg);
+                    ptr.write(0u8).ok_or(Errno::EFAULT)?;
+                }
+                Ok(0)
+            }
+            // EVIOCGPROP(len) — device properties bitmap (none)
+            0x09 => {
+                let zeros = vec![0u8; size];
+                if size > 0 {
+                    let mut ptr: UserPtr<u8> = UserPtr::new(arg);
+                    ptr.write_slice(&zeros).ok_or(Errno::EFAULT)?;
+                }
+                Ok(size)
+            }
+            // EVIOCGKEY | EVIOCGLED | EVIOCGSND | EVIOCGSW
+            0x18..=0x1b => {
+                let zeros = vec![0u8; size];
+                if size > 0 {
+                    let mut ptr: UserPtr<u8> = UserPtr::new(arg);
+                    ptr.write_slice(&zeros).ok_or(Errno::EFAULT)?;
+                }
+                Ok(size)
+            }
             // EVIOCGBIT(ev, len)
             nr if nr >= 0x20 && nr < 0x40 => {
                 let ev_type = nr - 0x20;
@@ -218,7 +244,10 @@ impl FileOps for EventDevice {
                 ptr.write_slice(&out[..copy_len]).ok_or(Errno::EFAULT)?;
                 Ok(copy_len)
             }
-            _ => Err(Errno::ENOTTY),
+            _ => {
+                warn!("unhandled evdev ioctl {:#x}", nr);
+                Err(Errno::ENOTTY)
+            }
         }
     }
 
