@@ -121,6 +121,7 @@ pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i3
             .clone()
     };
 
+    let umask = proc.umask.load(core::sync::atomic::Ordering::Relaxed);
     let file = File::open(
         proc.root_dir.lock().clone(),
         parent,
@@ -128,7 +129,7 @@ pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i3
         // O_CLOEXEC doesn't apply to a file, but rather its individual FD.
         // This means that dup'ing a file doesn't share this flag.
         oflag & !OpenFlags::CloseOnExec,
-        Mode::from_bits_truncate(mode),
+        Mode::from_bits_truncate(mode & !umask),
         &proc.identity.lock(),
     )?;
 
@@ -352,11 +353,12 @@ pub fn mkdirat(fd: i32, path: VirtAddr, mode: mode_t) -> EResult<i32> {
             .ok_or(Errno::ENOTDIR)?
             .clone()
     };
+    let umask = proc.umask.load(core::sync::atomic::Ordering::Relaxed);
     vfs::mkdir(
         proc.root_dir.lock().clone(),
         parent,
         &v,
-        Mode::from_bits(mode).ok_or(Errno::EINVAL)?,
+        Mode::from_bits_truncate(mode & !umask),
         &proc.identity.lock(),
     )?;
 

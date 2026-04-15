@@ -243,7 +243,7 @@ pub fn dispatch(frame: &mut Context) {
         numbers::SETRESGID => sys_unimpl!("setresgid", Err(Errno::ENOSYS)),
         numbers::SETREUID => sys_unimpl!("setreuid", Err(Errno::ENOSYS)),
         numbers::SETREGID => sys_unimpl!("setregid", Err(Errno::ENOSYS)),
-        numbers::UMASK => sys_unimpl!("umask", Err(Errno::ENOSYS)),
+        numbers::UMASK => process::umask,
 
         // Limits
         numbers::GETRUSAGE => sys_unimpl!("getrusage", Err(Errno::ENOSYS)),

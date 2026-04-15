@@ -31,7 +31,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 /// A unique process ID.
 pub type Pid = usize;
@@ -89,6 +89,8 @@ pub struct Process {
     /// Latched when a stopped process is continued; cleared when a waiter
     /// observes it via WCONTINUED.
     pub continue_unwaited: AtomicBool,
+    /// File mode creation mask.
+    pub umask: AtomicU32,
 }
 
 impl Process {
@@ -152,6 +154,7 @@ impl Process {
             cont_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
+            umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
         });
 
         // Create a heap allocated context that we can pass to the entry point.
@@ -226,6 +229,7 @@ impl Process {
             cont_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
+            umask: AtomicU32::new(0o022),
         })
     }
 

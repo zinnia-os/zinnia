@@ -11,7 +11,8 @@ use crate::{
     },
     sched::Scheduler,
     uapi::{self, limits::PATH_MAX, uid_t},
-    vfs::{File, file::OpenFlags, inode::Mode}, wrap_syscall,
+    vfs::{File, file::OpenFlags, inode::Mode},
+    wrap_syscall,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -448,6 +449,14 @@ pub fn thread_setname(tid: usize, name_ptr: VirtAddr) -> EResult<usize> {
     let name = String::from_utf8(name_bytes).map_err(|_| Errno::EINVAL)?;
     *thread.name.lock() = name;
     Ok(0)
+}
+
+#[wrap_syscall]
+pub fn umask(mask: usize) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    // Only the permission bits are meaningful.
+    let new_mask = (mask as u32) & 0o777;
+    Ok(proc.umask.swap(new_mask, Ordering::Relaxed) as usize)
 }
 
 #[wrap_syscall]
