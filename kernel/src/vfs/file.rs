@@ -462,7 +462,11 @@ impl File {
                 *position = x;
                 Ok(x)
             }
-            SeekAnchor::Current(x) => position.checked_add_signed(x).ok_or(Errno::EOVERFLOW),
+            SeekAnchor::Current(x) => {
+                let new = position.checked_add_signed(x).ok_or(Errno::EOVERFLOW)?;
+                *position = new;
+                Ok(new)
+            }
             SeekAnchor::End(x) => {
                 let size = self.inode.as_ref().ok_or(Errno::EINVAL)?.size.lock();
 

@@ -58,7 +58,7 @@ impl ExecFormat for ShebangFormat {
                 cwd.clone(),
                 interp_path,
                 OpenFlags::Read | OpenFlags::Executable,
-                Mode::UserRead | Mode::UserExec,
+                Mode::empty(),
                 &identity,
             )?;
         }
