@@ -422,6 +422,11 @@ pub(in crate::arch) fn restore_signal_frame(context: &mut Context) {
     // Restore the saved context.
     *context = frame.saved_context;
 
+    // Make sure the user doesn't do anything funky with the context.
+    context.cs = offset_of!(Gdt, user_code64) as u64 | consts::CPL_USER as u64;
+    context.ss = offset_of!(Gdt, user_data) as u64 | consts::CPL_USER as u64;
+    context.rflags = (frame.saved_context.rflags & 0xDD5) | 0x202;
+
     // Restore the signal mask.
     let task = Scheduler::get_current();
     let mut sig_state = task.signal.lock();
