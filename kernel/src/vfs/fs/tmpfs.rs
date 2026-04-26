@@ -19,7 +19,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[derive(Debug)]
@@ -105,6 +105,7 @@ impl DirectoryOps for TmpDir {
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
             offset: SpinMutex::new(0),
+            released: AtomicBool::new(false),
         };
         return Ok(Arc::try_new(file)?);
     }
@@ -250,8 +251,8 @@ impl TmpRegular {
 
 impl RegularOps for TmpRegular {
     fn truncate(&self, node: &INode, length: u64) -> EResult<()> {
-        let _ = (node, length);
-        todo!()
+        *node.size.lock() = length as usize;
+        Ok(())
     }
 }
 
@@ -280,7 +281,7 @@ impl FileOps for TmpRegular {
         let mut v = vec![0u8; buffer.len()];
         buffer.copy_to_slice(&mut v)?;
         let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, start as usize);
-        *size_lock = actual;
+        *size_lock = (*size_lock).max(start as usize + actual);
 
         Ok(actual as _)
     }
