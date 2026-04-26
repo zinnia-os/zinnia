@@ -74,6 +74,12 @@ impl<T: Copy> SyscallArg for UserPtr<T> {
     }
 }
 
+impl SyscallArg for UserCStr {
+    fn from_usize(arg: usize) -> EResult<UserCStr> {
+        Ok(UserCStr::new(VirtAddr::new(arg)))
+    }
+}
+
 #[macro_export]
 macro_rules! wrap_syscall {
     attr() {
@@ -87,7 +93,7 @@ macro_rules! wrap_syscall {
             fn inner($($arg : $arg_ty),*) -> $ret $body
 
             fn inner_wrapper(ctx: &mut $crate::arch::sched::Context) -> $ret {
-                inner(
+                let ($($arg),*) = (
                     $(
                         paste::paste! {
                             <$arg_ty as $crate::syscall::SyscallArg>::from_usize(
@@ -95,7 +101,19 @@ macro_rules! wrap_syscall {
                             )?
                         }
                     ),*
-                )
+                );
+
+                #[cfg(feature = "syscall_log")]
+                $crate::log!(
+                    concat!(stringify!($name), " called with args:", $(" ", stringify!($arg), "={:?}"),*),
+                    $($arg),*
+                );
+
+                let result = inner($($arg),*);
+                #[cfg(feature = "syscall_log")]
+                $crate::log!("-> {:?}", result);
+                result
+
             }
 
             $crate::syscall::SyscallReturn::into_ctx(inner_wrapper(ctx), ctx);
@@ -106,18 +124,18 @@ macro_rules! wrap_syscall {
 macro_rules! sys_unimpl {
     ($name:expr, $ret:expr) => {{
         #[wrap_syscall]
-        fn do_unimplemented() -> $crate::posix::errno::EResult<usize> {
+        fn unimp() -> $crate::posix::errno::EResult<usize> {
             $crate::warn!("Call to unimplemented syscall {}", $name);
             $ret
         }
-        do_unimplemented
+        unimp
     }};
 }
 
 /// Executes the syscall as identified by `num`.
 /// Returns a tuple of (value, error) to the user. An error code of 0 inidcates success.
 /// If the error code is not 0, `value` is not valid and indicates failure.
-pub fn dispatch(frame: &mut Context) {
+pub(crate) fn dispatch(frame: &mut Context) {
     let handler: fn(&mut Context) = match frame.syscall_number() {
         // System control
         numbers::SYSLOG => system::syslog,
