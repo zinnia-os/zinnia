@@ -1,4 +1,7 @@
-use crate::memory::UserPtr;
+use crate::{
+    memory::UserPtr,
+    uapi::fcntl::{O_CLOEXEC, O_NONBLOCK},
+};
 
 pub const POLL_IN: u32 = 1;
 pub const POLL_OUT: u32 = 2;
@@ -154,3 +157,35 @@ pub struct sigaction {
     pub sa_restorer: usize,
     pub sa_mask: sigset_t,
 }
+
+pub const SFD_CLOEXEC: u32 = O_CLOEXEC;
+pub const SFD_NONBLOCK: u32 = O_NONBLOCK;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct signalfd_siginfo {
+    pub ssi_signo: u32,
+    pub ssi_errno: i32,
+    pub ssi_code: i32,
+    pub ssi_pid: u32,
+    pub ssi_uid: u32,
+    pub ssi_fd: i32,
+    pub ssi_tid: u32,
+    pub ssi_band: u32,
+    pub ssi_overrun: u32,
+    pub ssi_trapno: u32,
+    pub ssi_status: i32,
+    pub ssi_int: i32,
+    pub ssi_ptr: u64,
+    pub ssi_utime: u64,
+    pub ssi_stime: u64,
+    pub ssi_addr: u64,
+    pub ssi_addr_lsb: u16,
+    pub __pad2: u16,
+    pub ssi_syscall: i32,
+    pub ssi_call_addr: u64,
+    pub ssi_arch: u32,
+    pub __pad: [u8; 28],
+}
+
+const _: () = assert!(core::mem::size_of::<signalfd_siginfo>() == 128);
