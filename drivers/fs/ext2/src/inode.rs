@@ -2,7 +2,7 @@ use super::{Ext2Super, structs::*};
 use zinnia::{
     alloc::{sync::Arc, vec, vec::Vec},
     arch,
-    core::{fmt::Debug, num::NonZeroUsize},
+    core::{fmt::Debug, num::NonZeroUsize, sync::atomic::AtomicBool},
     memory::{
         AddressSpace, IovecIter, PagedMemoryObject, VirtAddr, VmFlags,
         cache::{MemoryObject, Pager, PagerError},
@@ -560,6 +560,7 @@ impl DirectoryOps for Ext2Dir {
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
             offset: SpinMutex::new(0),
+            released: AtomicBool::new(false),
         };
         Ok(Arc::new(file))
     }

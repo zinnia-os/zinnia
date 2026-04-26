@@ -81,6 +81,7 @@ pub struct File {
     pub flags: SpinMutex<OpenFlags>,
     /// Byte offset into the file.
     pub offset: SpinMutex<u64>,
+    pub released: AtomicBool,
 }
 
 pub struct FileDescription {
@@ -172,6 +173,15 @@ impl Clone for FileDescription {
     }
 }
 
+impl FileDescription {
+    pub fn duplicate(&self, close_on_exec: bool) -> Self {
+        Self {
+            file: self.file.clone(),
+            close_on_exec: AtomicBool::new(close_on_exec),
+        }
+    }
+}
+
 /// Operations that can be performed on a file. Every trait function has a
 /// generic implementation, which treats it as unimplemented.
 /// Inputs have been sanitized when these functions are called.
@@ -182,7 +192,7 @@ pub trait FileOps: Sync + Send + Any {
         Ok(())
     }
 
-    /// Called when the file is being closed.
+    /// Called when the last reference to the file is being dropped.
     fn release(&self, file: &File) -> EResult<()> {
         let _ = file;
         Ok(())
@@ -238,6 +248,17 @@ pub trait FileOps: Sync + Send + Any {
 }
 
 impl File {
+    fn release_once(&self) -> EResult<()> {
+        if self
+            .released
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.ops.release(self)?;
+        }
+        Ok(())
+    }
+
     /// Opens a file referenced by a path.
     pub fn open(
         root: PathNode,
@@ -263,7 +284,9 @@ impl File {
         if flags.contains(OpenFlags::Exclusive) {
             lookup_flags |= LookupFlags::MustNotExist;
         }
-        if !flags.intersects(OpenFlags::Exclusive | OpenFlags::NoFollow) {
+        if !flags.contains(OpenFlags::NoFollow)
+            && !flags.contains(OpenFlags::Create | OpenFlags::Exclusive)
+        {
             lookup_flags |= LookupFlags::FollowSymlinks;
         }
 
@@ -306,6 +329,7 @@ impl File {
                     inode: Some(file_node),
                     flags: SpinMutex::new(flags),
                     offset: SpinMutex::new(0),
+                    released: AtomicBool::new(false),
                 };
                 result.ops.acquire(&result, flags)?;
                 Ok(Arc::try_new(result)?)
@@ -320,6 +344,7 @@ impl File {
             inode: None,
             flags: SpinMutex::new(flags),
             offset: SpinMutex::new(0),
+            released: AtomicBool::new(false),
         };
 
         file.ops.acquire(&file, flags)?;
@@ -349,6 +374,7 @@ impl File {
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     offset: SpinMutex::new(0),
+                    released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
             }
@@ -360,6 +386,7 @@ impl File {
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     offset: SpinMutex::new(0),
+                    released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
             }
@@ -370,6 +397,7 @@ impl File {
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     offset: SpinMutex::new(0),
+                    released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
             }
@@ -499,7 +527,12 @@ impl File {
     }
 
     pub fn close(&self) -> EResult<()> {
-        self.ops.release(self)?;
-        Ok(())
+        self.release_once()
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        _ = self.release_once();
     }
 }
