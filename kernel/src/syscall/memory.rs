@@ -89,8 +89,14 @@ pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
 #[wrap_syscall]
 pub fn munmap(addr: VirtAddr, size: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-    proc.address_space
-        .lock()
+    let mut space = proc.address_space.lock();
+    space
         .unmap(addr, NonZeroUsize::new(size).ok_or(Errno::EINVAL)?)
         .map(|_| 0)
+}
+
+#[wrap_syscall]
+pub fn msync(_addr: VirtAddr, _size: usize, _flags: i32) -> EResult<usize> {
+    // TODO
+    Ok(0)
 }

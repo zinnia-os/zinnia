@@ -302,11 +302,12 @@ pub(in crate::arch) unsafe fn preempt_enable() -> bool {
 
 pub unsafe fn remote_reschedule(cpu: u32) {
     let lapic = LAPIC.get();
+    let target_lapic_id = LAPIC.get_for(CpuData::get_for(cpu).unwrap()).cached_id();
     lapic.send_ipi(
-        apic::IpiTarget::Specific(cpu),
+        apic::IpiTarget::Specific(target_lapic_id),
         consts::IDT_IPI_RESCHED,
         apic::DeliveryMode::Fixed,
-        apic::DestinationMode::Logical,
+        apic::DestinationMode::Physical,
         apic::DeliveryStatus::Pending,
         apic::Level::Assert,
         apic::TriggerMode::Edge,

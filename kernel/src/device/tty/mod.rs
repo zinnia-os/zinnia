@@ -4,7 +4,7 @@ use crate::{
     clock,
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    process::{self, Identity, Pid, signal::Signal},
+    process::{self, Identity, signal::Signal},
     sched::Scheduler,
     uapi::{self, termios::*},
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub trait TtyDriver: Send + Sync {
     fn write_output(&self, data: &[u8]);
@@ -73,11 +73,23 @@ impl LineDiscipline {
         self.termios.c_cc[idx as usize]
     }
 
-    fn echo(&self, data: &[u8], tty: &Tty) {
-        self.write_output(data, &*tty.driver);
+    fn append_output(&self, data: &[u8], out: &mut Vec<u8>) {
+        if self.termios.c_oflag & OPOST == 0 {
+            out.extend_from_slice(data);
+            return;
+        }
+
+        for &byte in data {
+            if byte == b'\n' && self.termios.c_oflag & ONLCR != 0 {
+                out.extend_from_slice(b"\r\n");
+            } else {
+                out.push(byte);
+            }
+        }
     }
 
-    pub fn input_char(&mut self, mut byte: u8, tty: &Tty) {
+    pub fn input_char(&mut self, mut byte: u8, tty: &Tty) -> Vec<u8> {
+        let mut output = Vec::new();
         if self.is_icrnl() && byte == b'\r' {
             byte = b'\n';
         }
@@ -87,38 +99,39 @@ impl LineDiscipline {
             if byte == self.cc(VINTR) {
                 tty.signal_foreground(Signal::SigInt);
                 if self.is_echo() {
-                    self.echo(b"^C\n", tty);
+                    self.append_output(b"^C\n", &mut output);
                 }
-                return;
+                return output;
             }
             if byte == self.cc(VQUIT) {
                 tty.signal_foreground(Signal::SigQuit);
                 if self.is_echo() {
-                    self.echo(b"^\\\n", tty);
+                    self.append_output(b"^\\\n", &mut output);
                 }
-                return;
+                return output;
             }
             if byte == self.cc(VSUSP) {
                 tty.signal_foreground(Signal::SigTstp);
                 if self.is_echo() {
-                    self.echo(b"^Z\n", tty);
+                    self.append_output(b"^Z\n", &mut output);
                 }
-                return;
+                return output;
             }
         }
 
         if self.is_canon() {
-            self.input_canon(byte, tty);
+            self.input_canon(byte, tty, &mut output);
         } else {
-            self.input_raw(byte, tty);
+            self.input_raw(byte, tty, &mut output);
         }
+        output
     }
 
-    fn input_canon(&mut self, byte: u8, tty: &Tty) {
+    fn input_canon(&mut self, byte: u8, tty: &Tty, output: &mut Vec<u8>) {
         if byte == self.cc(VERASE) {
             if let Some(_) = self.canon_buf.pop() {
                 if self.is_echo() && self.is_echoe() {
-                    self.echo(b"\x08 \x08", tty);
+                    self.append_output(b"\x08 \x08", output);
                 }
             }
             return;
@@ -127,7 +140,7 @@ impl LineDiscipline {
         if byte == self.cc(VKILL) {
             if self.is_echo() {
                 for _ in 0..self.canon_buf.len() {
-                    self.echo(b"\x08 \x08", tty);
+                    self.append_output(b"\x08 \x08", output);
                 }
             }
             self.canon_buf.clear();
@@ -146,7 +159,7 @@ impl LineDiscipline {
         }
 
         if self.is_echo() {
-            self.echo(&[byte], tty);
+            self.append_output(&[byte], output);
         }
 
         if byte == b'\n' || byte == self.cc(VEOL) {
@@ -156,10 +169,10 @@ impl LineDiscipline {
         }
     }
 
-    fn input_raw(&mut self, byte: u8, tty: &Tty) {
+    fn input_raw(&mut self, byte: u8, tty: &Tty, output: &mut Vec<u8>) {
         self.read_buf.write(&[byte]);
         if self.is_echo() {
-            self.echo(&[byte], tty);
+            self.append_output(&[byte], output);
         }
         tty.rd_event.wake_all();
     }
@@ -172,19 +185,10 @@ impl LineDiscipline {
         self.read_buf.read(buf)
     }
 
-    pub fn write_output(&self, data: &[u8], driver: &dyn TtyDriver) {
-        if self.termios.c_oflag & OPOST == 0 {
-            driver.write_output(data);
-            return;
-        }
-
-        for &byte in data {
-            if byte == b'\n' && self.termios.c_oflag & ONLCR != 0 {
-                driver.write_output(b"\r\n");
-            } else {
-                driver.write_output(&[byte]);
-            }
-        }
+    pub fn write_output(&self, data: &[u8]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(data.len());
+        self.append_output(data, &mut output);
+        output
     }
 }
 
@@ -222,9 +226,10 @@ pub struct Tty {
     pub ldisc: SpinMutex<LineDiscipline>,
     pub driver: Arc<dyn TtyDriver>,
     pub winsize: SpinMutex<winsize>,
-    pub foreground_pgrp: SpinMutex<Option<Pid>>,
-    pub session: SpinMutex<Option<Pid>>,
+    pub foreground_pgrp: SpinMutex<Option<uapi::pid_t>>,
+    pub session: SpinMutex<Option<uapi::pid_t>>,
     pub rd_event: Event,
+    pub hangup: AtomicBool,
 }
 
 impl Tty {
@@ -241,15 +246,34 @@ impl Tty {
             foreground_pgrp: SpinMutex::new(None),
             session: SpinMutex::new(None),
             rd_event: Event::new(),
+            hangup: AtomicBool::new(false),
         });
         TTYS.lock().insert(index, tty.clone());
         tty
     }
 
+    /// Mark the TTY as hung up and wake all blocked readers.
+    /// Subsequent writes return EIO and reads return EOF once the ldisc buffer is drained.
+    pub fn hangup(&self) {
+        self.hangup.store(true, Ordering::Release);
+        self.rd_event.wake_all();
+    }
+
+    pub fn is_hung_up(&self) -> bool {
+        self.hangup.load(Ordering::Acquire)
+    }
+
     /// Feed a byte from the hardware into the line discipline.
     /// Typically called from an IRQ handler.
     pub fn input_byte(&self, byte: u8) {
-        self.ldisc.lock().input_char(byte, self);
+        let output = self.input_byte_internal(byte);
+        if !output.is_empty() {
+            self.driver.write_output(&output);
+        }
+    }
+
+    pub fn input_byte_internal(&self, byte: u8) -> Vec<u8> {
+        self.ldisc.lock().input_char(byte, self)
     }
 
     /// Send a signal to the foreground process group, if any.
@@ -261,6 +285,11 @@ impl Tty {
 
     /// Register this TTY as a character device under `/dev/{name}`.
     pub fn register_device(self: Arc<Self>) -> EResult<()> {
+        let ops: Arc<dyn FileOps> = Arc::new(TtyFileOps { tty: self.clone() });
+        self.register_device_with_ops(ops)
+    }
+
+    pub fn register_device_with_ops(self: Arc<Self>, ops: Arc<dyn FileOps>) -> EResult<()> {
         let dev_name = self.as_ref().name.as_bytes();
         let root = devtmpfs::get_root();
 
@@ -269,9 +298,7 @@ impl Tty {
             root,
             dev_name,
             Mode::from_bits_truncate(0o666),
-            Some(Device::CharacterDevice(Arc::new(TtyFileOps {
-                tty: self.clone(),
-            }))),
+            Some(Device::CharacterDevice(ops)),
             &Identity::get_kernel(),
         )
     }
@@ -300,6 +327,9 @@ impl FileOps for TtyFileOps {
             let mut ldisc = self.tty.ldisc.lock();
             let avail = ldisc.read_available();
             if avail == 0 {
+                if self.tty.is_hung_up() {
+                    return Ok(0);
+                }
                 return Err(Errno::EAGAIN);
             }
 
@@ -335,8 +365,12 @@ impl FileOps for TtyFileOps {
                     return Ok(n as isize);
                 }
 
+                if self.tty.is_hung_up() {
+                    return Ok(0); // EOF, other end hung up.
+                }
+
                 if woken {
-                    return Ok(0); // EOF — VEOF with empty line.
+                    return Ok(0); // EOF, VEOF with empty line.
                 }
 
                 drop(ldisc);
@@ -347,7 +381,6 @@ impl FileOps for TtyFileOps {
                 woken = true;
             }
         } else if vmin == 0 && vtime == 0 {
-            // Raw, MIN=0 TIME=0: poll — return whatever is available (or 0).
             let mut ldisc = self.tty.ldisc.lock();
             let avail = ldisc.read_available();
             if avail == 0 {
@@ -359,7 +392,6 @@ impl FileOps for TtyFileOps {
             buffer.copy_from_slice(&tmp[..n])?;
             Ok(n as isize)
         } else if vmin > 0 && vtime == 0 {
-            // Raw, MIN>0 TIME=0: block until at least VMIN chars (or requested) are available.
             let target = core::cmp::min(vmin, buffer.len());
             loop {
                 let guard = self.tty.rd_event.guard();
@@ -372,6 +404,18 @@ impl FileOps for TtyFileOps {
                     let n = ldisc.read_into(&mut tmp);
                     buffer.copy_from_slice(&tmp[..n])?;
                     return Ok(n as isize);
+                }
+
+                if self.tty.is_hung_up() {
+                    // Return whatever is buffered (possibly 0) as EOF.
+                    let len = core::cmp::min(avail, buffer.len());
+                    if len > 0 {
+                        let mut tmp = vec![0u8; len];
+                        let n = ldisc.read_into(&mut tmp);
+                        buffer.copy_from_slice(&tmp[..n])?;
+                        return Ok(n as isize);
+                    }
+                    return Ok(0);
                 }
 
                 drop(ldisc);
@@ -396,8 +440,8 @@ impl FileOps for TtyFileOps {
                     return Ok(n as isize);
                 }
 
-                if clock::get_elapsed() >= deadline {
-                    return Ok(0); // Timer expired, no data.
+                if self.tty.is_hung_up() || clock::get_elapsed() >= deadline {
+                    return Ok(0); // Timer expired or hangup, no data.
                 }
 
                 drop(ldisc);
@@ -440,6 +484,10 @@ impl FileOps for TtyFileOps {
                     }
                 }
 
+                if self.tty.is_hung_up() {
+                    return Ok(bytes_read as isize);
+                }
+
                 drop(ldisc);
                 guard.wait();
                 if crate::sched::Scheduler::get_current().has_pending_signals() {
@@ -453,12 +501,16 @@ impl FileOps for TtyFileOps {
     }
 
     fn write(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
+        if self.tty.is_hung_up() {
+            return Err(Errno::EIO);
+        }
+
         let total = buffer.len();
         let mut data = vec![0u8; total];
         buffer.copy_to_slice(&mut data)?;
 
-        let ldisc = self.tty.ldisc.lock();
-        ldisc.write_output(&data, &*self.tty.driver);
+        let output = self.tty.ldisc.lock().write_output(&data);
+        self.tty.driver.write_output(&output);
 
         Ok(total as isize)
     }
@@ -483,8 +535,18 @@ impl FileOps for TtyFileOps {
             uapi::ioctls::TIOCSWINSZ => {
                 let ptr: UserPtr<winsize> = UserPtr::new(arg);
                 let ws = ptr.read().ok_or(Errno::EFAULT)?;
-                *self.tty.winsize.lock() = ws;
-                // TODO: Send SIGWINCH to foreground pgrp.
+                let changed = {
+                    let mut cur = self.tty.winsize.lock();
+                    let changed = cur.ws_row != ws.ws_row
+                        || cur.ws_col != ws.ws_col
+                        || cur.ws_xpixel != ws.ws_xpixel
+                        || cur.ws_ypixel != ws.ws_ypixel;
+                    *cur = ws;
+                    changed
+                };
+                if changed {
+                    self.tty.signal_foreground(Signal::SigWinch);
+                }
             }
             uapi::ioctls::TIOCGPGRP => {
                 let pgrp = self.tty.foreground_pgrp.lock().unwrap_or(0);
@@ -494,7 +556,7 @@ impl FileOps for TtyFileOps {
             uapi::ioctls::TIOCSPGRP => {
                 let ptr: UserPtr<i32> = UserPtr::new(arg);
                 let pgrp = ptr.read().ok_or(Errno::EFAULT)?;
-                *self.tty.foreground_pgrp.lock() = Some(pgrp as usize);
+                *self.tty.foreground_pgrp.lock() = Some(pgrp);
             }
             uapi::ioctls::TIOCSCTTY => {
                 let proc = Scheduler::get_current().get_process();

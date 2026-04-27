@@ -4,6 +4,7 @@ pub mod gdt;
 mod hpet;
 pub mod idt;
 mod ps2;
+mod rtc;
 mod serial;
 mod smp;
 mod tsc;

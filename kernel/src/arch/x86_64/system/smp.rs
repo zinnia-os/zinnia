@@ -232,6 +232,8 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
         (&raw mut info.booted).write_volatile(1);
     }
 
+    unsafe { crate::arch::irq::set_irq_state(true) };
+
     cpu_ctx.scheduler.do_yield();
     loop {}
 }

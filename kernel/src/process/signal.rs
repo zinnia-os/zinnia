@@ -2,9 +2,12 @@ use alloc::sync::Arc;
 
 use crate::{
     arch::sched::Context,
-    process::{Pid, Process, ProcessState, task::Task},
+    process::{Process, ProcessState, task::Task},
     sched::Scheduler,
-    uapi::signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
+    uapi::{
+        pid_t,
+        signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
+    },
 };
 use core::{ops, sync::atomic::Ordering};
 
@@ -369,6 +372,7 @@ pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
         let mut state = task.signal.lock();
         state.pending.set(sig, true);
     }
+    proc.signalfd_event.wake_all();
     Scheduler::wake_task(task.clone());
 }
 
@@ -419,7 +423,7 @@ pub fn force_signal_to_thread(task: &Task, sig: Signal) {
 }
 
 /// Send a signal to every process in the given process group.
-pub fn send_signal_to_pgrp(pgrp: Pid, sig: Signal) -> usize {
+pub fn send_signal_to_pgrp(pgrp: pid_t, sig: Signal) -> usize {
     let table = crate::process::PROCESS_TABLE.lock();
     let mut delivered = 0;
 

@@ -9,7 +9,7 @@ mod vfs;
 
 use crate::{
     arch::sched::Context,
-    memory::{UserPtr, VirtAddr},
+    memory::{UserCStr, UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
 };
 
@@ -146,8 +146,9 @@ pub(crate) fn dispatch(frame: &mut Context) {
 
         // Mapped memory
         numbers::MMAP => memory::mmap,
-        numbers::MUNMAP => sys_unimpl!("munmap", Ok(0)), // memory::munmap
+        numbers::MUNMAP => memory::munmap,
         numbers::MPROTECT => memory::mprotect,
+        numbers::MSYNC => memory::msync,
         numbers::MADVISE => sys_unimpl!("madvise", Err(Errno::ENOSYS)),
 
         // Signals
@@ -195,8 +196,8 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::FSTATVFS => vfs::fstatvfs,
         numbers::FACCESSAT => vfs::faccessat,
         numbers::FCNTL => vfs::fcntl,
-        numbers::FTRUNCATE => sys_unimpl!("ftruncate", Err(Errno::ENOSYS)),
-        numbers::FALLOCATE => sys_unimpl!("fallocate", Err(Errno::ENOSYS)),
+        numbers::FTRUNCATE => vfs::ftruncate,
+        numbers::FALLOCATE => vfs::fallocate,
         numbers::UTIMENSAT => sys_unimpl!("utimensat", Err(Errno::ENOSYS)),
         numbers::MKNODAT => sys_unimpl!("mknodat", Err(Errno::ENOSYS)),
         numbers::GETCWD => vfs::getcwd,
@@ -210,10 +211,10 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::FCHMODAT => vfs::fchmodat,
         numbers::FCHOWNAT => vfs::fchownat,
         numbers::LINKAT => vfs::linkat,
-        numbers::SYMLINKAT => sys_unimpl!("symlinkat", Err(Errno::ENOSYS)),
+        numbers::SYMLINKAT => vfs::symlinkat,
         numbers::UNLINKAT => vfs::unlinkat,
         numbers::READLINKAT => vfs::readlinkat,
-        numbers::FLOCK => sys_unimpl!("flock", Err(Errno::ENOSYS)),
+        numbers::FLOCK => vfs::flock,
         numbers::PPOLL => vfs::ppoll,
         numbers::DUP => vfs::dup,
         numbers::DUP3 => vfs::dup3,
@@ -224,6 +225,13 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::MOUNT => vfs::mount,
         numbers::UMOUNT => vfs::umount,
         numbers::PIPE => vfs::pipe,
+        numbers::EPOLL_CREATE => vfs::epoll_create,
+        numbers::EPOLL_CTL => vfs::epoll_ctl,
+        numbers::EPOLL_PWAIT => vfs::epoll_pwait,
+        numbers::TIMERFD_CREATE => vfs::timerfd_create,
+        numbers::TIMERFD_GETTIME => vfs::timerfd_gettime,
+        numbers::TIMERFD_SETTIME => vfs::timerfd_settime,
+        numbers::SIGNALFD_CREATE => vfs::signalfd_create,
 
         // Sockets
         numbers::SOCKET => socket::socket,
@@ -279,7 +287,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::ITIMER_GET => system::itimer_get,
         numbers::ITIMER_SET => system::itimer_set,
         numbers::CLOCK_GET => system::clock_get,
-        numbers::CLOCK_GETRES => sys_unimpl!("clock_getres", Err(Errno::ENOSYS)),
+        numbers::CLOCK_GETRES => system::clock_getres,
 
         // Scheduling
         numbers::SLEEP => system::sleep,

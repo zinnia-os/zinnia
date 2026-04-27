@@ -183,6 +183,6 @@ pub extern "C" fn main(_: usize, _: usize) {
 
     init_proc
         .clone()
-        .fexecve(init_file, args, envs)
+        .fexecve(init_file, path.to_vec(), args, envs)
         .expect("Unable to start the init process");
 }

@@ -283,3 +283,51 @@ impl PageTable {
             .unwrap_or(false)
     }
 }
+
+impl PageTable {
+    fn free_subtree(table: PhysAddr, level: usize) {
+        if level == 0 {
+            return;
+        }
+
+        let entries = 1usize << arch::virt::get_level_bits();
+        let table_slice: &[PageTableEntry] =
+            unsafe { slice::from_raw_parts(table.as_hhdm(), entries) };
+
+        for pte in table_slice {
+            if !pte.is_present() || !pte.is_directory(level) {
+                continue;
+            }
+
+            let child = pte.address();
+            Self::free_subtree(child, level - 1);
+            unsafe { KernelAlloc::dealloc(child, 1) };
+        }
+    }
+}
+
+impl Drop for PageTable {
+    fn drop(&mut self) {
+        if !self.is_user {
+            return;
+        }
+
+        let head = self.get_head_addr();
+        let entries = 1usize << arch::virt::get_level_bits();
+        let root_level = self.root_level.saturating_sub(1);
+        let root_slice: &[PageTableEntry] =
+            unsafe { slice::from_raw_parts(head.as_hhdm(), entries) };
+
+        for pte in &root_slice[..entries / 2] {
+            if !pte.is_present() || !pte.is_directory(root_level) {
+                continue;
+            }
+
+            let child = pte.address();
+            Self::free_subtree(child, root_level.saturating_sub(1));
+            unsafe { KernelAlloc::dealloc(child, 1) };
+        }
+
+        unsafe { KernelAlloc::dealloc(head, 1) };
+    }
+}

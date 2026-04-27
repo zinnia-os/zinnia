@@ -37,6 +37,28 @@ impl Scheduler {
 
     /// Adds a task to a run queue.
     pub fn add_task(&self, task: Arc<Task>) {
+        {
+            let mut state = task.state.lock();
+            match *state {
+                // Already terminating: do not resurrect.
+                TaskState::Dead | TaskState::Dying => return,
+                TaskState::Running => {
+                    task.wake_pending.store(true, Ordering::Release);
+                    return;
+                }
+                // Either already on a queue (Ready) or being woken from sleep (Waiting).
+                // Mark Ready and fall through to the dedup check.
+                TaskState::Ready | TaskState::Waiting => *state = TaskState::Ready,
+            }
+        }
+        // Avoid double-enqueueing the same task.
+        if task
+            .queued
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
         self.run_queue.lock().push_back(task);
     }
 
@@ -91,10 +113,46 @@ impl Scheduler {
 
     fn next(&self) -> Option<Arc<Task>> {
         let mut queue = self.run_queue.lock();
-        while let Some(x) = &queue.pop_front() {
+        while let Some(x) = queue.pop_front() {
+            x.queued.store(false, Ordering::Release);
+            x.wake_pending.store(false, Ordering::Release);
             let inner = x.state.lock();
             if *inner == TaskState::Ready {
-                return Some(x.clone());
+                drop(inner);
+                return Some(x);
+            }
+        }
+        drop(queue);
+        Self::try_steal()
+    }
+
+    /// Attempts to pull one ready task from the busiest remote CPU's run queue.
+    /// Returns the stolen task, transferred to the caller's CPU.
+    fn try_steal() -> Option<Arc<Task>> {
+        let self_id = CpuData::get().id;
+        // Find the CPU with the longest run queue.
+        let mut victim: Option<&'static CpuData> = None;
+        let mut victim_len = 1usize;
+        for cpu in CpuData::iter() {
+            if cpu.id == self_id || !cpu.online.load(Ordering::Acquire) {
+                continue;
+            }
+            let len = cpu.scheduler.run_queue.lock().len();
+            if len > victim_len {
+                victim_len = len;
+                victim = Some(cpu);
+            }
+        }
+        let victim = victim?;
+        // Pop from the back so we don't steal a task the victim was about to run.
+        let mut q = victim.scheduler.run_queue.lock();
+        while let Some(task) = q.pop_back() {
+            task.queued.store(false, Ordering::Release);
+            task.wake_pending.store(false, Ordering::Release);
+            let state = task.state.lock();
+            if *state == TaskState::Ready {
+                drop(state);
+                return Some(task);
             }
         }
         None
@@ -106,6 +164,9 @@ impl Scheduler {
         let from = self.current.load(Ordering::Acquire);
 
         if from != self.idle_task.load(Ordering::Acquire) {
+            unsafe {
+                *(*from).state.raw_inner() = TaskState::Ready;
+            }
             self.add_task(unsafe {
                 let task = Arc::from_raw(from);
                 let result = task.clone();
@@ -120,6 +181,29 @@ impl Scheduler {
     /// Reschedules without adding the current task back to the run queue.
     pub fn do_yield(&self) {
         let lock = IrqLock::lock();
+        let current_ptr = self.current.load(Ordering::Acquire);
+        if current_ptr != self.idle_task.load(Ordering::Acquire) {
+            // SAFETY: `current` is alive for as long as the scheduler holds it.
+            let current = unsafe { &*current_ptr };
+            let mut state = current.state.lock();
+            if !matches!(*state, TaskState::Dead | TaskState::Dying) {
+                if current.wake_pending.swap(false, Ordering::AcqRel) {
+                    // A wake landed while we were Running. Stay runnable
+                    // and re-enqueue ourselves before yielding the CPU.
+                    *state = TaskState::Ready;
+                    drop(state);
+                    let arc = unsafe {
+                        let task = Arc::from_raw(current_ptr);
+                        let result = task.clone();
+                        mem::forget(task);
+                        result
+                    };
+                    self.add_task(arc);
+                } else {
+                    *state = TaskState::Waiting;
+                }
+            }
+        }
         self.do_reschedule(lock);
     }
 
@@ -132,7 +216,14 @@ impl Scheduler {
             .unwrap_or(self.idle_task.load(Ordering::Acquire));
 
         if from == to {
+            unsafe {
+                *(*to).state.raw_inner() = TaskState::Running;
+            }
             return;
+        }
+
+        unsafe {
+            *(*to).state.raw_inner() = TaskState::Running;
         }
 
         self.current.store(to, Ordering::Relaxed);

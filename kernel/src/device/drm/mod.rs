@@ -35,7 +35,7 @@ pub struct IdAllocator {
 impl IdAllocator {
     pub const fn new() -> Self {
         Self {
-            counter: AtomicU32::new(0),
+            counter: AtomicU32::new(1),
         }
     }
 
@@ -122,13 +122,16 @@ pub trait Device: Send + Sync {
 }
 
 /// Represents a user-facing DRM card in form of a file.
-/// Each open() creates a new DrmFile with per-FD state.
+/// Note: this object is currently shared by all opens of the same device node,
+/// so dynamic state is reset when the last open handle is released.
 pub struct DrmFile {
     device: Arc<dyn Device>,
     buffers: SpinMutex<Vec<Arc<dyn BufferObject>>>,
     active_fb: SpinMutex<Option<(u32, Arc<Framebuffer>)>>,
     events: SpinMutex<Vec<PageFlipEvent>>,
     rd_event: Event,
+    flip_sequence: AtomicU32,
+    open_count: AtomicUsize,
 }
 
 #[repr(C)]
@@ -150,6 +153,8 @@ impl DrmFile {
             active_fb: SpinMutex::new(None),
             events: SpinMutex::new(Vec::new()),
             rd_event: Event::new(),
+            flip_sequence: AtomicU32::new(0),
+            open_count: AtomicUsize::new(0),
         })
     }
 
@@ -168,6 +173,24 @@ impl DrmFile {
 }
 
 impl FileOps for DrmFile {
+    fn acquire(&self, _file: &File, _flags: OpenFlags) -> EResult<()> {
+        self.open_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn release(&self, _file: &File) -> EResult<()> {
+        if self.open_count.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return Ok(());
+        }
+
+        self.device.set_cursor(0, None, 0, 0, 0, 0).ok();
+        self.events.lock().clear();
+        self.active_fb.lock().take();
+        self.buffers.lock().clear();
+        self.device.state().framebuffers.lock().clear();
+        Ok(())
+    }
+
     fn read(&self, _file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
         let guard = self.rd_event.guard();
 
@@ -542,6 +565,44 @@ impl FileOps for DrmFile {
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
+            drm::DRM_IOCTL_MODE_ADDFB2 => {
+                let mut ptr = UserPtr::<drm::drm_mode_fb_cmd2>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                // We currently only support single-plane formats backed by a single dumb buffer.
+                // Modifiers other than DRM_FORMAT_MOD_LINEAR(0) are rejected since the driver doesn't advertise them.
+                if val.handles[0] == 0 {
+                    return Err(Errno::EINVAL);
+                }
+                if val.handles[1] != 0 || val.handles[2] != 0 || val.handles[3] != 0 {
+                    return Err(Errno::EINVAL);
+                }
+                if val.modifier[0] != 0 {
+                    return Err(Errno::EINVAL);
+                }
+
+                let buffers = self.buffers.lock();
+                let buffer = buffers
+                    .iter()
+                    .find(|b| b.id() == val.handles[0])
+                    .ok_or(Errno::EINVAL)?
+                    .clone();
+                drop(buffers);
+
+                let framebuffer = self.device.create_fb(
+                    self,
+                    buffer,
+                    val.width,
+                    val.height,
+                    val.pixel_format,
+                    val.pitches[0],
+                )?;
+
+                val.fb_id = framebuffer.id();
+                self.device.state().framebuffers.lock().push(framebuffer);
+
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
             drm::DRM_IOCTL_MODE_RMFB => {
                 let ptr = UserPtr::<u32>::new(arg);
                 let fb_id = ptr.read().ok_or(Errno::EFAULT)?;
@@ -885,13 +946,17 @@ impl FileOps for DrmFile {
                 // Queue page flip completion event if requested
                 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
                 if val.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
+                    let now_ns = crate::clock::get_elapsed();
+                    let tv_sec = (now_ns / 1_000_000_000) as u32;
+                    let tv_usec = ((now_ns % 1_000_000_000) / 1_000) as u32;
+                    let seq = self.flip_sequence.fetch_add(1, Ordering::AcqRel);
                     let event = PageFlipEvent {
-                        event_type: 1, // DRM_EVENT_FLIP_COMPLETE
+                        event_type: 2, // DRM_EVENT_FLIP_COMPLETE
                         length: core::mem::size_of::<PageFlipEvent>() as u32,
                         user_data: val.user_data,
-                        tv_sec: 0,
-                        tv_usec: 0,
-                        sequence: 0,
+                        tv_sec,
+                        tv_usec,
+                        sequence: seq,
                         reserved: 0,
                     };
                     self.events.lock().push(event);
@@ -1046,9 +1111,25 @@ pub fn register(card: Arc<DrmFile>) -> EResult<()> {
     vfs::mknod(
         root.clone(),
         root.clone(),
-        format!("drmcard{}", CARD_COUNTER.fetch_add(1, Ordering::SeqCst)).as_bytes(),
+        format!("drm/card{}", CARD_COUNTER.fetch_add(1, Ordering::SeqCst)).as_bytes(),
         Mode::from_bits_truncate(0o660),
         Some(crate::vfs::inode::Device::CharacterDevice(card)),
         &Identity::get_kernel(),
     )
+}
+
+#[initgraph::task(
+    name = "generic.device.drm",
+    depends = [devtmpfs::DEVTMPFS_STAGE],
+)]
+pub fn INPUT_STAGE() {
+    let root = devtmpfs::get_root();
+    vfs::mkdir(
+        root.clone(),
+        root,
+        b"drm",
+        Mode::from_bits_truncate(0o755),
+        &Identity::get_kernel(),
+    )
+    .expect("Unable to create /dev/drm/");
 }

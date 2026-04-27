@@ -10,7 +10,7 @@ use crate::{
         to_user,
     },
     sched::Scheduler,
-    uapi::{self, limits::PATH_MAX, uid_t},
+    uapi::{self, limits::PATH_MAX, pid_t, uid_t},
     vfs::{File, file::OpenFlags, inode::Mode},
     wrap_syscall,
 };
@@ -22,12 +22,12 @@ pub fn gettid() -> usize {
 }
 
 #[wrap_syscall]
-pub fn getpid() -> usize {
+pub fn getpid() -> pid_t {
     Scheduler::get_current().get_process().get_pid()
 }
 
 #[wrap_syscall]
-pub fn getppid() -> usize {
+pub fn getppid() -> pid_t {
     Scheduler::get_current()
         .get_process()
         .get_parent()
@@ -95,7 +95,7 @@ pub fn getresgid(rgid: VirtAddr, egid: VirtAddr, sgid: VirtAddr) -> EResult<()> 
 }
 
 #[wrap_syscall]
-pub fn getpgid(pid: usize) -> EResult<usize> {
+pub fn getpgid(pid: pid_t) -> EResult<pid_t> {
     let proc = if pid == 0 {
         Scheduler::get_current().get_process()
     } else {
@@ -111,7 +111,7 @@ pub fn getpgid(pid: usize) -> EResult<usize> {
 }
 
 #[wrap_syscall]
-pub fn setpgid(pid: usize, pgid: usize) -> EResult<usize> {
+pub fn setpgid(pid: pid_t, pgid: pid_t) -> EResult<pid_t> {
     let current = Scheduler::get_current().get_process();
     let target = if pid == 0 {
         current.clone()
@@ -148,7 +148,7 @@ pub fn setpgid(pid: usize, pgid: usize) -> EResult<usize> {
 }
 
 #[wrap_syscall]
-pub fn getsid(pid: usize) -> EResult<usize> {
+pub fn getsid(pid: pid_t) -> EResult<pid_t> {
     let proc = if pid == 0 {
         Scheduler::get_current().get_process()
     } else {
@@ -164,7 +164,7 @@ pub fn getsid(pid: usize) -> EResult<usize> {
 }
 
 #[wrap_syscall]
-pub fn setsid() -> EResult<usize> {
+pub fn setsid() -> EResult<pid_t> {
     let proc = Scheduler::get_current().get_process();
     let pid = proc.get_pid();
 
@@ -188,7 +188,7 @@ pub fn exit(error: usize) -> ! {
     Process::exit(error as _);
 }
 
-pub fn fork(ctx: &Context) -> EResult<usize> {
+pub fn fork(ctx: &Context) -> EResult<pid_t> {
     let old = Scheduler::get_current().get_process();
 
     // Fork the current process. This puts both processes at this point in code.
@@ -240,17 +240,17 @@ pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> 
         Mode::empty(),
         &proc.identity.lock(),
     )?;
-    proc.fexecve(file, args, envs)?;
+    proc.fexecve(file, path_str, args, envs)?;
 
     unreachable!("fexecve should never return on success");
 }
 
-fn waitpid_matches(pid: uapi::pid_t, caller_pgrp: usize, child: &Process) -> bool {
-    match pid as isize {
+fn waitpid_matches(pid: pid_t, caller_pgrp: pid_t, child: &Process) -> bool {
+    match pid {
         p if p > 0 => child.get_pid() == pid,
         -1 => true,
         0 => *child.pgrp.lock() == caller_pgrp,
-        p => *child.pgrp.lock() == (-p) as usize,
+        p => *child.pgrp.lock() == (-p),
     }
 }
 
@@ -263,7 +263,7 @@ fn encode_stopped(sig: u32) -> i32 {
 }
 
 #[wrap_syscall]
-pub fn waitpid(pid: uapi::pid_t, stat_loc: VirtAddr, options: i32) -> EResult<usize> {
+pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
     let proc = Scheduler::get_current().get_process();
     let caller_pgrp = *proc.pgrp.lock();
     let mut stat_ptr: UserPtr<i32> = UserPtr::new(stat_loc);
@@ -285,8 +285,8 @@ pub fn waitpid(pid: uapi::pid_t, stat_loc: VirtAddr, options: i32) -> EResult<us
         }
 
         let mut saw_match = false;
-        let mut reap: Option<(usize, usize, i32)> = None;
-        let mut report: Option<(usize, i32)> = None;
+        let mut reap: Option<(usize, pid_t, i32)> = None;
+        let mut report: Option<(pid_t, i32)> = None;
 
         for (idx, child) in children.iter().enumerate() {
             if !waitpid_matches(pid, caller_pgrp, child) {
@@ -396,7 +396,7 @@ pub fn thread_exit() -> ! {
 }
 
 #[wrap_syscall]
-pub fn thread_kill(pid: usize, tid: usize, sig: usize) -> EResult<usize> {
+pub fn thread_kill(pid: pid_t, tid: usize, sig: usize) -> EResult<pid_t> {
     let sig_num = sig as u32;
 
     // Signal 0 is used to check existence without sending.

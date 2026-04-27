@@ -23,10 +23,12 @@ pub struct LocalApic {
     /// If [`Some`], points to the xAPIC MMIO space.
     /// Otherwise, it's an x2APIC.
     xapic_regs: SpinMutex<Option<MmioView>>,
+    /// The LAPIC ID, intended to be accessed from other CPUs.
+    cached_id: AtomicU32,
 }
 
 per_cpu! {
-    pub static LAPIC: LocalApic = LocalApic { ticks_per_10ms: AtomicU32::new(0), xapic_regs: SpinMutex::new(None) };
+    pub static LAPIC: LocalApic = LocalApic { ticks_per_10ms: AtomicU32::new(0), xapic_regs: SpinMutex::new(None), cached_id: AtomicU32::new(u32::MAX) };
 }
 
 #[allow(unused)]
@@ -129,6 +131,8 @@ impl LocalApic {
             lapic.write_reg(lapic_regs::LDR, lapic.read_reg(lapic_regs::ID));
         }
 
+        lapic.cached_id.store(lapic.id(), Ordering::Release);
+
         // TODO: Parse MADT and setup NMIs.
 
         // Tell the APIC timer to divide by 16.
@@ -187,7 +191,17 @@ impl LocalApic {
     }
 
     pub fn id(&self) -> u32 {
-        return self.read_reg(lapic_regs::ID) as u32;
+        let raw = self.read_reg(lapic_regs::ID) as u32;
+
+        if self.xapic_regs.lock().is_some() {
+            raw >> 24
+        } else {
+            raw
+        }
+    }
+
+    pub fn cached_id(&self) -> u32 {
+        self.cached_id.load(Ordering::Acquire)
     }
 
     /// Signals an end of interrupt to the LAPIC.

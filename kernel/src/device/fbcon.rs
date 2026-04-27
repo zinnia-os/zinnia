@@ -3,6 +3,7 @@
 use crate::{
     boot::BootInfo,
     device::tty::{Tty, TtyDriver},
+    log::{self, LoggerSink},
     memory::{
         PhysAddr, free, malloc,
         pmm::KernelAlloc,
@@ -10,7 +11,7 @@ use crate::{
     },
     uapi::termios::winsize,
 };
-use alloc::{string::String, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{
     ffi::{c_char, c_void},
     ptr::null_mut,
@@ -39,9 +40,10 @@ const FONT_DATA: &[u8] = include_bytes!("../../assets/builtin_font.bin");
 const FONT_WIDTH: usize = 8;
 const FONT_HEIGHT: usize = 12;
 
+#[derive(Clone)]
 struct FbCon {
-    /// Frame buffer that is being drawn on.
-    fb: FrameBuffer,
+    pitch: usize,
+    height: usize,
     /// Start of memory mapped region that is used to access the frame buffer.
     mem: *mut u8,
     /// The flanterm context.
@@ -58,7 +60,7 @@ unsafe impl Send for FbCon {}
 unsafe impl Sync for FbCon {}
 
 impl FbCon {
-    pub fn new(fb: FrameBuffer) -> Self {
+    pub fn new(fb: &FrameBuffer) -> Self {
         // Map the framebuffer in memory.
         let mem = PageTable::get_kernel()
             .map_memory::<KernelAlloc>(
@@ -112,7 +114,8 @@ impl FbCon {
             flanterm_get_dimensions(ctx, &raw mut cols, &raw mut rows);
 
             Self {
-                fb,
+                pitch: fb.pitch,
+                height: fb.height,
                 mem,
                 ctx,
                 rows,
@@ -127,7 +130,7 @@ impl Drop for FbCon {
         unsafe { flanterm_sys::flanterm_deinit(self.ctx, Some(free)) };
 
         PageTable::get_kernel()
-            .unmap_range::<KernelAlloc>(self.mem.into(), self.fb.pitch * self.fb.height)
+            .unmap_range::<KernelAlloc>(self.mem.into(), self.pitch * self.height)
             .unwrap();
     }
 }
@@ -149,6 +152,18 @@ impl TtyDriver for FbCon {
     }
 }
 
+impl LoggerSink for FbCon {
+    fn name(&self) -> &'static str {
+        "fbcon"
+    }
+
+    fn write(&mut self, input: &[u8]) {
+        for &byte in input {
+            unsafe { flanterm_write(self.ctx, &byte as *const u8 as *const c_char, 1) };
+        }
+    }
+}
+
 #[initgraph::task(
     name = "generic.fbcon",
     depends = [
@@ -161,7 +176,15 @@ pub fn FBCON_STAGE() {
         return;
     };
 
-    let fbcon = FbCon::new(fb);
-    let tty = Tty::new(String::from("fbcon"), Arc::new(fbcon));
-    tty.register_device().expect("Unable to create fbcon");
+    if BootInfo::get()
+        .command_line
+        .get_bool("fbcon")
+        .unwrap_or(true)
+    {
+        let fbcon = FbCon::new(&fb);
+        log::add_sink(Box::new(fbcon.clone()));
+
+        let tty = Tty::new(String::from("fbcon"), Arc::new(fbcon));
+        tty.register_device().expect("Unable to create fbcon");
+    }
 }

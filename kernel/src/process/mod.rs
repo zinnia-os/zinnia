@@ -31,10 +31,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-
-/// A unique process ID.
-pub type Pid = usize;
+use core::{
+    mem,
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+};
 
 #[derive(Debug)]
 pub enum ProcessState {
@@ -45,7 +45,7 @@ pub enum ProcessState {
 
 pub struct Process {
     /// The unique identifier of this process.
-    id: Pid,
+    id: uapi::pid_t,
     /// The display name of this process.
     name: String,
     /// The parent of this process, or [`None`], if this is the init process.
@@ -71,9 +71,9 @@ pub struct Process {
     /// A pointer to the next free memory region.
     pub mmap_head: SpinMutex<VirtAddr>,
     /// Process group ID.
-    pub pgrp: SpinMutex<Pid>,
+    pub pgrp: SpinMutex<uapi::pid_t>,
     /// Session ID.
-    pub session: SpinMutex<Pid>,
+    pub session: SpinMutex<uapi::pid_t>,
     /// Controlling terminal, if any.
     pub controlling_tty: SpinMutex<Option<Arc<Tty>>>,
     /// Process-wide real-time interval timer.
@@ -83,6 +83,9 @@ pub struct Process {
     pub child_event: Event,
     /// Event used by stopped threads to wait for SIGCONT.
     pub cont_event: Event,
+    /// Event signalled whenever a signal is queued to a thread of this process.
+    /// Used by signalfd readers to wake up when new signals arrive.
+    pub signalfd_event: Event,
     /// Latched when this process transitions into Stopped; cleared when a
     /// waiter observes it via WUNTRACED.
     pub stop_unwaited: AtomicBool,
@@ -96,7 +99,7 @@ pub struct Process {
 impl Process {
     /// Returns the unique identifier of this process.
     #[inline]
-    pub const fn get_pid(&self) -> Pid {
+    pub const fn get_pid(&self) -> uapi::pid_t {
         self.id
     }
 
@@ -133,7 +136,7 @@ impl Process {
 
     pub fn fork(self: Arc<Self>, context: &Context) -> EResult<(Arc<Self>, Arc<Task>)> {
         let forked = Arc::new(Self {
-            id: PID_COUNTER.fetch_add(1, Ordering::Acquire),
+            id: PID_COUNTER.fetch_add(1, Ordering::Acquire) as _,
             name: self.name.clone(),
             parent: Some(Arc::downgrade(&self)),
             threads: SpinMutex::new(Vec::new()),
@@ -152,6 +155,7 @@ impl Process {
             real_timer: SpinMutex::new(*self.real_timer.lock()),
             child_event: Event::new(),
             cont_event: Event::new(),
+            signalfd_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
@@ -201,7 +205,7 @@ impl Process {
         // parent's children list. Callers that wrap this in Arc (e.g. fork)
         // are responsible for registering the child.
 
-        let id = PID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let id = PID_COUNTER.fetch_add(1, Ordering::Relaxed) as _;
         // For the very first processes (kernel, init) pgrp/session default to their own PID.
         let pgrp = if pgrp == 0 { id } else { pgrp };
         let session = if session == 0 { id } else { session };
@@ -227,6 +231,7 @@ impl Process {
             real_timer: SpinMutex::new(IntervalTimerState::default()),
             child_event: Event::new(),
             cont_event: Event::new(),
+            signalfd_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
             umask: AtomicU32::new(0o022),
@@ -245,6 +250,7 @@ impl Process {
     pub fn fexecve(
         self: Arc<Self>,
         file: Arc<File>,
+        exec_path: Vec<u8>,
         argv: Vec<Vec<u8>>,
         envp: Vec<Vec<u8>>,
     ) -> EResult<()> {
@@ -252,6 +258,7 @@ impl Process {
             executable: file.clone(),
             interpreter: None,
             space: AddressSpace::new(),
+            exec_path,
             argv,
             envp,
         };
@@ -266,10 +273,15 @@ impl Process {
             threads.push(init.clone());
 
             let mut space = self.address_space.lock();
-            *space = info.space;
+            let old_space = mem::replace(&mut *space, info.space);
+            let new_table = space.table.clone();
 
             self.open_files.lock().close_exec();
             self.signal_actions.lock().reset_on_exec();
+
+            drop(space);
+            unsafe { new_table.set_active() };
+            drop(old_space);
         }
 
         CpuData::get().scheduler.add_task(init);
@@ -288,10 +300,12 @@ impl Process {
         }
 
         PROCESS_TABLE.lock().remove(&proc.get_pid());
+        let zombie_space = AddressSpace::new();
         {
             let mut open_files = proc.open_files.lock();
             let mut threads = proc.threads.lock();
             let mut status = proc.status.lock();
+            let mut space = proc.address_space.lock();
 
             // Kill all threads.
             for thread in threads.iter() {
@@ -302,7 +316,17 @@ impl Process {
             // Close all files.
             open_files.close_all();
 
+            let old_space = mem::replace(&mut *space, zombie_space);
+            let new_table = space.table.clone();
             *status = ProcessState::Exited(code);
+
+            drop(space);
+            drop(status);
+            drop(threads);
+            drop(open_files);
+
+            unsafe { new_table.set_active() };
+            drop(old_space);
         }
 
         // Reparent orphaned children to the init process.
@@ -347,6 +371,16 @@ impl FdTable {
         }
 
         self.inner.get(&fd).cloned()
+    }
+
+    /// Updates the `close_on_exec` flag on the file descriptor in place.
+    pub fn set_close_on_exec(&mut self, fd: i32, value: bool) -> Option<()> {
+        if fd.is_negative() {
+            return None;
+        }
+        let desc = self.inner.get(&fd)?;
+        desc.close_on_exec.store(value, Ordering::Release);
+        Some(())
     }
 
     /// Allocates a new descriptor for a file. Returns [`None`] if there are no more free FDs for this process.
@@ -473,7 +507,8 @@ static KERNEL_PROCESS: Once<Arc<Process>> = Once::new();
 
 /// Global table of all live processes, keyed by PID.
 /// Used to iterate processes for signal delivery to process groups.
-pub static PROCESS_TABLE: SpinMutex<BTreeMap<Pid, Weak<Process>>> = SpinMutex::new(BTreeMap::new());
+pub static PROCESS_TABLE: SpinMutex<BTreeMap<uapi::pid_t, Weak<Process>>> =
+    SpinMutex::new(BTreeMap::new());
 
 #[initgraph::task(
     name = "generic.process",

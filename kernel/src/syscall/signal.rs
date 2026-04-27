@@ -3,11 +3,12 @@ use crate::{
     memory::{UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
     process::{
-        PROCESS_TABLE, Pid, Process,
+        PROCESS_TABLE, Process,
         signal::{self, SigAction, Signal, SignalSet},
     },
     sched::Scheduler,
-    uapi, wrap_syscall,
+    uapi::{self, pid_t},
+    wrap_syscall,
 };
 use alloc::sync::Arc;
 
@@ -79,7 +80,7 @@ pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<
 }
 
 #[wrap_syscall]
-pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
+pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
     let sig_num = sig as u32;
 
     // Signal 0 is used to check permissions / process existence without sending.
@@ -89,7 +90,7 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
 
     match pid {
         _ if pid > 0 => {
-            let target = find_process_by_pid(pid as usize).ok_or(Errno::ESRCH)?;
+            let target = find_process_by_pid(pid).ok_or(Errno::ESRCH)?;
 
             if sig_num == 0 {
                 return Ok(0);
@@ -143,7 +144,7 @@ pub fn kill(pid: isize, sig: usize) -> EResult<usize> {
         }
         _ => {
             // pid < -1: send to every process in process group |pid|.
-            let pgrp = (-pid) as Pid;
+            let pgrp = -pid;
 
             if sig_num == 0 {
                 // Check if any process exists in this group.
@@ -175,7 +176,7 @@ pub fn sigreturn(frame: &mut Context) -> ! {
 }
 
 /// Find a process by PID using the global process table.
-fn find_process_by_pid(pid: usize) -> Option<Arc<Process>> {
+fn find_process_by_pid(pid: pid_t) -> Option<Arc<Process>> {
     let table = PROCESS_TABLE.lock();
     table.get(&pid)?.upgrade()
 }

@@ -12,7 +12,7 @@ use crate::{
         posix::errno::{EResult, Errno},
     },
 };
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 /// Common processor-local information.
 #[derive(Debug)]
@@ -20,7 +20,7 @@ pub struct CpuData {
     /// A pointer to this exact structure.
     pub this: AtomicPtr<CpuData>,
     /// The ID of this CPU.
-    pub id: usize,
+    pub id: u32,
     /// Stack pointer for kernel mode. Only used for task switching.
     pub kernel_stack: AtomicUsize,
     /// Stack pointer for user mode.
@@ -40,7 +40,7 @@ impl CpuData {
     }
 
     /// Gets the data for a specified CPU.
-    pub fn get_for(id: usize) -> Option<&'static CpuData> {
+    pub fn get_for(id: u32) -> Option<&'static CpuData> {
         if id >= NUM_CPUS.load(Ordering::Acquire) {
             return None;
         }
@@ -49,7 +49,7 @@ impl CpuData {
 
         unsafe {
             let start = &raw const LD_PERCPU_START as *const CpuData;
-            return start.byte_add(percpu_size * id).as_ref();
+            return start.byte_add(percpu_size * id as usize).as_ref();
         }
     }
 
@@ -59,7 +59,7 @@ impl CpuData {
 }
 
 pub struct CpuDataIter {
-    id: usize,
+    id: u32,
 }
 
 impl Iterator for CpuDataIter {
@@ -132,14 +132,14 @@ pub static CPU_DATA: PerCpuData<CpuData> = PerCpuData::new(CpuData {
 });
 
 /// Counts how many CPUs have been allocated. ID 0 is always used for the BSP.
-static NUM_CPUS: AtomicUsize = AtomicUsize::new(1);
+static NUM_CPUS: AtomicU32 = AtomicU32::new(1);
 
 /// Extends the per-CPU data for a new CPU.
 /// Returns the new CpuData context.
 pub(crate) fn allocate_cpu() -> EResult<&'static CpuData> {
     let id = NUM_CPUS.fetch_add(1, Ordering::Relaxed);
     let percpu_size = &raw const LD_PERCPU_END as usize - &raw const LD_PERCPU_START as usize;
-    let percpu_new = &raw const LD_PERCPU_START as usize + (percpu_size * id);
+    let percpu_new = &raw const LD_PERCPU_START as usize + (percpu_size * id as usize);
 
     let phys = memory::pmm::KernelAlloc::alloc_bytes(percpu_size, AllocFlags::empty())
         .map_err(|_| Errno::ENOMEM)?;

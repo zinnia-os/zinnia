@@ -1,17 +1,38 @@
 use crate::{
+    clock,
+    device::net::Socket,
     memory::{IovecIter, UserCStr, VirtAddr, user::UserPtr},
+    percpu::CpuData,
     posix::errno::{EResult, Errno},
+    process::signal::SignalSet,
     sched::Scheduler,
     uapi::{
-        dirent::dirent, fcntl::*, limits::PATH_MAX, mode_t, poll::pollfd, stat::*,
-        statvfs::statvfs, uio::iovec,
+        access::{R_OK, W_OK, X_OK},
+        dirent::dirent,
+        epoll::{
+            EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLEXCLUSIVE, EPOLLMSG,
+            EPOLLONESHOT, epoll_data, epoll_event,
+        },
+        fcntl::{O_CLOEXEC, *},
+        limits::PATH_MAX,
+        mode_t,
+        poll::pollfd,
+        signal::{SFD_CLOEXEC, SFD_NONBLOCK, sigset_t},
+        stat::*,
+        statvfs::statvfs,
+        time::{TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME, itimerspec},
+        uio::iovec,
     },
     vfs::{
         self, File, MountFlags, PathNode,
         cache::LookupFlags,
-        file::{FileDescription, OpenFlags, PollFlags, SeekAnchor},
+        epoll::EpollFile,
+        file::{FileDescription, FileOps, OpenFlags, PollFlags, SeekAnchor},
         fs,
         inode::{INode, Mode, NodeOps},
+        pipe::PipeBuffer,
+        signalfd::SignalfdFile,
+        timerfd::{self, TimerfdFile},
     },
     wrap_syscall,
 };
@@ -97,12 +118,11 @@ pub fn writev(fd: i32, iov: VirtAddr, iovcnt: usize) -> EResult<isize> {
 }
 
 #[wrap_syscall]
-pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i32> {
-    if path == VirtAddr::null() {
+pub fn openat(fd: i32, path: UserCStr, oflag: usize, mode: mode_t) -> EResult<i32> {
+    if path.is_null() {
         return Err(Errno::EINVAL);
     }
 
-    let path = UserCStr::new(path);
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
     let oflag = OpenFlags::from_bits_truncate(oflag as _);
 
@@ -145,13 +165,13 @@ pub fn openat(fd: i32, path: VirtAddr, oflag: usize, mode: mode_t) -> EResult<i3
 }
 
 #[wrap_syscall]
-pub fn seek(fd: i32, offset: usize, whence: usize) -> EResult<usize> {
+pub fn seek(fd: i32, offset: usize, whence: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
     let anchor = match whence {
-        0 => SeekAnchor::Start(offset as _),
-        1 => SeekAnchor::Current(offset as _),
-        2 => SeekAnchor::End(offset as _),
+        SEEK_SET => SeekAnchor::Start(offset as _),
+        SEEK_CUR => SeekAnchor::Current(offset as _),
+        SEEK_END => SeekAnchor::End(offset as _),
         _ => return Err(Errno::EINVAL),
     };
     file.seek(anchor).map(|x| x as _)
@@ -184,9 +204,20 @@ pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
     let mut buffer = vec![0u8; PATH_MAX as _];
     let mut cursor = PATH_MAX;
     let mut current = proc.working_dir.lock().clone();
+    let root = proc.root_dir.lock().clone();
+    let mut reached_root = false;
 
-    // Walk up until we reach the root
-    while let Ok(parent) = current.lookup_parent() {
+    // Walk up until we reach this process' root.
+    loop {
+        if Arc::ptr_eq(&current.entry, &root.entry) && Arc::ptr_eq(&current.mount, &root.mount) {
+            reached_root = true;
+            break;
+        }
+
+        let Ok(parent) = current.lookup_parent() else {
+            break;
+        };
+
         let name = &current.entry.name;
         if !name.is_empty() {
             // Copy name
@@ -199,6 +230,10 @@ pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
             buffer[cursor] = b'/';
         }
         current = parent;
+    }
+
+    if !reached_root {
+        return Err(Errno::ENOENT);
     }
 
     // Special case: root directory
@@ -217,7 +252,7 @@ pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
         .ok_or(Errno::EFAULT)?;
     user_buf.offset(path_len).write(0).ok_or(Errno::EFAULT)?; // NUL terminator
 
-    Ok(path_len)
+    Ok(path_len + 1)
 }
 
 fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
@@ -238,7 +273,12 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
             st_nlink: Arc::strong_count(inode) as _,
             st_uid: *inode.uid.lock(),
             st_gid: *inode.gid.lock(),
-            st_rdev: 0,
+            // Use the inode number as a unique devid for char/block devices,
+            // so that userspace can distinguish between distinct device nodes.
+            st_rdev: match inode.node_ops {
+                NodeOps::CharacterDevice(_) | NodeOps::BlockDevice(_) => inode.id,
+                _ => 0,
+            },
             st_size: *inode.size.lock() as _,
             st_atim: *inode.atime.lock(),
             st_mtim: *inode.mtime.lock(),
@@ -256,21 +296,68 @@ pub fn fstat(fd: i32, statbuf: VirtAddr) -> EResult<()> {
     let proc_inner = proc.open_files.lock();
 
     let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
-    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
-
-    write_stat(inode, &mut statbuf)?;
+    if let Some(inode) = file.inode.as_ref() {
+        write_stat(inode, &mut statbuf)?;
+    } else {
+        // Files without INodes need a fake stat.
+        let ops_any = file.ops.as_ref() as &dyn core::any::Any;
+        let mode = if ops_any.is::<PipeBuffer>() {
+            S_IFIFO
+        } else if ops_any.is::<Socket>() {
+            S_IFSOCK
+        } else {
+            S_IFIFO
+        };
+        statbuf
+            .write(stat {
+                st_mode: mode,
+                st_nlink: 1,
+                ..Default::default()
+            })
+            .ok_or(Errno::EFAULT)?;
+    }
 
     Ok(())
 }
 
 #[wrap_syscall]
-pub fn fstatat(at: i32, path: VirtAddr, statbuf: VirtAddr, flags: usize) -> EResult<()> {
+pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> EResult<()> {
     let mut statbuf: UserPtr<stat> = UserPtr::new(statbuf);
-    let path = UserCStr::new(path);
+    if path.is_null() {
+        return Err(Errno::EINVAL);
+    }
+
+    if flags & !((AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
     let proc = Scheduler::get_current().get_process();
     let proc_inner = proc.open_files.lock();
+
+    if v.is_empty() && flags & (AT_EMPTY_PATH as usize) != 0 {
+        let inode = if at == AT_FDCWD as _ {
+            proc.working_dir
+                .lock()
+                .entry
+                .get_inode()
+                .ok_or(Errno::ENOENT)?
+        } else {
+            proc_inner
+                .get_fd(at)
+                .ok_or(Errno::EBADF)?
+                .file
+                .inode
+                .as_ref()
+                .ok_or(Errno::EINVAL)?
+                .clone()
+        };
+
+        drop(proc_inner);
+        return write_stat(&inode, &mut statbuf);
+    }
+
     let parent = if at == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
@@ -309,7 +396,17 @@ pub fn dup(fd: i32) -> EResult<i32> {
     let proc = Scheduler::get_current().get_process();
     let mut proc_inner = proc.open_files.lock();
     let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
-    proc_inner.open_file(file, fd).ok_or(Errno::EMFILE)
+    proc_inner
+        .open_file(file.duplicate(false), 0)
+        .ok_or(Errno::EMFILE)
+}
+
+#[wrap_syscall]
+pub fn flock(fd: i32, _operation: usize) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?;
+    // TODO
+    Ok(())
 }
 
 #[wrap_syscall]
@@ -327,9 +424,7 @@ pub fn dup3(fd1: i32, fd2: i32, flags: usize) -> EResult<i32> {
     }
 
     let flags = OpenFlags::from_bits_truncate(flags as _);
-    if flags.contains(OpenFlags::CloseOnExec) {
-        file.close_on_exec.store(true, Ordering::Release);
-    }
+    let file = file.duplicate(flags.contains(OpenFlags::CloseOnExec));
 
     proc_inner.open_file(file, fd2).ok_or(Errno::EMFILE)
 }
@@ -378,8 +473,13 @@ pub fn chdir(path: VirtAddr) -> EResult<()> {
         cwd.clone(),
         &v,
         &proc.identity.lock(),
-        LookupFlags::MustExist,
+        LookupFlags::MustExist | LookupFlags::FollowSymlinks,
     )?;
+    let inode = node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    if !matches!(&inode.node_ops, NodeOps::Directory(_)) {
+        return Err(Errno::ENOTDIR);
+    }
+
     *cwd = node;
 
     Ok(())
@@ -390,7 +490,13 @@ pub fn fchdir(fd: i32) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let mut cwd = proc.working_dir.lock();
     let dir = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?;
-    *cwd = dir.file.path.as_ref().cloned().ok_or(Errno::ENOTDIR)?;
+    let path = dir.file.path.as_ref().cloned().ok_or(Errno::ENOTDIR)?;
+    let inode = path.entry.get_inode().ok_or(Errno::ENOTDIR)?;
+    if !matches!(&inode.node_ops, NodeOps::Directory(_)) {
+        return Err(Errno::ENOTDIR);
+    }
+
+    *cwd = path;
 
     Ok(())
 }
@@ -439,28 +545,31 @@ pub fn fcntl(fd: i32, cmd: usize, arg: usize) -> EResult<usize> {
         F_DUPFD => {
             let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
             proc_inner
-                .open_file(file, arg as i32)
+                .open_file(file.duplicate(false), arg as i32)
                 .ok_or(Errno::EMFILE)
                 .map(|x| x as usize)
         }
         F_DUPFD_CLOEXEC => {
             let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
-            file.close_on_exec.store(true, Ordering::Release);
             proc_inner
-                .open_file(file, arg as i32)
+                .open_file(file.duplicate(true), arg as i32)
                 .ok_or(Errno::EMFILE)
                 .map(|x| x as usize)
         }
         F_GETFD => {
             let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
-            let mut flags = OpenFlags::empty();
-            flags.set(
-                OpenFlags::CloseOnExec,
-                file.close_on_exec.load(Ordering::Acquire),
-            );
-            Ok(flags.bits() as _)
+            if file.close_on_exec.load(Ordering::Acquire) {
+                Ok(FD_CLOEXEC as _)
+            } else {
+                Ok(0)
+            }
         }
-        F_SETFD => Ok(0),
+        F_SETFD => {
+            proc_inner
+                .set_close_on_exec(fd, arg as u32 & FD_CLOEXEC != 0)
+                .ok_or(Errno::EBADF)?;
+            Ok(0)
+        }
         F_GETFL => {
             let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
             let flags = *file.file.flags.lock();
@@ -682,47 +791,87 @@ pub fn pipe(filedes: VirtAddr) -> EResult<()> {
 }
 
 #[wrap_syscall]
-pub fn faccessat(fd: i32, path: VirtAddr, amode: usize, flag: usize) -> EResult<()> {
-    if path == VirtAddr::null() {
+pub fn faccessat(fd: i32, path: UserCStr, amode: usize, flag: usize) -> EResult<()> {
+    if path.is_null() {
         return Err(Errno::EINVAL);
     }
 
-    let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+    let path = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+    if amode & !((R_OK | W_OK | X_OK) as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flag & !((AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
 
     let proc = Scheduler::get_current().get_process();
     let proc_inner = proc.open_files.lock();
-    let parent = if fd == AT_FDCWD as _ {
-        proc.working_dir.lock().clone()
+    let inode = if path.is_empty() && flag as u32 & AT_EMPTY_PATH != 0 {
+        if fd == AT_FDCWD as _ {
+            proc.working_dir
+                .lock()
+                .entry
+                .get_inode()
+                .ok_or(Errno::ENOENT)?
+        } else {
+            proc_inner
+                .get_fd(fd)
+                .ok_or(Errno::EBADF)?
+                .file
+                .inode
+                .clone()
+                .ok_or(Errno::EBADF)?
+        }
     } else {
-        proc_inner
-            .get_fd(fd)
-            .ok_or(Errno::EBADF)?
-            .file
-            .path
-            .as_ref()
-            .ok_or(Errno::ENOTDIR)?
-            .clone()
+        let parent = if fd == AT_FDCWD as _ {
+            proc.working_dir.lock().clone()
+        } else {
+            proc_inner
+                .get_fd(fd)
+                .ok_or(Errno::EBADF)?
+                .file
+                .path
+                .as_ref()
+                .ok_or(Errno::ENOTDIR)?
+                .clone()
+        };
+
+        let path_node = PathNode::lookup(
+            proc.root_dir.lock().clone(),
+            parent,
+            &path,
+            &proc.identity.lock(),
+            LookupFlags::MustExist
+                | if flag as u32 & AT_SYMLINK_NOFOLLOW != 0 {
+                    LookupFlags::empty()
+                } else {
+                    LookupFlags::FollowSymlinks
+                }
+                | if flag as u32 & AT_EACCESS != 0 {
+                    LookupFlags::empty()
+                } else {
+                    LookupFlags::UseRealId
+                },
+        )?;
+
+        path_node.entry.get_inode().ok_or(Errno::ENOENT)?
     };
 
-    let path_node = PathNode::lookup(
-        proc.root_dir.lock().clone(),
-        parent,
-        &path,
-        &proc.identity.lock(),
-        LookupFlags::MustExist
-            | LookupFlags::FollowSymlinks
-            | if flag as u32 & AT_EACCESS != 0 {
-                LookupFlags::empty()
-            } else {
-                LookupFlags::UseRealId
-            },
-    )?;
-
-    let node = path_node.entry.get_inode().ok_or(Errno::EBADF)?;
-    let amode = Mode::from_bits_truncate(amode as _);
-    if !node.mode.lock().intersects(amode) {
-        return Err(Errno::EACCES);
+    let mut access_flags = OpenFlags::empty();
+    if amode & (R_OK as usize) != 0 {
+        access_flags |= OpenFlags::Read;
     }
+    if amode & (W_OK as usize) != 0 {
+        access_flags |= OpenFlags::Write;
+    }
+    if amode & (X_OK as usize) != 0 {
+        access_flags |= OpenFlags::Executable;
+    }
+    inode.try_access(
+        &proc.identity.lock(),
+        access_flags,
+        flag as u32 & AT_EACCESS == 0,
+    )?;
 
     Ok(())
 }
@@ -859,8 +1008,57 @@ pub fn fchmod(fd: i32, mode: mode_t) -> EResult<()> {
 }
 
 #[wrap_syscall]
+pub fn ftruncate(fd: i32, length: i64) -> EResult<()> {
+    if length < 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
+
+    if !file.flags.lock().contains(OpenFlags::Write) {
+        return Err(Errno::EINVAL);
+    }
+
+    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+    match &inode.node_ops {
+        NodeOps::Regular(ops) => ops.truncate(inode, length as u64),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+#[wrap_syscall]
+pub fn fallocate(fd: i32, offset: i64, length: i64) -> EResult<()> {
+    if offset < 0 || length <= 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
+
+    if !file.flags.lock().contains(OpenFlags::Write) {
+        return Err(Errno::EBADF);
+    }
+
+    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+    let NodeOps::Regular(ops) = &inode.node_ops else {
+        return Err(Errno::ENODEV);
+    };
+
+    let required = (offset as u64).saturating_add(length as u64);
+    if required > inode.len() as u64 {
+        ops.truncate(inode, required)?;
+    }
+    Ok(())
+}
+
+#[wrap_syscall]
 pub fn fchmodat(fd: i32, path: VirtAddr, mode: mode_t, flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
+    }
+
+    if flags & !((AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) as usize) != 0 {
         return Err(Errno::EINVAL);
     }
 
@@ -868,6 +1066,29 @@ pub fn fchmodat(fd: i32, path: VirtAddr, mode: mode_t, flags: usize) -> EResult<
 
     let proc = Scheduler::get_current().get_process();
     let files = proc.open_files.lock();
+
+    if path_buf.is_empty() && flags & (AT_EMPTY_PATH as usize) != 0 {
+        let inode = if fd == AT_FDCWD as _ {
+            proc.working_dir
+                .lock()
+                .entry
+                .get_inode()
+                .ok_or(Errno::ENOENT)?
+        } else {
+            files
+                .get_fd(fd)
+                .ok_or(Errno::EBADF)?
+                .file
+                .inode
+                .as_ref()
+                .ok_or(Errno::EINVAL)?
+                .clone()
+        };
+
+        inode.chmod(Mode::from_bits_truncate(mode));
+        return Ok(());
+    }
+
     let parent = if fd == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
@@ -908,10 +1129,37 @@ pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> ER
         return Err(Errno::EINVAL);
     }
 
+    if flags & !((AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
     let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
     let proc = Scheduler::get_current().get_process();
     let files = proc.open_files.lock();
+
+    if path_buf.is_empty() && flags & (AT_EMPTY_PATH as usize) != 0 {
+        let inode = if fd == AT_FDCWD as _ {
+            proc.working_dir
+                .lock()
+                .entry
+                .get_inode()
+                .ok_or(Errno::ENOENT)?
+        } else {
+            files
+                .get_fd(fd)
+                .ok_or(Errno::EBADF)?
+                .file
+                .inode
+                .as_ref()
+                .ok_or(Errno::EINVAL)?
+                .clone()
+        };
+
+        inode.chown(uid, gid);
+        return Ok(());
+    }
+
     let parent = if fd == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
@@ -947,9 +1195,17 @@ pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> ER
 }
 
 #[wrap_syscall]
-pub fn unlinkat(fd: i32, path: VirtAddr, _flags: usize) -> EResult<()> {
+pub fn unlinkat(fd: i32, path: VirtAddr, flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);
+    }
+
+    if flags & !(AT_REMOVEDIR as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    if flags & (AT_REMOVEDIR as usize) != 0 {
+        return Err(Errno::ENOSYS);
     }
 
     let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
@@ -973,16 +1229,7 @@ pub fn unlinkat(fd: i32, path: VirtAddr, _flags: usize) -> EResult<()> {
     let identity = proc.identity.lock().clone();
     drop(files);
 
-    let node = PathNode::lookup(root, parent, &path_buf, &identity, LookupFlags::MustExist)?;
-
-    let parent_node = node.lookup_parent()?;
-    let parent_inode = parent_node.entry.get_inode().ok_or(Errno::ENOENT)?;
-    parent_inode.try_access(&identity, OpenFlags::Write, false)?;
-
-    match &parent_inode.node_ops {
-        NodeOps::Directory(x) => x.unlink(&parent_inode, &node, &identity),
-        _ => Err(Errno::ENOTDIR),
-    }
+    vfs::unlink(root, parent, &path_buf, &identity)
 }
 
 #[wrap_syscall]
@@ -1073,6 +1320,45 @@ pub fn linkat(
         NodeOps::Directory(x) => x.link(&new_parent_inode, &new_node, &target_inode, &identity),
         _ => Err(Errno::ENOTDIR),
     }
+}
+
+#[wrap_syscall]
+pub fn symlinkat(target_path: VirtAddr, fd: i32, link_path: VirtAddr) -> EResult<()> {
+    if target_path == VirtAddr::null() || link_path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
+    }
+
+    let target_path_buf = UserCStr::new(target_path)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+    let link_path_buf = UserCStr::new(link_path)
+        .as_vec(PATH_MAX)
+        .ok_or(Errno::EFAULT)?;
+
+    if target_path_buf.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+    let parent = if fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
+    vfs::symlink(root, parent, &link_path_buf, &target_path_buf, &identity)
 }
 
 #[wrap_syscall]
@@ -1179,8 +1465,7 @@ pub fn chroot(path: VirtAddr) -> EResult<usize> {
         _ => return Err(Errno::ENOTDIR),
     }
 
-    *proc.root_dir.lock() = node.clone();
-    *proc.working_dir.lock() = node;
+    *proc.root_dir.lock() = node;
     Ok(0)
 }
 
@@ -1210,4 +1495,323 @@ pub fn umount(dir_ptr: VirtAddr, _flags: u32) -> EResult<usize> {
     }
     mounts.pop();
     Ok(0)
+}
+
+fn resolve_epoll(fd: i32) -> EResult<Arc<File>> {
+    let proc = Scheduler::get_current().get_process();
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
+    if Arc::downcast::<EpollFile>(file.ops.clone()).is_err() {
+        return Err(Errno::EINVAL);
+    }
+    Ok(file)
+}
+
+fn epoll_of(file: &File) -> Arc<EpollFile> {
+    Arc::downcast(file.ops.clone()).expect("file was previously verified as an epoll")
+}
+
+const fn poll_flags_from_epoll(events: u32) -> PollFlags {
+    // Drop ET/ONESHOT/EXCLUSIVE/WAKEUP metadata bits and EPOLLMSG, which collides
+    // with POLLNVAL in the PollFlags encoding and has no poll equivalent.
+    let bits = (events & 0x07FF) & !EPOLLMSG;
+    PollFlags::from_bits_truncate(bits as i16)
+}
+
+const fn epoll_bits_from_poll(revents: PollFlags) -> u32 {
+    (revents.bits() as u16) as u32
+}
+
+#[wrap_syscall]
+pub fn epoll_create(flags: i32) -> EResult<i32> {
+    if flags & !(O_CLOEXEC as i32) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let ops: Arc<dyn FileOps> = Arc::new(EpollFile::new());
+    let file = File::open_disconnected(ops, OpenFlags::ReadWrite)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let mut open_files = proc.open_files.lock();
+    let fd = open_files
+        .open_file(
+            FileDescription {
+                file,
+                close_on_exec: AtomicBool::new(flags & O_CLOEXEC as i32 != 0),
+            },
+            0,
+        )
+        .ok_or(Errno::EMFILE)?;
+
+    Ok(fd)
+}
+
+#[wrap_syscall]
+pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event_ptr: VirtAddr) -> EResult<()> {
+    if epfd == fd {
+        return Err(Errno::EINVAL);
+    }
+
+    let epfile = resolve_epoll(epfd)?;
+    let epoll = epoll_of(&epfile);
+
+    let target = {
+        let proc = Scheduler::get_current().get_process();
+        let open_files = proc.open_files.lock();
+        open_files.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
+
+    match op {
+        EPOLL_CTL_ADD => {
+            let ev = UserPtr::<epoll_event>::new(event_ptr)
+                .read()
+                .ok_or(Errno::EFAULT)?;
+            if ev.events & EPOLLEXCLUSIVE != 0 {
+                warn!("epoll_ctl: EPOLLEXCLUSIVE is not supported");
+            }
+            if ev.events & EPOLLET != 0 {
+                warn!("epoll_ctl: EPOLLET requested, treating as level-triggered");
+            }
+            epoll.add(fd, target, ev.events, unsafe { ev.data.num_u64 })
+        }
+        EPOLL_CTL_MOD => {
+            let ev = UserPtr::<epoll_event>::new(event_ptr)
+                .read()
+                .ok_or(Errno::EFAULT)?;
+            epoll.modify(fd, ev.events, unsafe { ev.data.num_u64 })
+        }
+        EPOLL_CTL_DEL => epoll.remove(fd),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+#[wrap_syscall]
+pub fn epoll_pwait(
+    epfd: i32,
+    events_ptr: VirtAddr,
+    maxevents: i32,
+    timeout_ms: i32,
+    sigmask_ptr: VirtAddr,
+) -> EResult<usize> {
+    if maxevents <= 0 {
+        return Err(Errno::EINVAL);
+    }
+    let _ = sigmask_ptr; // TODO: apply signal mask during wait
+
+    let epfile = resolve_epoll(epfd)?;
+    let epoll = epoll_of(&epfile);
+    let maxevents = maxevents as usize;
+
+    let is_nonblocking = timeout_ms == 0;
+    let timeout_guard = if timeout_ms > 0 {
+        let deadline = clock::get_elapsed().saturating_add((timeout_ms as usize) * 1_000_000);
+        Some(clock::timeout_at(deadline))
+    } else {
+        None
+    };
+
+    let registrations = epoll.snapshot();
+    let mut wait_files: Vec<Arc<File>> = Vec::new();
+    if !is_nonblocking {
+        for (_, _, _, file) in &registrations {
+            if let Ok(inner) = Arc::downcast::<EpollFile>(file.ops.clone()) {
+                inner.get_children(&mut wait_files);
+            } else {
+                wait_files.push(file.clone());
+            }
+        }
+    }
+    let guards: Vec<_> = if is_nonblocking {
+        Vec::new()
+    } else {
+        let mut guards = Vec::new();
+        for file in &wait_files {
+            // Use Read mask so we wait on any readability.
+            for ev in file.ops.poll_events(file, PollFlags::Read).iter() {
+                guards.push(ev.guard());
+            }
+        }
+        guards
+    };
+
+    let mut out: Vec<epoll_event> = Vec::with_capacity(maxevents);
+    let mut oneshot_fired: Vec<i32> = Vec::new();
+
+    loop {
+        out.clear();
+        oneshot_fired.clear();
+
+        for (fd, events, data, file) in &registrations {
+            if out.len() >= maxevents {
+                break;
+            }
+            let mask = poll_flags_from_epoll(*events);
+            let revents = match file.ops.poll(file, mask) {
+                Ok(r) => r,
+                Err(_) => PollFlags::Err,
+            };
+            let reported = epoll_bits_from_poll(revents) & *events;
+            if reported != 0 {
+                out.push(epoll_event {
+                    events: reported,
+                    data: epoll_data { num_u64: *data },
+                });
+                if *events & EPOLLONESHOT != 0 {
+                    oneshot_fired.push(*fd);
+                }
+            }
+        }
+
+        if !out.is_empty() || is_nonblocking {
+            break;
+        }
+        if timeout_guard.as_ref().is_some_and(|g| g.expired()) {
+            break;
+        }
+        // No way to be woken: empty interest list and indefinite wait would hang.
+        if guards.is_empty() && timeout_guard.is_none() {
+            break;
+        }
+
+        if let Some(g) = guards.first() {
+            g.wait();
+        } else {
+            CpuData::get().scheduler.do_yield();
+        }
+
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::EINTR);
+        }
+    }
+
+    for fd in oneshot_fired {
+        epoll.disarm_oneshot(fd);
+    }
+
+    let mut writer = UserPtr::<epoll_event>::new(events_ptr);
+    writer.write_slice(&out).ok_or(Errno::EFAULT)?;
+    Ok(out.len())
+}
+
+#[wrap_syscall]
+pub fn timerfd_create(clockid: i32, flags: i32) -> EResult<i32> {
+    // TODO: We don't currently distinguish clocks; accept any sensible id.
+    let _ = clockid;
+
+    let allowed = (TFD_CLOEXEC | TFD_NONBLOCK) as i32;
+    if flags & !allowed != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let timer = TimerfdFile::new();
+    let ops: Arc<dyn FileOps> = timer;
+
+    let mut open_flags = OpenFlags::ReadWrite;
+    if flags & TFD_NONBLOCK as i32 != 0 {
+        open_flags |= OpenFlags::NonBlocking;
+    }
+    let file = File::open_disconnected(ops, open_flags)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let mut open_files = proc.open_files.lock();
+    open_files
+        .open_file(
+            FileDescription {
+                file,
+                close_on_exec: AtomicBool::new(flags & TFD_CLOEXEC as i32 != 0),
+            },
+            0,
+        )
+        .ok_or(Errno::EMFILE)
+}
+
+#[wrap_syscall]
+pub fn timerfd_gettime(fd: i32, value: UserPtr<itimerspec>) -> EResult<i32> {
+    let file = {
+        let proc = Scheduler::get_current().get_process();
+        let proc_inner = proc.open_files.lock();
+        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
+    let timer = Arc::downcast::<TimerfdFile>(file.ops.clone()).map_err(|_| Errno::EINVAL)?;
+
+    let mut value = value;
+    let now = clock::get_elapsed();
+    value.write(timer.gettime(now)).ok_or(Errno::EFAULT)?;
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn timerfd_settime(
+    fd: i32,
+    flags: i32,
+    new_value: UserPtr<itimerspec>,
+    old_value: UserPtr<itimerspec>,
+) -> EResult<i32> {
+    if flags & !TFD_TIMER_ABSTIME != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let file = {
+        let proc = Scheduler::get_current().get_process();
+        let proc_inner = proc.open_files.lock();
+        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
+    let timer = Arc::downcast::<TimerfdFile>(file.ops.clone()).map_err(|_| Errno::EINVAL)?;
+
+    let new = new_value.read().ok_or(Errno::EFAULT)?;
+    let interval_ns = timerfd::timespec_to_ns(new.it_interval)?;
+    let initial_ns = timerfd::timespec_to_ns(new.it_value)?;
+
+    let now = clock::get_elapsed();
+    let initial_deadline = if initial_ns == 0 {
+        // Disarm.
+        None
+    } else if flags & TFD_TIMER_ABSTIME != 0 {
+        Some(initial_ns)
+    } else {
+        Some(now.checked_add(initial_ns).ok_or(Errno::EINVAL)?)
+    };
+
+    let old = timer.settime(now, initial_deadline, interval_ns);
+
+    if !old_value.is_null() {
+        let mut old_value = old_value;
+        old_value.write(old).ok_or(Errno::EFAULT)?;
+    }
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn signalfd_create(mask: UserPtr<sigset_t>, flags: i32) -> EResult<i32> {
+    let allowed = (SFD_CLOEXEC | SFD_NONBLOCK) as i32;
+    if flags & !allowed != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let set = if !mask.is_null() {
+        let raw_mask = mask.read().ok_or(Errno::EFAULT)?;
+        SignalSet::from_raw(raw_mask)
+    } else {
+        SignalSet::from_raw(0)
+    };
+
+    let proc = Scheduler::get_current().get_process();
+    let ops: Arc<dyn FileOps> = Arc::new(SignalfdFile::new(proc.clone(), set));
+
+    let mut open_flags = OpenFlags::ReadWrite;
+    if flags & SFD_NONBLOCK as i32 != 0 {
+        open_flags |= OpenFlags::NonBlocking;
+    }
+    let file = File::open_disconnected(ops, open_flags)?;
+
+    let mut open_files = proc.open_files.lock();
+    open_files
+        .open_file(
+            FileDescription {
+                file,
+                close_on_exec: AtomicBool::new(flags & SFD_CLOEXEC as i32 != 0),
+            },
+            0,
+        )
+        .ok_or(Errno::EMFILE)
 }
