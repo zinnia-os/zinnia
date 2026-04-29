@@ -222,7 +222,7 @@ pub fn sendmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     let hdr_ptr = UserPtr::<msghdr>::new(hdr);
 
     let socket = get_socket(fd)?;
-    let nonblocking = is_fd_nonblocking(fd)?;
+    let nonblocking = is_fd_nonblocking(fd)? || flags as u32 & MSG_DONTWAIT != 0;
 
     let msg = hdr_ptr.read().ok_or(Errno::EFAULT)?;
 
@@ -255,7 +255,7 @@ pub fn recvmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     let hdr_ptr = UserPtr::<msghdr>::new(hdr);
 
     let socket = get_socket(fd)?;
-    let nonblocking = is_fd_nonblocking(fd)?;
+    let nonblocking = is_fd_nonblocking(fd)? || flags as u32 & MSG_DONTWAIT != 0;
 
     let msg = hdr_ptr.read().ok_or(Errno::EFAULT)?;
 

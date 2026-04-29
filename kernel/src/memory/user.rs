@@ -2,8 +2,12 @@
 
 use super::VirtAddr;
 use crate::arch;
-use alloc::{ffi::CString, vec::Vec};
-use core::{marker::PhantomData, slice};
+use alloc::{ffi::CString, string::String, vec::Vec};
+use core::{
+    fmt::Debug,
+    marker::{Copy, PhantomData},
+    slice,
+};
 
 /// Provides safe access to a single structure from userland.
 /// [`crate::uapi`] depends on this being the same size as a pointer.
@@ -83,7 +87,14 @@ impl<T: Sized + Copy> UserPtr<T> {
     }
 }
 
+impl<T: Copy> Debug for UserPtr<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.addr.fmt(f)
+    }
+}
+
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub struct UserCStr {
     addr: VirtAddr,
 }
@@ -91,6 +102,10 @@ pub struct UserCStr {
 impl UserCStr {
     pub const fn new(addr: VirtAddr) -> Self {
         Self { addr }
+    }
+
+    pub const fn is_null(&self) -> bool {
+        self.addr.is_null()
     }
 
     pub fn as_vec(&self, max_len: usize) -> Option<Vec<u8>> {
@@ -109,6 +124,16 @@ impl UserCStr {
 
     pub fn as_cstring(&self, max_len: usize) -> Option<CString> {
         Some(unsafe { CString::from_vec_unchecked(self.as_vec(max_len)?) })
+    }
+}
+
+impl Debug for UserCStr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if !self.is_null() {
+            f.write_str(&String::from_utf8_lossy(&self.as_vec(128).unwrap()))
+        } else {
+            f.write_str("<null>")
+        }
     }
 }
 

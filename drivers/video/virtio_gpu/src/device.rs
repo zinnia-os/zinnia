@@ -41,6 +41,41 @@ pub struct VirtioGpuDevice {
     cursor_hot_y: AtomicU32,
 }
 
+struct PhysPageAllocation {
+    base_addr: PhysAddr,
+    pages: usize,
+}
+
+impl PhysPageAllocation {
+    fn new(pages: usize) -> EResult<Self> {
+        let base_addr =
+            KernelAlloc::alloc(pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
+        Ok(Self { base_addr, pages })
+    }
+
+    fn phys(&self) -> PhysAddr {
+        self.base_addr
+    }
+
+    fn as_hhdm<T>(&self) -> *mut T {
+        self.base_addr.as_hhdm::<T>()
+    }
+
+    fn into_phys(self) -> PhysAddr {
+        let phys = self.base_addr;
+        core::mem::forget(self);
+        phys
+    }
+}
+
+impl Drop for PhysPageAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            KernelAlloc::dealloc(self.base_addr, self.pages);
+        }
+    }
+}
+
 struct ScanoutInfo {
     id: u32,
     width: u32,
@@ -89,12 +124,12 @@ impl VirtioGpuDevice {
         let cmd_phys = VirtAddr::from(cmd_ptr).as_hhdm().ok_or(Errno::EFAULT)?;
 
         // Allocate response buffer
-        let resp_phys = KernelAlloc::alloc(1, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-        let resp_ptr = resp_phys.as_hhdm::<R>();
+        let resp = PhysPageAllocation::new(1)?;
+        let resp_ptr = resp.as_hhdm::<R>();
 
         let buffers = vec![
             (cmd_phys, core::mem::size_of::<T>(), false),
-            (resp_phys, core::mem::size_of::<R>(), true),
+            (resp.phys(), core::mem::size_of::<R>(), true),
         ];
 
         {
@@ -188,9 +223,8 @@ impl VirtioGpuDevice {
         let cmd_size = core::mem::size_of::<VirtioGpuResourceAttachBacking>()
             + pages.len() * core::mem::size_of::<VirtioGpuMemEntry>();
         let cmd_pages = cmd_size.div_ceil(page_size);
-        let cmd_phys =
-            KernelAlloc::alloc(cmd_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-        let cmd_ptr = cmd_phys.as_hhdm::<u8>();
+        let cmd = PhysPageAllocation::new(cmd_pages)?;
+        let cmd_ptr = cmd.as_hhdm::<u8>();
 
         unsafe {
             let hdr = cmd_ptr as *mut VirtioGpuResourceAttachBacking;
@@ -209,12 +243,12 @@ impl VirtioGpuDevice {
         }
 
         // Allocate response buffer
-        let resp_phys = KernelAlloc::alloc(1, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-        let resp_ptr = resp_phys.as_hhdm::<VirtioGpuCtrlHdr>();
+        let resp = PhysPageAllocation::new(1)?;
+        let resp_ptr = resp.as_hhdm::<VirtioGpuCtrlHdr>();
 
         let buffers = vec![
-            (cmd_phys, cmd_size, false),
-            (resp_phys, core::mem::size_of::<VirtioGpuCtrlHdr>(), true),
+            (cmd.phys(), cmd_size, false),
+            (resp.phys(), core::mem::size_of::<VirtioGpuCtrlHdr>(), true),
         ];
 
         let mut queue = self.ctrl_queue.lock();
@@ -466,8 +500,7 @@ impl Device for VirtioGpuDevice {
 
         let num_pages = size.div_ceil(page_size);
         log!("Allocating {} pages for buffer (size={})", num_pages, size);
-        let base_addr =
-            KernelAlloc::alloc(num_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
+        let base_addr = PhysPageAllocation::new(num_pages)?.into_phys();
 
         let resource_id = self.alloc_resource_id();
         let format = match bpp {
@@ -555,27 +588,36 @@ impl Device for VirtioGpuDevice {
 
         let resource_id = virtio_buffer.resource_id;
 
-        // Get scanout information
-        let (scanout_id, scanout_width, scanout_height) = {
+        // Get scanout information and check whether the bound resource is already what we want.
+        let (scanout_id, scanout_width, scanout_height, needs_set_scanout) = {
             let scanouts = self.scanouts.lock();
             if let Some(scanout) = scanouts.first() {
-                (scanout.id, scanout.width, scanout.height)
+                let needs = scanout.current_resource != Some(resource_id);
+                (scanout.id, scanout.width, scanout.height, needs)
             } else {
                 error!("No scanouts available!");
                 return;
             }
         };
 
-        // Set the scanout to display this resource (use resource dimensions)
-        if let Err(e) = self.set_scanout(scanout_id, resource_id, scanout_width, scanout_height) {
-            error!("Failed to set scanout: {:?}", e);
-            return;
-        }
+        let transfer_width = framebuffer.width.min(scanout_width);
+        let transfer_height = framebuffer.height.min(scanout_height);
 
-        // Transfer the framebuffer contents to the host (use resource dimensions)
-        if let Ok(()) = self.transfer_to_host_2d(resource_id, 0, 0, scanout_width, scanout_height) {
-            // Flush the resource to make it visible (use resource dimensions)
-            if let Err(e) = self.flush_resource(resource_id, scanout_width, scanout_height) {
+        // Upload the new framebuffer contents before rebinding the scanout.
+        // Otherwise the host can briefly display stale pixels from this resource.
+        if let Ok(()) = self.transfer_to_host_2d(resource_id, 0, 0, transfer_width, transfer_height)
+        {
+            if needs_set_scanout
+                && let Err(e) =
+                    self.set_scanout(scanout_id, resource_id, transfer_width, transfer_height)
+            {
+                error!("Failed to set scanout: {:?}", e);
+                return;
+            }
+
+            // Flush after the upload/bind sequence so the visible scanout only ever sees
+            // the freshly transferred contents.
+            if let Err(e) = self.flush_resource(resource_id, transfer_width, transfer_height) {
                 error!("Failed to flush resource {}: {:?}", resource_id, e);
             }
         } else {
@@ -687,6 +729,16 @@ pub struct VirtioGpuBuffer {
     size: usize,
     width: u32,
     height: u32,
+}
+
+impl Drop for VirtioGpuBuffer {
+    fn drop(&mut self) {
+        let page_size = arch::virt::get_page_size();
+        let pages = self.size.div_ceil(page_size);
+        unsafe {
+            KernelAlloc::dealloc(self.base_addr, pages);
+        }
+    }
 }
 
 impl zinnia::memory::MemoryObject for VirtioGpuBuffer {

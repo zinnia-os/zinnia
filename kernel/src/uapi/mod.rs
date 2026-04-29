@@ -1,8 +1,10 @@
 #![allow(non_camel_case_types)]
 
+pub mod access;
 pub mod archctl;
 pub mod dirent;
 pub mod drm;
+pub mod epoll;
 pub mod errno;
 pub mod fcntl;
 pub mod input;
@@ -33,7 +35,7 @@ pub type gid_t = u32;
 pub type ino_t = usize;
 pub type mode_t = u32;
 pub type nlink_t = usize;
-pub type pid_t = usize;
+pub type pid_t = i32;
 pub type rlim_t = usize;
 pub type uid_t = u32;
 pub type fsblkcnt_t = usize;

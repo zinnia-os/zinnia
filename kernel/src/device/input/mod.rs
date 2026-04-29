@@ -244,6 +244,10 @@ impl FileOps for EventDevice {
                 ptr.write_slice(&out[..copy_len]).ok_or(Errno::EFAULT)?;
                 Ok(copy_len)
             }
+            // EVIOCGRAB / EVIOCREVOKE
+            0x90 | 0x91 => Ok(0),
+            // EVIOCSCLOCKID
+            0xa0 => Ok(0),
             _ => {
                 warn!("unhandled evdev ioctl {:#x}", nr);
                 Err(Errno::ENOTTY)

@@ -9,7 +9,7 @@ mod vfs;
 
 use crate::{
     arch::sched::Context,
-    memory::{UserPtr, VirtAddr},
+    memory::{UserCStr, UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
 };
 
@@ -74,6 +74,12 @@ impl<T: Copy> SyscallArg for UserPtr<T> {
     }
 }
 
+impl SyscallArg for UserCStr {
+    fn from_usize(arg: usize) -> EResult<UserCStr> {
+        Ok(UserCStr::new(VirtAddr::new(arg)))
+    }
+}
+
 #[macro_export]
 macro_rules! wrap_syscall {
     attr() {
@@ -87,7 +93,7 @@ macro_rules! wrap_syscall {
             fn inner($($arg : $arg_ty),*) -> $ret $body
 
             fn inner_wrapper(ctx: &mut $crate::arch::sched::Context) -> $ret {
-                inner(
+                let ($($arg),*) = (
                     $(
                         paste::paste! {
                             <$arg_ty as $crate::syscall::SyscallArg>::from_usize(
@@ -95,7 +101,19 @@ macro_rules! wrap_syscall {
                             )?
                         }
                     ),*
-                )
+                );
+
+                #[cfg(feature = "syscall_log")]
+                $crate::log!(
+                    concat!(stringify!($name), " called with args:", $(" ", stringify!($arg), "={:?}"),*),
+                    $($arg),*
+                );
+
+                let result = inner($($arg),*);
+                #[cfg(feature = "syscall_log")]
+                $crate::log!("-> {:?}", result);
+                result
+
             }
 
             $crate::syscall::SyscallReturn::into_ctx(inner_wrapper(ctx), ctx);
@@ -106,18 +124,18 @@ macro_rules! wrap_syscall {
 macro_rules! sys_unimpl {
     ($name:expr, $ret:expr) => {{
         #[wrap_syscall]
-        fn do_unimplemented() -> $crate::posix::errno::EResult<usize> {
+        fn unimp() -> $crate::posix::errno::EResult<usize> {
             $crate::warn!("Call to unimplemented syscall {}", $name);
             $ret
         }
-        do_unimplemented
+        unimp
     }};
 }
 
 /// Executes the syscall as identified by `num`.
 /// Returns a tuple of (value, error) to the user. An error code of 0 inidcates success.
 /// If the error code is not 0, `value` is not valid and indicates failure.
-pub fn dispatch(frame: &mut Context) {
+pub(crate) fn dispatch(frame: &mut Context) {
     let handler: fn(&mut Context) = match frame.syscall_number() {
         // System control
         numbers::SYSLOG => system::syslog,
@@ -128,8 +146,9 @@ pub fn dispatch(frame: &mut Context) {
 
         // Mapped memory
         numbers::MMAP => memory::mmap,
-        numbers::MUNMAP => sys_unimpl!("munmap", Ok(0)), // memory::munmap
+        numbers::MUNMAP => memory::munmap,
         numbers::MPROTECT => memory::mprotect,
+        numbers::MSYNC => memory::msync,
         numbers::MADVISE => sys_unimpl!("madvise", Err(Errno::ENOSYS)),
 
         // Signals
@@ -177,8 +196,8 @@ pub fn dispatch(frame: &mut Context) {
         numbers::FSTATVFS => vfs::fstatvfs,
         numbers::FACCESSAT => vfs::faccessat,
         numbers::FCNTL => vfs::fcntl,
-        numbers::FTRUNCATE => sys_unimpl!("ftruncate", Err(Errno::ENOSYS)),
-        numbers::FALLOCATE => sys_unimpl!("fallocate", Err(Errno::ENOSYS)),
+        numbers::FTRUNCATE => vfs::ftruncate,
+        numbers::FALLOCATE => vfs::fallocate,
         numbers::UTIMENSAT => sys_unimpl!("utimensat", Err(Errno::ENOSYS)),
         numbers::MKNODAT => sys_unimpl!("mknodat", Err(Errno::ENOSYS)),
         numbers::GETCWD => vfs::getcwd,
@@ -192,10 +211,10 @@ pub fn dispatch(frame: &mut Context) {
         numbers::FCHMODAT => vfs::fchmodat,
         numbers::FCHOWNAT => vfs::fchownat,
         numbers::LINKAT => vfs::linkat,
-        numbers::SYMLINKAT => sys_unimpl!("symlinkat", Err(Errno::ENOSYS)),
+        numbers::SYMLINKAT => vfs::symlinkat,
         numbers::UNLINKAT => vfs::unlinkat,
         numbers::READLINKAT => vfs::readlinkat,
-        numbers::FLOCK => sys_unimpl!("flock", Err(Errno::ENOSYS)),
+        numbers::FLOCK => vfs::flock,
         numbers::PPOLL => vfs::ppoll,
         numbers::DUP => vfs::dup,
         numbers::DUP3 => vfs::dup3,
@@ -206,6 +225,13 @@ pub fn dispatch(frame: &mut Context) {
         numbers::MOUNT => vfs::mount,
         numbers::UMOUNT => vfs::umount,
         numbers::PIPE => vfs::pipe,
+        numbers::EPOLL_CREATE => vfs::epoll_create,
+        numbers::EPOLL_CTL => vfs::epoll_ctl,
+        numbers::EPOLL_PWAIT => vfs::epoll_pwait,
+        numbers::TIMERFD_CREATE => vfs::timerfd_create,
+        numbers::TIMERFD_GETTIME => vfs::timerfd_gettime,
+        numbers::TIMERFD_SETTIME => vfs::timerfd_settime,
+        numbers::SIGNALFD_CREATE => vfs::signalfd_create,
 
         // Sockets
         numbers::SOCKET => socket::socket,
@@ -261,7 +287,7 @@ pub fn dispatch(frame: &mut Context) {
         numbers::ITIMER_GET => system::itimer_get,
         numbers::ITIMER_SET => system::itimer_set,
         numbers::CLOCK_GET => system::clock_get,
-        numbers::CLOCK_GETRES => sys_unimpl!("clock_getres", Err(Errno::ENOSYS)),
+        numbers::CLOCK_GETRES => system::clock_getres,
 
         // Scheduling
         numbers::SLEEP => system::sleep,

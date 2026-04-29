@@ -1,9 +1,12 @@
 pub mod cache;
+pub mod epoll;
 pub mod exec;
 pub mod file;
 pub mod fs;
 pub mod inode;
 pub mod pipe;
+pub mod signalfd;
+pub mod timerfd;
 
 pub use cache::Entry;
 pub use cache::PathNode;
@@ -92,6 +95,24 @@ pub fn symlink(
     }
 }
 
+/// Unlinks a file from the VFS.
+pub fn unlink(root: PathNode, cwd: PathNode, path: &[u8], identity: &Identity) -> EResult<()> {
+    let node = PathNode::lookup(root, cwd, path, identity, LookupFlags::MustExist)?;
+    let inode = node.entry.get_inode().ok_or(Errno::ENOENT)?;
+    if matches!(inode.node_ops, NodeOps::Directory(_)) {
+        return Err(Errno::EISDIR);
+    }
+
+    let parent = node.lookup_parent()?;
+    let parent_inode = parent.entry.get_inode().ok_or(Errno::ENOENT)?;
+    parent_inode.try_access(identity, OpenFlags::Write, false)?;
+
+    match &parent_inode.node_ops {
+        NodeOps::Directory(x) => x.unlink(&parent_inode, &node, identity),
+        _ => Err(Errno::ENOTDIR),
+    }
+}
+
 /// Creates a new node in the VFS.
 pub fn mknod(
     root: PathNode,
@@ -106,6 +127,7 @@ pub fn mknod(
         .lookup_parent()
         .and_then(|p| p.entry.get_inode().ok_or(Errno::ENOENT))
         .expect("Entry has no parent node?");
+    parent.try_access(identity, OpenFlags::Write, false)?;
 
     let dir = match &parent.node_ops {
         NodeOps::Directory(x) => x,

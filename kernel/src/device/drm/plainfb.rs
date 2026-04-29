@@ -121,7 +121,7 @@ impl Device for PlainDevice {
 
         Ok((
             Arc::new(PlainDumbBuffer {
-                id: 0,
+                id: self.obj_counter.alloc(),
                 size,
                 width,
                 height,
@@ -211,6 +211,15 @@ struct PlainDumbBuffer {
     size: usize,
     height: u32,
     addr: PhysAddr,
+}
+
+impl Drop for PlainDumbBuffer {
+    fn drop(&mut self) {
+        let pages = self.size.div_ceil(arch::virt::get_page_size());
+        unsafe {
+            KernelAlloc::dealloc(self.addr, pages);
+        }
+    }
 }
 
 impl BufferObject for PlainDumbBuffer {

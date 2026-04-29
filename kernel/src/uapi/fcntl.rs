@@ -83,3 +83,7 @@ pub const POSIX_FADV_SEQUENTIAL: u32 = 2;
 pub const POSIX_FADV_WILLNEED: u32 = 3;
 pub const POSIX_FADV_DONTNEED: u32 = 4;
 pub const POSIX_FADV_NOREUSE: u32 = 5;
+
+pub const SEEK_SET: i32 = 0;
+pub const SEEK_CUR: i32 = 1;
+pub const SEEK_END: i32 = 2;

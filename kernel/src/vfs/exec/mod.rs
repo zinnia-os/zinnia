@@ -25,6 +25,8 @@ pub struct ExecInfo {
     pub interpreter: Option<Arc<File>>,
     /// An address space for the new process.
     pub space: AddressSpace,
+    /// Path passed to execve.
+    pub exec_path: Vec<u8>,
     /// Arguments.
     pub argv: Vec<Vec<u8>>,
     /// Environment variables.

@@ -14,7 +14,7 @@ use core::{
     alloc::Layout,
     panic,
     ptr::null_mut,
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,6 +44,11 @@ pub struct Task {
     is_user: bool,
     /// The current state of the thread.
     pub state: SpinMutex<TaskState>,
+    /// Whether this task is currently present in some scheduler run queue.
+    /// Used by the scheduler to deduplicate enqueues from concurrent wakeups.
+    pub queued: AtomicBool,
+    /// Set by [`Scheduler::add_task`] when a wakeup arrives while this task is still `Running`.
+    pub wake_pending: AtomicBool,
     /// The saved context of a task while it is not running.
     pub task_context: SpinMutex<arch::sched::TaskContext>,
     /// The kernel stack for this task.
@@ -86,6 +91,8 @@ impl Task {
             uar: AtomicPtr::new(null_mut()),
             signal: SpinMutex::new(ThreadSignalState::default()),
             state: SpinMutex::new(TaskState::Ready),
+            queued: AtomicBool::new(false),
+            wake_pending: AtomicBool::new(false),
             task_context: SpinMutex::new(arch::sched::TaskContext::default()),
             kernel_stack,
             user_stack: AtomicUsize::new(0),
@@ -135,6 +142,15 @@ impl Task {
     pub fn has_pending_signals(&self) -> bool {
         let state = self.signal.lock();
         !(state.pending & !state.mask).is_empty()
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        let stack = self.kernel_stack.load(Ordering::Relaxed);
+        if stack != 0 {
+            unsafe { alloc::alloc::dealloc(stack as *mut u8, STACK_LAYOUT) };
+        }
     }
 }
 

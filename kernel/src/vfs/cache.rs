@@ -9,6 +9,8 @@ use crate::{
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{fmt::Debug, hint::unlikely};
 
+const MAX_SYMLINK_DEPTH: usize = 40;
+
 #[derive(Default)]
 pub enum EntryState {
     /// Entry is positive and contains a link to the inode.
@@ -99,6 +101,18 @@ impl PathNode {
         identity: &Identity,
         flags: LookupFlags,
     ) -> EResult<Self> {
+        let mut symlink_depth = 0;
+        Self::lookup_inner(root, start, path, identity, flags, &mut symlink_depth)
+    }
+
+    fn lookup_inner(
+        root: Self,
+        start: Self,
+        path: &[u8],
+        identity: &Identity,
+        flags: LookupFlags,
+        symlink_depth: &mut usize,
+    ) -> EResult<Self> {
         if unlikely(path.is_empty()) {
             return Err(Errno::ENOENT);
         }
@@ -118,7 +132,8 @@ impl PathNode {
                 return Err(Errno::EILSEQ);
             }
 
-            current_node = current_node.resolve_symlink(root.clone(), identity, flags)?;
+            current_node =
+                current_node.resolve_symlink(root.clone(), identity, flags, symlink_depth)?;
             let Some(inode) = current_node.entry.get_inode() else {
                 return Err(Errno::ENOENT);
             };
@@ -133,11 +148,11 @@ impl PathNode {
                 flags.contains(LookupFlags::UseRealId),
             )?;
 
-            current_node = current_node.lookup_child(component)?;
+            current_node = current_node.lookup_child(&root, component)?;
         }
 
         if flags.contains(LookupFlags::FollowSymlinks) {
-            current_node = current_node.resolve_symlink(root, identity, flags)?;
+            current_node = current_node.resolve_symlink(root, identity, flags, symlink_depth)?;
         }
 
         let inode = current_node.entry.get_inode();
@@ -150,36 +165,41 @@ impl PathNode {
         return Ok(current_node.clone());
     }
 
-    pub fn lookup_child(self, name: &[u8]) -> EResult<Self> {
+    pub fn lookup_child(self, root: &Self, name: &[u8]) -> EResult<Self> {
         // Traverse the mounts on the current entry.
         let crossed = Self::cross_mounts(self.mount.clone(), self.entry.clone())?;
-        let mount = crossed.mount;
-        let entry = crossed.entry;
+        let mount = crossed.mount.clone();
+        let entry = crossed.entry.clone();
 
-        // If this entry has already been looked up before, return that.
-        if let Some(child) = entry.children.lock().get(name) {
-            return Self::cross_mounts(mount, child.clone());
-        }
-
-        // If it hasn't, we have to perform a new lookup into the file system.
+        // A lookup only makes sense on directories.
         let parent = entry
             .get_inode()
             .expect("This directory didn't contain an inode");
-
-        // A lookup only makes sense on directories.
         let NodeOps::Directory(x) = &parent.node_ops else {
             return Err(Errno::ENOTDIR);
         };
 
         if name == b"." {
-            return Ok(self);
+            return Ok(crossed);
         }
 
         if name == b".." {
-            return match self.lookup_parent() {
-                Err(Errno::ENOENT) => Ok(self),
+            let crossed_root = Self::cross_mounts(root.mount.clone(), root.entry.clone())?;
+            if Arc::ptr_eq(&crossed.entry, &crossed_root.entry)
+                && Arc::ptr_eq(&crossed.mount, &crossed_root.mount)
+            {
+                return Ok(crossed);
+            }
+
+            return match crossed.lookup_parent() {
+                Err(Errno::ENOENT) => Ok(crossed),
                 x => x,
             };
+        }
+
+        // If this entry has already been looked up before, return that.
+        if let Some(child) = entry.children.lock().get(name) {
+            return Self::cross_mounts(mount, child.clone());
         }
 
         let child = PathNode {
@@ -247,27 +267,35 @@ impl PathNode {
         root: Self,
         identity: &Identity,
         flags: LookupFlags,
+        symlink_depth: &mut usize,
     ) -> EResult<Self> {
         let mut link_buf = vec![0u8; PATH_MAX as _];
         let mut current = self.clone();
         while let Some(inode) = current.entry.get_inode()
             && let NodeOps::SymbolicLink(symlink) = &inode.node_ops
         {
-            let parent = current.entry.parent.as_ref().expect("Should have a root");
-            let link_length = symlink.read_link(&inode, &mut link_buf)? as usize;
+            if *symlink_depth >= MAX_SYMLINK_DEPTH {
+                return Err(Errno::ELOOP);
+            }
+            *symlink_depth += 1;
 
-            let result = Self::lookup(
+            let parent = current.lookup_parent()?;
+            let link_length = symlink.read_link(&inode, &mut link_buf)? as usize;
+            let mut symlink_flags = flags;
+            symlink_flags.remove(LookupFlags::MustExist | LookupFlags::MustNotExist);
+
+            let result = Self::lookup_inner(
                 root.clone(),
-                PathNode {
-                    mount: self.mount.clone(),
-                    entry: parent.clone(),
-                },
+                parent,
                 &link_buf[0..link_length],
                 identity,
-                flags,
+                symlink_flags,
+                symlink_depth,
             )?;
 
-            if Arc::ptr_eq(&result.entry, &current.entry) {
+            if Arc::ptr_eq(&result.entry, &current.entry)
+                && Arc::ptr_eq(&result.mount, &current.mount)
+            {
                 return Err(Errno::ELOOP);
             }
             current = result;

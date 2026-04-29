@@ -147,6 +147,7 @@ pub const AT_EUID: u32 = 12;
 pub const AT_GID: u32 = 13;
 pub const AT_EGID: u32 = 14;
 pub const AT_SECURE: u32 = 23;
+pub const AT_EXECFN: u32 = 31;
 pub const AT_L4_AUX: u32 = 0xf0;
 pub const AT_L4_ENV: u32 = 0xf1;
 
@@ -513,6 +514,12 @@ impl ExecFormat for ElfFormat {
         let mut envp_offsets = Vec::with_capacity(info.envp.len());
         let mut argv_offsets = Vec::with_capacity(info.argv.len());
 
+        stack_off -= 1;
+        stack.write(&[0u8], stack_off);
+        stack_off -= info.exec_path.len();
+        stack.write(&info.exec_path, stack_off);
+        let execfn_offset = stack_start + stack_off;
+
         for env in &info.envp {
             stack_off -= 1;
             stack.write(&[0u8], stack_off);
@@ -550,6 +557,7 @@ impl ExecFormat for ElfFormat {
         write_auxv(AT_PHNUM, elf.at_phnum);
         write_auxv(AT_PHENT, elf.at_phent);
         write_auxv(AT_ENTRY, elf.at_entry);
+        write_auxv(AT_EXECFN, execfn_offset);
 
         // envp pointers
         stack_off -= size_of::<usize>();

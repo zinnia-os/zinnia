@@ -4,7 +4,7 @@
 use super::util::mutex::spin::SpinMutex;
 use crate::{process, process::task::Task, sched::Scheduler};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 #[initgraph::task(name = "generic.clock")]
 pub fn CLOCK_STAGE() {}
@@ -114,6 +114,7 @@ pub fn handle_tick() {
     let now = get_elapsed();
     wake_timeout_waiters(now);
     process::itimer::poll_interval_timers(now);
+    crate::vfs::timerfd::poll_timerfds(now);
 }
 
 /// Blocking wait for a given amount of nanoseconds.
@@ -174,3 +175,17 @@ static CLOCK: SpinMutex<Clock> = SpinMutex::new(Clock {
 });
 
 static TIMEOUT_WAITERS: SpinMutex<Vec<Arc<TimeoutWaiter>>> = SpinMutex::new(Vec::new());
+
+static BOOT_REALTIME_NS: AtomicI64 = AtomicI64::new(i64::MIN);
+
+pub fn set_realtime_ns(now_unix_ns: i64) {
+    let elapsed = get_elapsed() as i64;
+    BOOT_REALTIME_NS.store(now_unix_ns.saturating_sub(elapsed), Ordering::Release);
+}
+pub fn realtime_ns() -> Option<i64> {
+    let base = BOOT_REALTIME_NS.load(Ordering::Acquire);
+    if base == i64::MIN {
+        return None;
+    }
+    Some(base.saturating_add(get_elapsed() as i64))
+}

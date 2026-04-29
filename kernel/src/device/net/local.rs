@@ -40,7 +40,7 @@ const fn cmsg_align(x: usize) -> usize {
     (x + a - 1) & !(a - 1)
 }
 
-fn cmsg_len(payload: usize) -> usize {
+const fn cmsg_len(payload: usize) -> usize {
     cmsg_align(size_of::<cmsghdr>()) + payload
 }
 
@@ -104,6 +104,7 @@ struct LocalInner {
     backlog_limit: usize,
     shutdown: ShutdownFlags,
     peer_closed: bool,
+    owner_cred: ucred,
 }
 
 pub struct LocalSocket {
@@ -111,6 +112,16 @@ pub struct LocalSocket {
     rd_event: Event,
     wr_event: Event,
     accept_event: Event,
+}
+
+fn current_cred() -> ucred {
+    let proc = Scheduler::get_current().get_process();
+    let identity = proc.identity.lock();
+    ucred {
+        pid: proc.get_pid(),
+        uid: identity.effective_user_id,
+        gid: identity.effective_group_id,
+    }
 }
 
 fn make_socket(state: State, sock_type: u32) -> EResult<Arc<LocalSocket>> {
@@ -127,6 +138,7 @@ fn make_socket(state: State, sock_type: u32) -> EResult<Arc<LocalSocket>> {
             backlog_limit: 0,
             shutdown: ShutdownFlags::empty(),
             peer_closed: false,
+            owner_cred: current_cred(),
         }),
         rd_event: Event::new(),
         wr_event: Event::new(),
@@ -463,7 +475,12 @@ impl SocketOps for LocalSocket {
                 return Err(Errno::ECONNREFUSED);
             }
 
-            server_end.inner.lock().peer = Some(self_arc);
+            let listener_cred = listener_inner.owner_cred;
+            {
+                let mut server_inner = server_end.inner.lock();
+                server_inner.peer = Some(self_arc);
+                server_inner.owner_cred = listener_cred;
+            }
 
             let server_socket = Socket::new(AF_UNIX, sock_type, server_end.clone())?;
             listener_inner.backlog.push_back(server_socket);
@@ -721,6 +738,17 @@ impl SocketOps for LocalSocket {
                 let len = min(bytes.len(), buf.len());
                 buf[..len].copy_from_slice(&bytes[..len]);
                 Ok(size_of::<i32>())
+            }
+            SO_PEERCRED => {
+                let peer = self.inner.lock().peer.clone().ok_or(Errno::ENOTCONN)?;
+                let cred = peer.inner.lock().owner_cred;
+                let mut bytes = [0u8; size_of::<ucred>()];
+                bytes[0..4].copy_from_slice(&cred.pid.to_ne_bytes());
+                bytes[4..8].copy_from_slice(&cred.uid.to_ne_bytes());
+                bytes[8..12].copy_from_slice(&cred.gid.to_ne_bytes());
+                let len = min(bytes.len(), buf.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                Ok(size_of::<ucred>())
             }
             _ => Err(Errno::ENOPROTOOPT),
         }

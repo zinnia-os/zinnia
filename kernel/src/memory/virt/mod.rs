@@ -330,9 +330,58 @@ impl AddressSpace {
         Ok(())
     }
 
-    pub fn unmap(&self, addr: VirtAddr, len: NonZeroUsize) -> EResult<()> {
-        let _ = (len, addr);
-        // TODO
+    pub fn unmap(&mut self, addr: VirtAddr, len: NonZeroUsize) -> EResult<()> {
+        if addr.value().checked_add(len.into()).is_none() {
+            return Err(Errno::ENOMEM);
+        }
+
+        let page_size = arch::virt::get_page_size();
+        if !addr.value().is_multiple_of(page_size) {
+            return Err(Errno::EINVAL);
+        }
+
+        let start_page = addr.value() / page_size;
+        let end_page = start_page + divide_up(len.into(), page_size);
+
+        let overlapping = self
+            .mappings
+            .iter()
+            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for mapping in overlapping {
+            self.mappings.remove(&mapping);
+
+            let overlap_start = start_page.max(mapping.start_page);
+            let overlap_end = end_page.min(mapping.end_page);
+
+            for p in overlap_start..overlap_end {
+                let page_addr = (p * page_size).into();
+                _ = self.table.unmap_single::<KernelAlloc>(page_addr);
+            }
+
+            if mapping.start_page < overlap_start {
+                self.mappings.insert(MappedObject {
+                    start_page: mapping.start_page,
+                    end_page: overlap_start,
+                    offset_page: mapping.offset_page,
+                    object: mapping.object.clone(),
+                    flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                });
+            }
+
+            if overlap_end < mapping.end_page {
+                self.mappings.insert(MappedObject {
+                    start_page: overlap_end,
+                    end_page: mapping.end_page,
+                    offset_page: mapping.offset_page + (overlap_end - mapping.start_page),
+                    object: mapping.object.clone(),
+                    flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                });
+            }
+        }
+
         Ok(())
     }
 

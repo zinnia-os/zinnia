@@ -10,7 +10,11 @@ use crate::{
     util::{event::Event, mutex::spin::SpinMutex},
     wrap_syscall,
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::fmt::Write;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,16 +60,46 @@ pub fn setuname(addr: VirtAddr) -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn clock_get(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
+    let mut tp = UserPtr::new(tp);
+
+    const NS_TO_SEC: usize = 1000 * 1000 * 1000;
+
+    let ts = match clockid as usize {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+            // Wall-clock time (UTC) since the Unix epoch.
+            let realtime = clock::realtime_ns().unwrap_or(0);
+            let secs = realtime.div_euclid(NS_TO_SEC as i64);
+            let nsecs = realtime.rem_euclid(NS_TO_SEC as i64);
+            timespec {
+                tv_sec: secs as _,
+                tv_nsec: nsecs as _,
+            }
+        }
+        _ => {
+            // Default: monotonic time since boot.
+            let elapsed = clock::get_elapsed();
+            timespec {
+                tv_sec: (elapsed / NS_TO_SEC) as _,
+                tv_nsec: (elapsed % NS_TO_SEC) as _,
+            }
+        }
+    };
+
+    tp.write(ts).ok_or(Errno::EINVAL)?;
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn clock_getres(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
     let _ = clockid; // TODO: Respect clockid
 
     let mut tp = UserPtr::new(tp);
 
-    let elapsed = clock::get_elapsed();
-    const NS_TO_SEC: usize = 1000 * 1000 * 1000;
-
+    // Report nanosecond resolution.
     tp.write(timespec {
-        tv_sec: (elapsed / NS_TO_SEC) as _,
-        tv_nsec: (elapsed % NS_TO_SEC) as _,
+        tv_sec: 0,
+        tv_nsec: 1,
     })
     .ok_or(Errno::EINVAL)?;
 
@@ -103,7 +137,9 @@ pub fn futex_wait(pointer: VirtAddr, expected: i32, timeout: VirtAddr) -> EResul
 
 #[wrap_syscall]
 pub fn futex_wake(pointer: VirtAddr, all: bool) -> EResult<usize> {
-    let queue = get_futex_queue(pointer);
+    let Some(queue) = find_futex_queue(pointer) else {
+        return Ok(0);
+    };
 
     Ok(if all {
         queue.event.wake_all()
@@ -224,14 +260,52 @@ pub fn reboot(magic: u32, cmd: u32) -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
-    let request = UserPtr::new(request);
-    // TODO
-    let _remainder = UserPtr::<timespec>::new(remainder);
+    let request = UserPtr::<timespec>::new(request);
+    let mut remainder = UserPtr::<timespec>::new(remainder);
 
     let ts: timespec = request.read().ok_or(Errno::EFAULT)?;
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return Err(Errno::EINVAL);
+    }
 
-    // TODO: Actually sleep instead of blocking.
-    clock::block_ns(ts.tv_nsec as usize).unwrap();
+    // Convert request to a single nanosecond count, saturating on overflow.
+    let total_ns = (ts.tv_sec as usize)
+        .checked_mul(1_000_000_000)
+        .and_then(|s| s.checked_add(ts.tv_nsec as usize))
+        .unwrap_or(usize::MAX);
+
+    if total_ns == 0 {
+        return Ok(0);
+    }
+
+    let now = clock::get_elapsed();
+    let deadline = now.saturating_add(total_ns);
+    let guard = clock::timeout_at(deadline);
+
+    let task = Scheduler::get_current();
+    while !guard.expired() {
+        if task.has_pending_signals() {
+            // Report the unslept time in `remainder` if requested.
+            if !remainder.addr().is_null() {
+                let now = clock::get_elapsed();
+                let left = deadline.saturating_sub(now);
+                let rem = timespec {
+                    tv_sec: (left / 1_000_000_000) as isize,
+                    tv_nsec: (left % 1_000_000_000) as isize,
+                };
+                let _ = remainder.write(rem);
+            }
+            return Err(Errno::EINTR);
+        }
+        crate::percpu::CpuData::get().scheduler.do_yield();
+    }
+
+    if !remainder.addr().is_null() {
+        let _ = remainder.write(timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        });
+    }
 
     Ok(0)
 }
@@ -244,16 +318,47 @@ fn get_futex_queue(pointer: VirtAddr) -> Arc<FutexQueue> {
     };
 
     let mut futexes = FUTEXES.lock();
-    if let Some(queue) = futexes.iter().find(|queue| queue.key == key) {
-        return queue.clone();
+    let mut found = None;
+    futexes.retain(|queue| match queue.upgrade() {
+        Some(existing) => {
+            if existing.key == key {
+                found = Some(existing);
+            }
+            true
+        }
+        None => false,
+    });
+    if let Some(queue) = found {
+        return queue;
     }
 
     let queue = Arc::new(FutexQueue {
         key,
         event: Event::new(),
     });
-    futexes.push(queue.clone());
+    futexes.push(Arc::downgrade(&queue));
     queue
+}
+
+fn find_futex_queue(pointer: VirtAddr) -> Option<Arc<FutexQueue>> {
+    let proc = Scheduler::get_current().get_process();
+    let key = FutexKey {
+        address_space: Arc::as_ptr(&proc.address_space) as usize,
+        addr: pointer,
+    };
+
+    let mut futexes = FUTEXES.lock();
+    let mut found = None;
+    futexes.retain(|queue| match queue.upgrade() {
+        Some(existing) => {
+            if existing.key == key {
+                found = Some(existing);
+            }
+            true
+        }
+        None => false,
+    });
+    found
 }
 
 fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<usize>> {
@@ -286,4 +391,4 @@ fn timespec_to_ns(value: timespec) -> EResult<usize> {
         .ok_or(Errno::EINVAL)
 }
 
-static FUTEXES: SpinMutex<Vec<Arc<FutexQueue>>> = SpinMutex::new(Vec::new());
+static FUTEXES: SpinMutex<Vec<Weak<FutexQueue>>> = SpinMutex::new(Vec::new());
