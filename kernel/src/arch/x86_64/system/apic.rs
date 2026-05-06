@@ -533,7 +533,7 @@ pub fn get_isa_irq(irq: u8) -> Option<Arc<IoApicLine>> {
 
 #[initgraph::task(
     name = "arch.x86_64.find-ioapics",
-    depends = [crate::system::acpi::INIT_STAGE],
+    depends = [crate::device::acpi::INIT_STAGE],
 )]
 pub fn IOAPIC_STAGE() {
     let mut table = uacpi_table::default();

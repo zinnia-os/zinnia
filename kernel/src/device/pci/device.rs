@@ -1,7 +1,5 @@
-use crate::{
-    system::pci::config::Address,
-    {posix::errno::EResult, util::mutex::spin::SpinMutex},
-};
+use super::config::Address;
+use crate::{posix::errno::EResult, util::mutex::spin::SpinMutex};
 use alloc::vec::Vec;
 
 pub trait Device {

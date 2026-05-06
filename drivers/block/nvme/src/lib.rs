@@ -6,10 +6,10 @@ use zinnia::{
     alloc::format,
     core::sync::atomic::Ordering,
     device::block::register_block_device,
+    device::pci::{DeviceView, Driver, PciBar, PciVariant},
     error, log,
     memory::{MmioView, PhysAddr},
     posix::errno::{EResult, Errno},
-    system::pci::{DeviceView, Driver, PciBar, PciVariant},
 };
 
 mod command;

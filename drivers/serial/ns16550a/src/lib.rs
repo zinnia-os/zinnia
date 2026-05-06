@@ -2,9 +2,9 @@
 
 use zinnia::{
     alloc::string::String,
+    device::dt::{Node, driver::Driver},
     log,
     posix::errno::EResult,
-    system::dt::{Node, driver::Driver},
 };
 
 zinnia::module!("NS16550a serial driver", "Marvin Friedrich", main);

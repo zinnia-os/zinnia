@@ -71,7 +71,7 @@ impl Hpet {
 
 #[initgraph::task(
     name = "arch.x86_64.hpet",
-    depends = [crate::system::acpi::TABLES_STAGE],
+    depends = [crate::device::acpi::TABLES_STAGE],
 )]
 pub fn HPET_STAGE() {
     if let Ok(x) = Hpet::new() {

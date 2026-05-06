@@ -8,7 +8,7 @@ mod uacpi;
 static RSDP_ADDRESS: Once<PhysAddr> = Once::new();
 
 #[initgraph::task(
-    name = "system.acpi.tables",
+    name = "device.acpi.tables",
     depends = [crate::memory::MEMORY_STAGE],
 )]
 pub fn TABLES_STAGE() {

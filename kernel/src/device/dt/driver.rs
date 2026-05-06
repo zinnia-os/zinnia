@@ -1,9 +1,7 @@
+use super::{Node, TREE};
 use crate::{
-    system::dt::{Node, TREE},
-    {
-        posix::errno::{EResult, Errno},
-        util::mutex::spin::SpinMutex,
-    },
+    posix::errno::{EResult, Errno},
+    util::mutex::spin::SpinMutex,
 };
 use alloc::collections::{btree_map::BTreeMap, vec_deque::VecDeque};
 

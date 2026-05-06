@@ -1,12 +1,12 @@
+use super::{
+    config,
+    device::PciBar,
+    generic::{CAPABILITIES_PTR, REG13},
+};
 use crate::{
     memory::{
         Field,
         view::{BitValue, MemoryView, Register},
-    },
-    system::pci::{
-        config,
-        device::PciBar,
-        generic::{CAPABILITIES_PTR, REG13},
     },
     util::{align_down, once::Once},
 };

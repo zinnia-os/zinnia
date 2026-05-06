@@ -331,7 +331,7 @@ static FOUND_APS: SpinMutex<Vec<u32>> = SpinMutex::new(Vec::new());
     name = "arch.x86_64.discover-aps",
     depends = [
         crate::memory::MEMORY_STAGE,
-        crate::system::acpi::TABLES_STAGE,
+        crate::device::acpi::TABLES_STAGE,
         crate::clock::CLOCK_STAGE,
     ],
     entails = [crate::arch::INIT_STAGE],

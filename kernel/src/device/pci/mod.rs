@@ -1,9 +1,6 @@
+use crate::memory::view::MemoryView;
 use alloc::vec::Vec;
-
-use crate::{
-    memory::view::MemoryView,
-    system::pci::config::common::{DEVICE_ID, REG0, VENDOR_ID},
-};
+use config::common::{DEVICE_ID, REG0, VENDOR_ID};
 
 mod config;
 pub use config::*;

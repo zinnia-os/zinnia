@@ -1,9 +1,9 @@
 use crate::{
+    device::pci::{self, Access, EcamPciAccess},
     memory::{
         pmm::KernelAlloc,
         virt::{VmFlags, mmu::PageTable},
     },
-    system::pci::{Access, EcamPciAccess},
 };
 use alloc::{boxed::Box, vec::Vec};
 use uacpi_sys::{
@@ -12,7 +12,7 @@ use uacpi_sys::{
 };
 
 #[initgraph::task(
-    name = "system.acpi.mcfg",
+    name = "device.acpi.mcfg",
     depends = [
         super::TABLES_STAGE,
         crate::memory::MEMORY_STAGE
@@ -59,6 +59,6 @@ pub fn MCFG_STAGE() {
         uacpi_table_unref(&mut table);
 
         // We have an MCFG, so reinitialize the PciAccess callbacks.
-        crate::system::pci::ACCESS.init(accesses);
+        pci::ACCESS.init(accesses);
     };
 }

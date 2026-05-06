@@ -5,11 +5,13 @@ use virtio::{VirtQueue, VirtioDevice};
 use zinnia::{
     alloc::sync::Arc,
     arch,
-    device::drm::DrmFile,
+    device::{
+        drm::DrmFile,
+        pci::{DeviceView, Driver, PciVariant},
+    },
     error, log,
     memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr},
     posix::errno::{EResult, Errno},
-    system::pci::{DeviceView, Driver, PciVariant},
     util::mutex::spin::SpinMutex,
 };
 

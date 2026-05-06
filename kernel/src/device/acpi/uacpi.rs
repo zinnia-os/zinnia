@@ -3,17 +3,14 @@
 #![allow(unused)]
 
 use crate::{
-    arch,
-    system::pci::{ACCESS, Access, Address},
-    {
-        clock,
-        memory::{
-            free, malloc,
-            pmm::KernelAlloc,
-            virt::{VmFlags, mmu::PageTable},
-        },
-        util::{self, spin::SpinLock},
+    arch, clock,
+    device::pci::{ACCESS, Access, Address},
+    memory::{
+        free, malloc,
+        pmm::KernelAlloc,
+        virt::{VmFlags, mmu::PageTable},
     },
+    util::{self, spin::SpinLock},
 };
 use alloc::{alloc::GlobalAlloc, boxed::Box};
 use core::{

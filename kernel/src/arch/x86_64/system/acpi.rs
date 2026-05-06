@@ -1,5 +1,5 @@
 use super::super::asm;
-use crate::system::pci::{Access, Address};
+use crate::device::pci::{Access, Address};
 use alloc::boxed::Box;
 use uacpi_sys::{
     UACPI_STATUS_OK, uacpi_handle, uacpi_io_addr, uacpi_size, uacpi_status, uacpi_u8, uacpi_u16,
@@ -138,9 +138,9 @@ impl Access for PortIoAccess {
 
 #[initgraph::task(
     name = "arch.x86_64.acpi",
-    entails = [crate::system::acpi::INIT_STAGE],
+    entails = [crate::device::acpi::INIT_STAGE],
     depends = [crate::memory::MEMORY_STAGE],
 )]
 fn ACPI_STAGE() {
-    unsafe { crate::system::pci::ACCESS.init(vec![Box::new(PortIoAccess)]) };
+    unsafe { crate::device::pci::ACCESS.init(vec![Box::new(PortIoAccess)]) };
 }

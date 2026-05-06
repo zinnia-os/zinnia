@@ -2,10 +2,10 @@
 
 use zinnia::{
     core::sync::atomic::{self, Ordering},
+    device::pci::{DeviceView, PciBar},
     log,
     memory::{MmioView, PhysAddr, Register, UnsafeMemoryView},
     posix::errno::{EResult, Errno},
-    system::pci::{DeviceView, PciBar},
 };
 
 pub const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;

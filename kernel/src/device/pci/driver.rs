@@ -1,26 +1,10 @@
+use super::{ACCESS, DeviceView, config, device::PCI_DEVICES};
 use crate::{
-    system::pci::{ACCESS, DeviceView, config, device::PCI_DEVICES},
-    {
-        memory::view::MemoryView,
-        posix::errno::{EResult, Errno},
-        util::mutex::spin::SpinMutex,
-    },
+    memory::view::MemoryView,
+    posix::errno::{EResult, Errno},
+    util::mutex::spin::SpinMutex,
 };
 use alloc::collections::btree_map::BTreeMap;
-
-kernel_proc::pci_variant_builders! {
-    MassStorageController = 0x01 {
-        SerialAtaController = 0x06 {},
-        NonVolatileMemoryController = 0x08 {
-            NvmExpressController = 0x02,
-        },
-    },
-    SerialBusController = 0x0C {
-        UsbController = 0x03 {
-            XhciController = 0x30,
-        },
-    },
-}
 
 /// Drivers can use this to create bindings.
 /// Any field that is a [`Some`] variant will be matched on.
