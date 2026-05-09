@@ -50,7 +50,7 @@ pub struct Process {
     /// The display name of this process.
     name: String,
     /// The parent of this process, or [`None`], if this is the init process.
-    parent: Option<Weak<Process>>,
+    parent: SpinMutex<Option<Weak<Process>>>,
     /// A list of [`Task`]s associated with this process.
     pub threads: SpinMutex<Vec<Arc<Task>>>,
     /// The address space for this process.
@@ -123,12 +123,7 @@ impl Process {
     /// Gets the parent process of this process.
     /// Returns [`None`], if it is the init process.
     pub fn get_parent(&self) -> Option<Arc<Self>> {
-        // TODO: The upgrade should never fail.
-        // If it does, then somehow the child was alive but the parent was not.
-        self.parent.as_ref().map(|x| {
-            x.upgrade()
-                .expect("FIXME: Child process was alive for longer than the parent")
-        })
+        self.parent.lock().as_ref().and_then(Weak::upgrade)
     }
 
     pub fn new(name: String, parent: Option<Arc<Self>>) -> EResult<Self> {
@@ -139,7 +134,7 @@ impl Process {
         let forked = Arc::new(Self {
             id: PID_COUNTER.fetch_add(1, Ordering::Acquire) as _,
             name: self.name.clone(),
-            parent: Some(Arc::downgrade(&self)),
+            parent: SpinMutex::new(Some(Arc::downgrade(&self))),
             threads: SpinMutex::new(Vec::new()),
             address_space: Arc::new(SpinMutex::new(self.address_space.lock().fork()?)),
             root_dir: SpinMutex::new(self.root_dir.lock().clone()),
@@ -215,7 +210,7 @@ impl Process {
         Ok(Self {
             id,
             name,
-            parent: parent.map(|x| Arc::downgrade(&x)),
+            parent: SpinMutex::new(parent.map(|x| Arc::downgrade(&x))),
             threads: SpinMutex::new(Vec::new()),
             address_space: Arc::new(SpinMutex::new(space)),
             status: SpinMutex::new(ProcessState::Running),

@@ -425,7 +425,7 @@ pub fn deliver_pending_signals(context: &mut Context) {
             match sig.default_action() {
                 DefaultAction::Ignore | DefaultAction::Continue => continue,
                 DefaultAction::Terminate | DefaultAction::CoreDump => {
-                    Process::exit(0x7f + sig.as_raw() as u8);
+                    Process::exit_signal(sig);
                 }
                 DefaultAction::Stop => {
                     enter_stopped_state(&proc, sig);
