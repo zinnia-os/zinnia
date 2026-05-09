@@ -3,11 +3,13 @@
 use crate::controller::Controller;
 use core::sync::atomic::AtomicUsize;
 use zinnia::{
-    alloc::format,
+    alloc::{boxed::Box, format},
     core::sync::atomic::Ordering,
     device::block::register_block_device,
-    device::pci::{DeviceView, Driver, PciBar, PciVariant},
-    error, log,
+    device::pci::{DeviceView, Driver, PciBar, PciVariant, common},
+    error,
+    irq::{IrqHandler, Status},
+    log,
     memory::{MmioView, PhysAddr},
     posix::errno::{EResult, Errno},
 };
@@ -21,8 +23,37 @@ mod spec;
 
 static NVME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
+struct NvmeIrqHandler;
+
+impl IrqHandler for NvmeIrqHandler {
+    fn raise(&mut self) -> Status {
+        Status::Handled
+    }
+}
+
+fn probe(_: &PciVariant, mut view: DeviceView<'static>) -> EResult<()> {
     log!("Probing NVMe device on {}", view.address());
+
+    // Enable MMIO decoding and DMA. We only support MSI-X/polling, so keep legacy INTx disabled.
+    let cmd = view
+        .access()
+        .read16(view.address(), common::REG1.offset() as u32);
+    view.access().write16(
+        view.address(),
+        common::REG1.offset() as u32,
+        cmd | (1 << 1) | (1 << 2) | (1 << 10),
+    );
+
+    let irq_line = {
+        match view.setup_msix() {
+            Ok(line) => Some(line),
+            Err(_) => {
+                log!("NVMe MSI-X setup failed, falling back to polling completions");
+                None
+            }
+        }
+    };
+
     let bar = view.bar(0).ok_or(Errno::ENXIO)?;
     let (addr, size) = match bar {
         PciBar::Mmio32 { address, size, .. } => (address as usize, size),
@@ -30,14 +61,6 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
         _ => unreachable!("PCI NVMe devices are MMIO-only"),
     };
     let regs = unsafe { MmioView::new(PhysAddr::new(addr as _), size) };
-
-    // TODO: Support legacy PCI interrupts.
-    // TODO: Setup MSI-X.
-    // let mut cap = view
-    //     .capabilities()
-    //     .filter_map(|mut x| x.msix())
-    //     .next()
-    //     .ok_or(Errno::ENXIO)?;
 
     let controller = match Controller::new_pci(regs) {
         Ok(x) => x,
@@ -47,8 +70,13 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
         }
     };
 
+    if let Some(irq_line) = &irq_line {
+        irq_line.attach(Box::new(NvmeIrqHandler));
+        irq_line.unmask();
+    }
+
     // Reset the controller to initialize all queues and other structures.
-    if let Err(e) = controller.reset() {
+    if let Err(e) = controller.reset(irq_line.as_ref().map(|_| 0)) {
         error!("Failed to reset controller: {e}");
         return Err(Errno::ENODEV);
     };

@@ -3,9 +3,10 @@ use crate::{
     error::NvmeError,
     spec::{self, CompletionEntry, CompletionStatus},
 };
+use core::hint::spin_loop;
 use zinnia::{
     alloc::sync::Arc,
-    log,
+    clock, log,
     memory::{
         AllocFlags, KernelAlloc, MmioView, PageAllocator, PhysAddr, Register, UnsafeMemoryView,
     },
@@ -14,6 +15,7 @@ use zinnia::{
 const DOORBELL_OFFSET: usize = 0x1000;
 const TAIL_DOORBELL: Register<u32> = Register::new(0);
 const HEAD_DOORBELL: Register<u32> = Register::new(4);
+const COMPLETION_TIMEOUT_NS: usize = 30_000_000_000;
 
 pub struct Queue {
     queue_id: usize,
@@ -77,12 +79,16 @@ impl Queue {
     }
 
     /// Registers a queue as an IO queue.
-    pub fn setup_io(&self, admin_queue: &mut Queue) -> Result<(), NvmeError> {
+    pub fn setup_io(
+        &self,
+        admin_queue: &mut Queue,
+        irq_vector: Option<u16>,
+    ) -> Result<(), NvmeError> {
         log!("Setting up queue {} for IO", self.get_id());
         admin_queue.submit_cmd(CreateCQCommand {
             queue: self,
-            irqs_enabled: false, // TODO: Enable interrupts.
-            irq_vector: 0,       // TODO: Give this a proper IRQ.
+            irqs_enabled: irq_vector.is_some(),
+            irq_vector: irq_vector.unwrap_or(0),
         })?;
 
         let completion = admin_queue.next_completion()?;
@@ -140,6 +146,7 @@ impl Queue {
 
         // Wait until the phase for this entry has changed.
         let mut dw3;
+        let deadline = clock::get_elapsed().saturating_add(COMPLETION_TIMEOUT_NS);
         loop {
             dw3 = unsafe {
                 view.read_reg(spec::cq_entry::DW3)
@@ -150,6 +157,12 @@ impl Queue {
             if dw3.read_field(spec::cq_entry::PHASE_TAG).value() == self.cq_phase {
                 break;
             }
+
+            if clock::get_elapsed() >= deadline {
+                return Err(NvmeError::Timeout);
+            }
+
+            spin_loop();
         }
 
         // Then, read the rest of the completion queue entry.

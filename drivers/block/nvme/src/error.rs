@@ -7,6 +7,8 @@ pub enum NvmeError {
     MissingQueue,
     AllocationFailed,
     CommandFailed,
+    Timeout,
+    ControllerFailed,
 }
 
 impl Display for NvmeError {
@@ -17,6 +19,8 @@ impl Display for NvmeError {
             NvmeError::MissingQueue => f.write_str("Attempted to write to a missing queue"),
             NvmeError::AllocationFailed => f.write_str("Failed to allocate enough memory"),
             NvmeError::CommandFailed => f.write_str("A command didn't complete successfully"),
+            NvmeError::Timeout => f.write_str("Timed out waiting for the controller"),
+            NvmeError::ControllerFailed => f.write_str("The controller reported a fatal error"),
         }
     }
 }

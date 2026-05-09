@@ -4,13 +4,16 @@ use super::{
     generic::{CAPABILITIES_PTR, REG13},
 };
 use crate::{
+    arch,
+    irq::{IrqLine, Polarity, TriggerMode},
     memory::{
-        Field,
+        Field, MmioView, PhysAddr, UnsafeMemoryView,
         view::{BitValue, MemoryView, Register},
     },
+    posix::errno::{EResult, Errno},
     util::{align_down, once::Once},
 };
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{fmt::Display, marker::PhantomData};
 use num_traits::{FromBytes, NumCast, PrimInt, ToBytes};
 
@@ -225,6 +228,60 @@ impl<'a> DeviceView<'a> {
 
         kind.is_valid().then_some(kind)
     }
+
+    pub fn setup_msix(&mut self) -> EResult<Arc<dyn IrqLine>> {
+        let (bir, table_offset) = {
+            let mut found = None;
+            for mut cap in self.capabilities() {
+                if let Some(msix) = cap.msix() {
+                    found = Some(msix);
+                    break;
+                }
+            }
+            let cap = found.ok_or(Errno::ENODEV)?;
+            (cap.bir(), cap.table_offset() as usize)
+        };
+
+        log!("MSI-X table at BAR{} + {:#x}", bir, table_offset);
+
+        // Map the first MSI-X table entry (16 bytes).
+        let bar = self.bar(bir as usize).ok_or(Errno::ENODEV)?;
+        let bar_addr = match bar {
+            PciBar::Mmio32 { address, .. } => address as usize,
+            PciBar::Mmio64 { address, .. } => address as usize,
+            _ => return Err(Errno::EINVAL),
+        };
+
+        let table_view = unsafe { MmioView::new(PhysAddr::new(bar_addr + table_offset), 16) };
+
+        let msi = arch::irq::allocate_msi().ok_or(Errno::ENOMEM)?;
+        let line = msi.clone() as Arc<dyn IrqLine>;
+        line.program(Some((TriggerMode::Edge, Polarity::High)));
+
+        // Write entry 0: address (lo/hi), data, vector control = 0 (unmasked).
+        let msg_addr = msi.msg_addr().value() as u64;
+        let msg_data = msi.msg_data();
+        unsafe {
+            let addr_lo: Register<u32> = Register::new(0x00).with_le();
+            let addr_hi: Register<u32> = Register::new(0x04).with_le();
+            let data_reg: Register<u32> = Register::new(0x08).with_le();
+            let ctrl_reg: Register<u32> = Register::new(0x0C).with_le();
+            table_view.write_reg(addr_lo, msg_addr as u32);
+            table_view.write_reg(addr_hi, (msg_addr >> 32) as u32);
+            table_view.write_reg(data_reg, msg_data);
+            table_view.write_reg(ctrl_reg, 0u32);
+        }
+
+        // Enable MSI-X on the device.
+        for mut cap in self.capabilities() {
+            if let Some(mut msix) = cap.msix() {
+                msix.set_state(true);
+                break;
+            }
+        }
+
+        Ok(line)
+    }
 }
 
 impl<'a> MemoryView for DeviceView<'a> {
@@ -375,11 +432,13 @@ impl<'a> Capability<'a, MsiXCapability> {
     pub fn set_state(&mut self, status: bool) {
         let reg: Register<u32> = Register::new(self.cap as usize);
         let enable: Field<_, u8> = Field::new_bits(reg, 31..=31);
+        let function_mask: Field<_, u8> = Field::new_bits(reg, 30..=30);
         let old = self
             .view
             .read_reg(reg)
             .unwrap()
-            .write_field(enable, status as u8);
+            .write_field(enable, status as u8)
+            .write_field(function_mask, false as u8);
         self.view.write_reg(reg, old.value());
     }
 
@@ -394,11 +453,7 @@ impl<'a> Capability<'a, MsiXCapability> {
 
     pub fn table_offset(&self) -> u32 {
         let reg: Register<u32> = Register::new(self.cap as usize + 4);
-        let field: Field<_, u32> = Field::new_bits(reg, 3..=31);
-        self.view
-            .read_reg(reg)
-            .map(|x| x.read_field(field).value())
-            .unwrap()
+        self.view.read_reg(reg).map(|x| x.value() & !0x7).unwrap()
     }
 }
 

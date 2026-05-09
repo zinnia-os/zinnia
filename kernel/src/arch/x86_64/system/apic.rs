@@ -250,7 +250,7 @@ impl LocalApic {
 
         let msi = Arc::new(ApicMsiLine {
             state: IrqLineState::new(),
-            vector: 0,
+            vector: (line as u8).wrapping_add(0x20),
             lapic: self.id() as u8,
         });
         lines[line] = Some(msi.clone());
@@ -288,6 +288,10 @@ impl IrqLine for ApicMsiLine {
     fn mask(&self) {}
 
     fn unmask(&self) {}
+
+    fn end_of_interrupt(&self) {
+        LAPIC.get().eoi();
+    }
 }
 
 #[allow(unused)]

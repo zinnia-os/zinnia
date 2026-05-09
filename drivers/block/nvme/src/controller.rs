@@ -5,7 +5,7 @@ use crate::{
     queue::Queue,
     spec::{self},
 };
-use core::{cmp::min, slice, sync::atomic::AtomicU32};
+use core::{cmp::min, hint::spin_loop, slice, sync::atomic::AtomicU32};
 use zinnia::{
     alloc::{
         string::{String, ToString},
@@ -30,6 +30,7 @@ pub struct Controller {
     /// The amount of bytes between two doorbells.
     doorbell_stride: usize,
     mps_min: usize,
+    mps: u8,
     /// Serial number of the controller.
     serial: SpinMutex<Option<String>>,
     /// Model name of the controller.
@@ -63,17 +64,19 @@ impl Controller {
         let mps_max = 1usize << (cap.read_field(spec::regs::cap::MPSMAX).value() + 12);
         let mps_min = 1usize << (cap.read_field(spec::regs::cap::MPSMIN).value() + 12);
         let page_size = zinnia::arch::virt::get_page_size();
-        if mps_min > page_size && mps_max < page_size {
+        if page_size < mps_min || page_size > mps_max {
             error!("Host page size is not supported on this NVMe!");
             return Err(NvmeError::UnsupportedPageSize);
         }
 
         let doorbell_stride = 4 << cap.read_field(spec::regs::cap::DSTRD).value();
+        let mps = page_size.ilog2() as u8 - 12;
 
         Ok(Arc::new(Self {
             regs: Arc::new(regs),
             doorbell_stride,
             mps_min,
+            mps,
             admin_queue: SpinMutex::new(None),
             io_queue: SpinMutex::new(None),
             serial: SpinMutex::new(None),
@@ -84,7 +87,7 @@ impl Controller {
         }))
     }
 
-    pub fn reset(&self) -> Result<(), NvmeError> {
+    pub fn reset(&self, io_irq_vector: Option<u16>) -> Result<(), NvmeError> {
         // Disable the controller.
         self.set_status(false)?;
 
@@ -116,6 +119,7 @@ impl Controller {
 
         let cc = unsafe { self.regs.read_reg(spec::regs::CC) }
             .ok_or(NvmeError::MmioFailed)?
+            .write_field(spec::regs::cc::MPS, self.mps)
             .write_field(spec::regs::cc::IOCQES, spec::cq_entry::SIZE.ilog2() as u8)
             .write_field(spec::regs::cc::IOSQES, spec::sq_entry::SIZE.ilog2() as u8);
 
@@ -130,7 +134,7 @@ impl Controller {
 
         // Create an IO queue.
         let io_queue = Queue::new(self.regs.clone(), self.doorbell_stride, 1, queue_depth)?;
-        io_queue.setup_io(&mut admin_queue)?;
+        io_queue.setup_io(&mut admin_queue, io_irq_vector)?;
 
         *self.admin_queue.lock() = Some(admin_queue);
         *self.io_queue.lock() = Some(io_queue);
@@ -189,7 +193,9 @@ impl Controller {
             .ok_or(NvmeError::MmioFailed)?
             .value();
         if mdts != 0 {
-            *self.mdts.lock() = Some(mdts as usize * self.mps_min);
+            *self.mdts.lock() = (1usize)
+                .checked_shl(mdts.into())
+                .map(|pages| pages * self.mps_min);
         }
 
         unsafe { KernelAlloc::dealloc_bytes(identify_buffer, 4096) };
@@ -292,6 +298,11 @@ impl Controller {
 
     /// Sets the CC.EN flag.
     fn set_status(&self, enable: bool) -> Result<(), NvmeError> {
+        let cap = unsafe { self.regs.read_reg(spec::regs::CAP) }.ok_or(NvmeError::MmioFailed)?;
+        let timeout_ns =
+            (cap.read_field(spec::regs::cap::TO).value() as usize).max(1) * 500_000_000;
+        let deadline = clock::get_elapsed().saturating_add(timeout_ns);
+
         unsafe {
             let cc = self
                 .regs
@@ -303,7 +314,26 @@ impl Controller {
                 .ok_or(NvmeError::MmioFailed)?;
         }
 
-        clock::block_ns(100000).unwrap();
+        loop {
+            let csts =
+                unsafe { self.regs.read_reg(spec::regs::CSTS) }.ok_or(NvmeError::MmioFailed)?;
+
+            if csts.read_field(spec::regs::csts::CFS).value() != 0 {
+                return Err(NvmeError::ControllerFailed);
+            }
+
+            let ready = csts.read_field(spec::regs::csts::RDY).value() != 0;
+            if ready == enable {
+                break;
+            }
+
+            if clock::get_elapsed() >= deadline {
+                return Err(NvmeError::Timeout);
+            }
+
+            spin_loop();
+        }
+
         Ok(())
     }
 }

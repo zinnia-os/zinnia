@@ -92,7 +92,7 @@ impl Command for CreateCQCommand<'_> {
                 .write_field(
                     spec::sq_entry::create_cq::IEN,
                     if self.irqs_enabled { 1 } else { 0 },
-                ) // TODO: Enable interrupts.
+                )
                 .write_field(spec::sq_entry::create_cq::PC, 1); // Our buffer is physically contiguous.
 
             view.write_reg(spec::sq_entry::DPTR0, self.queue.get_cq_addr().into());
