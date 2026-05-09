@@ -329,7 +329,7 @@ impl FileOps for PtyMaster {
             uapi::ioctls::TIOCSIG => {
                 let ptr: UserPtr<i32> = UserPtr::new(arg);
                 let sig_num = ptr.read().ok_or(Errno::EFAULT)? as u32;
-                let sig = Signal::from_raw(sig_num).ok_or(Errno::EINVAL)?;
+                let sig = Signal::try_from(sig_num).map_err(|_| Errno::EINVAL)?;
                 self.pair.tty.signal_foreground(sig);
                 Ok(0)
             }

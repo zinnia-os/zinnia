@@ -10,11 +10,11 @@ use crate::{
     uapi::{self, pid_t},
     wrap_syscall,
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 #[wrap_syscall]
 pub fn sigaction(sig: u32, act_ptr: VirtAddr, oact_ptr: VirtAddr) -> EResult<usize> {
-    let sig = Signal::from_raw(sig).ok_or(Errno::EINVAL)?;
+    let sig = Signal::try_from(sig).map_err(|_| Errno::EINVAL)?;
 
     if sig.is_uncatchable() {
         return Err(Errno::EINVAL);
@@ -85,7 +85,7 @@ pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
 
     // Signal 0 is used to check permissions / process existence without sending.
     if sig_num != 0 {
-        let _ = Signal::from_raw(sig_num).ok_or(Errno::EINVAL)?;
+        let _ = Signal::try_from(sig_num).map_err(|_| Errno::EINVAL)?;
     }
 
     match pid {
@@ -96,7 +96,7 @@ pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
                 return Ok(0);
             }
 
-            let sig = Signal::from_raw(sig_num).unwrap();
+            let sig = Signal::try_from(sig_num).unwrap();
             if !signal::send_signal_to_process(&target, sig) {
                 return Err(Errno::ESRCH);
             }
@@ -111,7 +111,7 @@ pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
                 return Ok(0);
             }
 
-            let sig = Signal::from_raw(sig_num).unwrap();
+            let sig = Signal::try_from(sig_num).unwrap();
             if signal::send_signal_to_pgrp(pgrp, sig) == 0 {
                 return Err(Errno::ESRCH);
             }
@@ -123,14 +123,22 @@ pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
                 return Ok(0);
             }
 
-            let sig = Signal::from_raw(sig_num).unwrap();
-            let table = PROCESS_TABLE.lock();
+            let sig = Signal::try_from(sig_num).unwrap();
+            let targets = {
+                let table = PROCESS_TABLE.lock();
+                table
+                    .iter()
+                    .filter_map(|(&target_pid, proc)| {
+                        if target_pid <= 1 {
+                            return None;
+                        }
+                        proc.upgrade()
+                    })
+                    .collect::<Vec<_>>()
+            };
+
             let mut delivered = 0;
-            for (&target_pid, proc) in table.iter() {
-                if target_pid <= 1 {
-                    continue;
-                }
-                let Some(proc) = proc.upgrade() else { continue };
+            for proc in targets {
                 if signal::send_signal_to_process(&proc, sig) {
                     delivered += 1;
                 }
@@ -159,7 +167,7 @@ pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
                 return Ok(0);
             }
 
-            let sig = Signal::from_raw(sig_num).unwrap();
+            let sig = Signal::try_from(sig_num).unwrap();
             if signal::send_signal_to_pgrp(pgrp, sig) == 0 {
                 return Err(Errno::ESRCH);
             }

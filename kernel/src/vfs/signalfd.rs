@@ -53,7 +53,7 @@ impl SignalfdFile {
 
 fn make_siginfo(sig: Signal) -> signalfd_siginfo {
     signalfd_siginfo {
-        ssi_signo: sig.as_raw(),
+        ssi_signo: sig as u32,
         ssi_code: SI_USER as i32,
         ..Default::default()
     }

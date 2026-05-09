@@ -1,5 +1,3 @@
-use alloc::sync::Arc;
-
 use crate::{
     arch::sched::Context,
     process::{Process, ProcessState, task::Task},
@@ -9,11 +7,13 @@ use crate::{
         signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
     },
 };
+use alloc::{sync::Arc, vec::Vec};
 use core::{ops, sync::atomic::Ordering};
+use num_enum::TryFromPrimitive;
 
 /// POSIX signals represented as an enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
     SigAbrt = signal::SIGABRT,
     SigAlrm = signal::SIGALRM,
@@ -51,50 +51,6 @@ pub enum Signal {
 }
 
 impl Signal {
-    /// Try to convert a raw signal number to a [`Signal`].
-    pub const fn from_raw(num: u32) -> Option<Self> {
-        match num {
-            signal::SIGABRT => Some(Self::SigAbrt),
-            signal::SIGALRM => Some(Self::SigAlrm),
-            signal::SIGBUS => Some(Self::SigBus),
-            signal::SIGCHLD => Some(Self::SigChld),
-            signal::SIGCONT => Some(Self::SigCont),
-            signal::SIGFPE => Some(Self::SigFpe),
-            signal::SIGHUP => Some(Self::SigHup),
-            signal::SIGILL => Some(Self::SigIll),
-            signal::SIGINT => Some(Self::SigInt),
-            signal::SIGKILL => Some(Self::SigKill),
-            signal::SIGPIPE => Some(Self::SigPipe),
-            signal::SIGQUIT => Some(Self::SigQuit),
-            signal::SIGSEGV => Some(Self::SigSegv),
-            signal::SIGSTOP => Some(Self::SigStop),
-            signal::SIGTERM => Some(Self::SigTerm),
-            signal::SIGTSTP => Some(Self::SigTstp),
-            signal::SIGTTIN => Some(Self::SigTtin),
-            signal::SIGTTOU => Some(Self::SigTtou),
-            signal::SIGUSR1 => Some(Self::SigUsr1),
-            signal::SIGUSR2 => Some(Self::SigUsr2),
-            signal::SIGWINCH => Some(Self::SigWinch),
-            signal::SIGSYS => Some(Self::SigSys),
-            signal::SIGTRAP => Some(Self::SigTrap),
-            signal::SIGURG => Some(Self::SigUrg),
-            signal::SIGVTALRM => Some(Self::SigVtAlarm),
-            signal::SIGXCPU => Some(Self::SigXCpu),
-            signal::SIGXFSZ => Some(Self::SigXFsz),
-            signal::SIGIO => Some(Self::SigIo),
-            signal::SIGPOLL => Some(Self::SigPoll),
-            signal::SIGPROF => Some(Self::SigProf),
-            signal::SIGPWR => Some(Self::SigPwr),
-            signal::SIGIOT => Some(Self::SigIot),
-            signal::SIGCANCEL => Some(Self::SigCancel),
-            _ => None,
-        }
-    }
-
-    pub const fn as_raw(self) -> u32 {
-        self as u32
-    }
-
     /// Returns the default action for this signal.
     pub const fn default_action(self) -> DefaultAction {
         match self {
@@ -175,7 +131,7 @@ impl SignalSet {
     }
 
     pub const fn set(&mut self, sig: Signal, state: bool) {
-        let bit = 1u64 << sig.as_raw();
+        let bit = 1u64 << sig as u32;
         if state {
             self.inner |= bit;
         } else {
@@ -184,7 +140,7 @@ impl SignalSet {
     }
 
     pub const fn is_set(&self, sig: Signal) -> bool {
-        self.inner & (1u64 << sig.as_raw()) != 0
+        self.inner & (1u64 << sig as u32) != 0
     }
 
     pub const fn is_empty(&self) -> bool {
@@ -192,12 +148,12 @@ impl SignalSet {
     }
 
     /// Returns the lowest signal number that is set, or None.
-    pub const fn first_set(&self) -> Option<Signal> {
+    pub fn first_set(&self) -> Option<Signal> {
         if self.inner == 0 {
             return None;
         }
         let bit = self.inner.trailing_zeros();
-        Signal::from_raw(bit)
+        Signal::try_from(bit).ok()
     }
 
     /// Remove the unblockable signals (SIGKILL, SIGSTOP) from this set.
@@ -310,11 +266,11 @@ impl SignalState {
     }
 
     pub fn get_action(&self, sig: Signal) -> &SigAction {
-        &self.actions[sig.as_raw() as usize]
+        &self.actions[sig as usize]
     }
 
     pub fn set_action(&mut self, sig: Signal, action: SigAction) {
-        self.actions[sig.as_raw() as usize] = action;
+        self.actions[sig as usize] = action;
     }
 
     /// Reset all caught signal handlers to SIG_DFL (for execve).
@@ -498,7 +454,7 @@ pub fn deliver_pending_signals(context: &mut Context) {
         crate::arch::sched::setup_signal_frame(
             context,
             action.handler,
-            sig.as_raw(),
+            sig as u32,
             old_mask,
             action.restorer,
         );

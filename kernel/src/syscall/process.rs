@@ -170,7 +170,7 @@ pub fn setsid() -> EResult<pid_t> {
 
     // Fail if the process is already a process group leader.
     if *proc.pgrp.lock() == pid {
-        // Check that we're also kind of a session leader already — in that case EPERM.
+        // Check that we're also kind of a session leader already. In that case EPERM.
         // POSIX: setsid() fails if the calling process is already a process group leader.
         // However, init (pid 1) is always a pgrp leader, so allow it the first time.
         if *proc.session.lock() == pid {
@@ -258,6 +258,10 @@ fn encode_exit(code: u8) -> i32 {
     (code as i32) << 8
 }
 
+fn encode_signaled(sig: u32) -> i32 {
+    sig as i32
+}
+
 fn encode_stopped(sig: u32) -> i32 {
     0x7f | ((sig as i32) << 8)
 }
@@ -300,11 +304,15 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
                     reap = Some((idx, child.get_pid(), encode_exit(code)));
                     break;
                 }
+                ProcessState::Signaled(sig) => {
+                    reap = Some((idx, child.get_pid(), encode_signaled(sig as u32)));
+                    break;
+                }
                 ProcessState::Stopped(sig)
                     if (options & uapi::wait::WUNTRACED) != 0
                         && child.stop_unwaited.swap(false, Ordering::AcqRel) =>
                 {
-                    report = Some((child.get_pid(), encode_stopped(sig.as_raw())));
+                    report = Some((child.get_pid(), encode_stopped(sig as u32)));
                     break;
                 }
                 _ if (options & uapi::wait::WCONTINUED) != 0
@@ -367,10 +375,12 @@ const THREAD_NAME_MAX: usize = 16;
 
 #[wrap_syscall]
 pub fn thread_create(entry: usize, stack: usize) -> EResult<usize> {
-    let proc = Scheduler::get_current().get_process();
+    let current = Scheduler::get_current();
+    let proc = current.get_process();
     let task = Arc::new(crate::process::task::Task::new(
         to_user, entry, stack, &proc, true,
     )?);
+    task.signal.lock().mask = current.signal.lock().mask;
     let tid = task.get_id();
     proc.threads.lock().push(task.clone());
     Scheduler::add_task_to_best_cpu(task);
@@ -389,19 +399,23 @@ pub fn thread_exit() -> ! {
     };
 
     if last_thread {
+        drop(proc);
+        drop(task);
         Process::exit(0);
     }
 
+    drop(proc);
+    drop(task);
     Scheduler::kill_current();
 }
 
 #[wrap_syscall]
-pub fn thread_kill(pid: pid_t, tid: usize, sig: usize) -> EResult<pid_t> {
+pub fn thread_kill(pid: pid_t, tid: usize, sig: u32) -> EResult<pid_t> {
     let sig_num = sig as u32;
 
     // Signal 0 is used to check existence without sending.
     if sig_num != 0 {
-        let _ = Signal::from_raw(sig_num).ok_or(Errno::EINVAL)?;
+        let _ = Signal::try_from(sig_num).map_err(|_| Errno::EINVAL)?;
     }
 
     let target_proc = {
@@ -424,7 +438,7 @@ pub fn thread_kill(pid: pid_t, tid: usize, sig: usize) -> EResult<pid_t> {
     };
 
     if sig_num != 0 {
-        let sig = Signal::from_raw(sig_num).unwrap();
+        let sig = Signal::try_from(sig_num).unwrap();
         signal::send_signal_to_thread(&thread, sig);
     }
 

@@ -41,6 +41,7 @@ pub enum ProcessState {
     Running,
     Stopped(Signal),
     Exited(u8),
+    Signaled(Signal),
 }
 
 pub struct Process {
@@ -168,6 +169,7 @@ impl Process {
 
         // Create the main thread.
         let forked_thread = Arc::new(Task::new(to_user_context, raw_ctx as _, 0, &forked, true)?);
+        forked_thread.signal.lock().mask = Scheduler::get_current().signal.lock().mask;
         forked.threads.lock().push(forked_thread.clone());
         self.children.lock().push(forked.clone());
         PROCESS_TABLE
@@ -254,20 +256,20 @@ impl Process {
         argv: Vec<Vec<u8>>,
         envp: Vec<Vec<u8>>,
     ) -> EResult<()> {
-        let mut info = ExecInfo {
-            executable: file.clone(),
-            interpreter: None,
-            space: AddressSpace::new(),
-            exec_path,
-            argv,
-            envp,
-        };
-
-        let format = vfs::exec::identify(&file).ok_or(Errno::ENOEXEC)?;
-        let init = Arc::try_new(format.load(&self, &mut info)?)?;
-
-        // If we get here, then the loading of the executable was successful.
         {
+            let mut info = ExecInfo {
+                executable: file.clone(),
+                interpreter: None,
+                space: AddressSpace::new(),
+                exec_path,
+                argv,
+                envp,
+            };
+
+            let format = vfs::exec::identify(&file).ok_or(Errno::ENOEXEC)?;
+            let init = Arc::try_new(format.load(&self, &mut info)?)?;
+
+            // If we get here, then the loading of the executable was successful.
             let mut threads = self.threads.lock();
             threads.clear();
             threads.push(init.clone());
@@ -282,9 +284,11 @@ impl Process {
             drop(space);
             unsafe { new_table.set_active() };
             drop(old_space);
+            CpuData::get().scheduler.add_task(init);
         }
 
-        CpuData::get().scheduler.add_task(init);
+        drop(file);
+        drop(self);
 
         // execve never returns on success.
         Scheduler::kill_current();
@@ -292,11 +296,21 @@ impl Process {
 
     /// Exits the current process normally with the given exit code.
     pub fn exit(code: u8) -> ! {
+        Self::exit_with_state(ProcessState::Exited(code));
+    }
+
+    /// Exits the current process because of an unhandled terminating signal.
+    pub fn exit_signal(sig: Signal) -> ! {
+        Self::exit_with_state(ProcessState::Signaled(sig));
+    }
+
+    fn exit_with_state(new_state: ProcessState) -> ! {
         let task = Scheduler::get_current();
         let proc = task.get_process();
+        let pid = proc.get_pid();
 
-        if proc.get_pid() <= 1 {
-            panic!("Attempted to kill init with exit code {code}");
+        if pid <= 1 {
+            panic!("Attempted to kill init with process state {:?}", new_state);
         }
 
         PROCESS_TABLE.lock().remove(&proc.get_pid());
@@ -318,7 +332,7 @@ impl Process {
 
             let old_space = mem::replace(&mut *space, zombie_space);
             let new_table = space.table.clone();
-            *status = ProcessState::Exited(code);
+            *status = new_state;
 
             drop(space);
             drop(status);
@@ -336,6 +350,7 @@ impl Process {
                 let init = INIT.get();
                 let mut init_children = init.children.lock();
                 for child in our_children.drain(..) {
+                    *child.parent.lock() = Some(Arc::downgrade(init));
                     init_children.push(child);
                 }
                 // Wake init in case any of these children are already exited.
@@ -344,6 +359,9 @@ impl Process {
         }
 
         signal::notify_parent_of_child_state_change(&proc, false);
+
+        drop(proc);
+        drop(task);
 
         Scheduler::kill_current();
     }
