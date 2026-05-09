@@ -557,6 +557,7 @@ impl ExecFormat for ElfFormat {
         write_auxv(AT_PHNUM, elf.at_phnum);
         write_auxv(AT_PHENT, elf.at_phent);
         write_auxv(AT_ENTRY, elf.at_entry);
+        write_auxv(AT_PAGESZ, page_size);
         write_auxv(AT_EXECFN, execfn_offset);
 
         // envp pointers
