@@ -4,7 +4,10 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi,
-    util::{event::Event, mutex::spin::SpinMutex},
+    util::{
+        event::Event,
+        mutex::{Mutex, spin::SpinMutex},
+    },
     vfs::{
         cache::{LookupFlags, PathNode},
         inode::{Mode, NodeOps},
@@ -59,6 +62,15 @@ bitflags::bitflags! {
     }
 }
 
+pub enum FilePosition {
+    /// The file has no meaningful position.
+    Stream,
+    /// The file has a position, but reads or writes do not serialize the whole operation.
+    Position(Mutex<u64>),
+    /// Accesses through the shared file position are serialized.
+    AtomicPosition(Mutex<u64>),
+}
+
 #[derive(Debug)]
 pub enum SeekAnchor {
     /// Seek relative to the start of the file.
@@ -79,8 +91,7 @@ pub struct File {
     pub inode: Option<Arc<INode>>,
     /// File open flags.
     pub flags: SpinMutex<OpenFlags>,
-    /// Byte offset into the file.
-    pub offset: SpinMutex<u64>,
+    pub position: FilePosition,
     pub released: AtomicBool,
 }
 
@@ -248,6 +259,15 @@ pub trait FileOps: Sync + Send + Any {
 }
 
 impl File {
+    fn position_for_inode(inode: &INode) -> FilePosition {
+        match &inode.node_ops {
+            NodeOps::Regular(_) | NodeOps::Directory(_) => {
+                FilePosition::AtomicPosition(Mutex::new(0))
+            }
+            _ => FilePosition::Position(Mutex::new(0)),
+        }
+    }
+
     fn release_once(&self) -> EResult<()> {
         if self
             .released
@@ -255,6 +275,13 @@ impl File {
             .is_ok()
         {
             self.ops.release(self)?;
+        }
+        Ok(())
+    }
+
+    fn advance_offset(offset: &mut u64, amount: isize) -> EResult<()> {
+        if amount > 0 {
+            *offset = offset.checked_add(amount as u64).ok_or(Errno::EOVERFLOW)?;
         }
         Ok(())
     }
@@ -326,9 +353,9 @@ impl File {
                 let result = File {
                     path: Some(file_path.clone()),
                     ops: file_node.file_ops(),
-                    inode: Some(file_node),
+                    inode: Some(file_node.clone()),
                     flags: SpinMutex::new(flags),
-                    offset: SpinMutex::new(0),
+                    position: Self::position_for_inode(&file_node),
                     released: AtomicBool::new(false),
                 };
                 result.ops.acquire(&result, flags)?;
@@ -343,7 +370,7 @@ impl File {
             ops,
             inode: None,
             flags: SpinMutex::new(flags),
-            offset: SpinMutex::new(0),
+            position: FilePosition::Stream,
             released: AtomicBool::new(false),
         };
 
@@ -373,7 +400,7 @@ impl File {
                     ops: x.clone(),
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
-                    offset: SpinMutex::new(0),
+                    position: Self::position_for_inode(inode),
                     released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
@@ -385,7 +412,7 @@ impl File {
                     ops: x.clone(),
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
-                    offset: SpinMutex::new(0),
+                    position: Self::position_for_inode(inode),
                     released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
@@ -396,7 +423,7 @@ impl File {
                     ops: x.clone(),
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
-                    offset: SpinMutex::new(0),
+                    position: Self::position_for_inode(inode),
                     released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
@@ -418,11 +445,22 @@ impl File {
             return Ok(0);
         }
 
-        let mut offset = self.offset.lock();
-        let read = self.ops.read(self, buf, *offset)?;
-        *offset = offset.checked_add(read as u64).ok_or(Errno::EOVERFLOW)?;
-
-        Ok(read)
+        match &self.position {
+            FilePosition::Stream => self.ops.read(self, buf, 0),
+            FilePosition::AtomicPosition(offset) => {
+                let mut offset = offset.lock();
+                let read = self.ops.read(self, buf, *offset)?;
+                Self::advance_offset(&mut offset, read)?;
+                Ok(read)
+            }
+            FilePosition::Position(offset) => {
+                let mut pos = *offset.lock();
+                let read = self.ops.read(self, buf, pos)?;
+                Self::advance_offset(&mut pos, read)?;
+                *offset.lock() = pos;
+                Ok(read)
+            }
+        }
     }
 
     /// Reads into a buffer from a file at a specified offset.
@@ -430,6 +468,9 @@ impl File {
     pub fn pread(&self, buf: &mut IovecIter, offset: u64) -> EResult<isize> {
         if buf.is_empty() {
             return Ok(0);
+        }
+        if matches!(&self.position, FilePosition::Stream) {
+            return Err(Errno::ESPIPE);
         }
 
         self.ops.read(self, buf, offset)
@@ -448,11 +489,22 @@ impl File {
             return Ok(0);
         }
 
-        let mut offset = self.offset.lock();
-        let written = self.ops.write(self, buf, *offset)?;
-        *offset = offset.checked_add(written as u64).ok_or(Errno::EOVERFLOW)?;
-
-        Ok(written)
+        match &self.position {
+            FilePosition::Stream => self.ops.write(self, buf, 0),
+            FilePosition::AtomicPosition(offset) => {
+                let mut offset = offset.lock();
+                let written = self.ops.write(self, buf, *offset)?;
+                Self::advance_offset(&mut offset, written)?;
+                Ok(written)
+            }
+            FilePosition::Position(offset) => {
+                let mut pos = *offset.lock();
+                let written = self.ops.write(self, buf, pos)?;
+                Self::advance_offset(&mut pos, written)?;
+                *offset.lock() = pos;
+                Ok(written)
+            }
+        }
     }
 
     /// Writes a buffer to a file at a specified offset.
@@ -460,6 +512,9 @@ impl File {
     pub fn pwrite(&self, buf: &mut IovecIter, offset: u64) -> EResult<isize> {
         if buf.is_empty() {
             return Ok(0);
+        }
+        if matches!(&self.position, FilePosition::Stream) {
+            return Err(Errno::ESPIPE);
         }
 
         self.ops.write(self, buf, offset)
@@ -476,14 +531,19 @@ impl File {
     }
 
     pub fn seek(&self, offset: SeekAnchor) -> EResult<u64> {
-        let mut position = self.offset.lock();
-
         match self.inode.as_ref().ok_or(Errno::ESPIPE)?.node_ops {
             NodeOps::CharacterDevice(_) | NodeOps::Socket(_) | NodeOps::FIFO(_) => {
                 return Err(Errno::ESPIPE);
             }
             _ => (),
         }
+
+        let mut position = match &self.position {
+            FilePosition::Stream => return Err(Errno::ESPIPE),
+            FilePosition::Position(position) | FilePosition::AtomicPosition(position) => {
+                position.lock()
+            }
+        };
 
         match offset {
             SeekAnchor::Start(x) => {

@@ -119,7 +119,7 @@ impl Ext2Super {
             };
 
             if raw.s_magic != EXT2_MAGIC {
-                error!("ext2: bad magic: {:#x}", raw.s_magic);
+                error!("bad magic: {:#x}", raw.s_magic);
                 return Err(Errno::EINVAL);
             }
 
@@ -128,7 +128,7 @@ impl Ext2Super {
             let inode_size = raw.inode_size();
 
             log!(
-                "ext2: block_size={}, inodes={}, blocks={}, groups={}, inode_size={}",
+                "block_size={}, inodes={}, blocks={}, groups={}, inode_size={}",
                 block_size,
                 raw.s_inodes_count,
                 raw.s_blocks_count,
@@ -136,11 +136,11 @@ impl Ext2Super {
                 inode_size,
             );
 
-            // Check feature flags — refuse to mount if unsupported features are present.
+            // Refuse to mount if unsupported features are present.
             let unsupported_incompat = raw.s_feature_incompat & !EXT2_SUPPORTED_INCOMPAT;
             if unsupported_incompat != 0 {
                 error!(
-                    "ext2: filesystem has unsupported INCOMPAT features: {:#x}",
+                    "filesystem has unsupported INCOMPAT features: {:#x}",
                     unsupported_incompat
                 );
                 return Err(Errno::EINVAL);
@@ -149,7 +149,7 @@ impl Ext2Super {
             let unsupported_ro_compat = raw.s_feature_ro_compat & !EXT2_SUPPORTED_RO_COMPAT;
             if unsupported_ro_compat != 0 {
                 error!(
-                    "ext2: filesystem has unsupported RO_COMPAT features: {:#x} (would need read-only mount)",
+                    "filesystem has unsupported RO_COMPAT features: {:#x} (would need read-only mount)",
                     unsupported_ro_compat
                 );
                 return Err(Errno::EINVAL);

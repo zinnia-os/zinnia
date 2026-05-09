@@ -7,11 +7,11 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, statvfs::statvfs},
-    util::mutex::spin::SpinMutex,
+    util::mutex::{Mutex, spin::SpinMutex},
     vfs::{
         PathNode,
         cache::{Entry, EntryState},
-        file::{File, FileOps, MmapFlags, OpenFlags},
+        file::{File, FileOps, FilePosition, MmapFlags, OpenFlags},
         fs::{FileSystem, Mount},
         inode::{Device, DirectoryOps, INode, Mode, NodeOps, RegularOps, SymlinkOps},
     },
@@ -104,7 +104,7 @@ impl DirectoryOps for TmpDir {
             ops: node.file_ops(),
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
-            offset: SpinMutex::new(0),
+            position: FilePosition::AtomicPosition(Mutex::new(0)),
             released: AtomicBool::new(false),
         };
         return Ok(Arc::try_new(file)?);

@@ -11,11 +11,11 @@ use zinnia::{
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, dirent::dirent, off_t},
-    util::mutex::spin::SpinMutex,
+    util::mutex::{Mutex, spin::SpinMutex},
     vfs::{
         Entry, PathNode,
         cache::EntryState,
-        file::{File, FileOps, MmapFlags, OpenFlags},
+        file::{File, FileOps, FilePosition, MmapFlags, OpenFlags},
         inode::{Device, DirectoryOps, INode, Mode, NodeOps, RegularOps, SymlinkOps},
     },
 };
@@ -510,7 +510,7 @@ impl Ext2Dir {
                             buf[pp + 4] = new_rec_len as u8;
                             buf[pp + 5] = (new_rec_len >> 8) as u8;
                         } else {
-                            // First entry in block — zero inode to mark deleted.
+                            // First entry in block, zero inode to mark deleted.
                             buf[pos] = 0;
                             buf[pos + 1] = 0;
                             buf[pos + 2] = 0;
@@ -559,7 +559,7 @@ impl DirectoryOps for Ext2Dir {
             ops: node.file_ops(),
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
-            offset: SpinMutex::new(0),
+            position: FilePosition::AtomicPosition(Mutex::new(0)),
             released: AtomicBool::new(false),
         };
         Ok(Arc::new(file))

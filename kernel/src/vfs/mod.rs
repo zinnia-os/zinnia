@@ -29,7 +29,7 @@ use crate::{
     util::once::Once,
     vfs::{
         cache::LookupFlags,
-        file::{MmapFlags, OpenFlags},
+        file::{FilePosition, MmapFlags, OpenFlags},
         fs::devtmpfs,
         inode::{Device, Mode, NodeOps},
     },
@@ -182,7 +182,10 @@ pub fn get_dir_entries(
     let inode = file.inode.clone().ok_or(Errno::EBADF)?;
     let path = file.path.clone().unwrap();
 
-    let mut offset = file.offset.lock();
+    let mut offset = match &file.position {
+        FilePosition::Stream => return Err(Errno::EBADF),
+        FilePosition::Position(offset) | FilePosition::AtomicPosition(offset) => offset.lock(),
+    };
     let mut num_read = 0;
 
     // Read `.` and `..` entries.
