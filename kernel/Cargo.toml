@@ -13,15 +13,16 @@ kernel_proc = { path = "crates/kernel_proc" }
 uacpi-sys = { path = "../bindings/uacpi" }
 flanterm-sys = { path = "../bindings/flanterm" }
 
-bitflags = "2.10.0"
-cfg-if = "1.0.4"
-seq-macro = "0.3.6"
+bitflags = { workspace = true }
+cfg-if = { workspace = true }
+seq-macro = { workspace = true }
 bytemuck = { version = "1.24.0", features = ["derive", "min_const_generics"] }
 num-traits = { version = "0.2.19", default-features = false }
 limine = { version = "0.5.0", optional = true }
 rustc-demangle = { version = "0.1.26" }
-intrusive-collections = { version = "0.9.7", features = ["nightly"] }
+intrusive-collections = { workspace = true }
 paste = "1.0.15"
+num_enum = { workspace = true }
 
 [features]
 default = ["acpi", "boot_limine"]

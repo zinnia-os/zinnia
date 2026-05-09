@@ -10,7 +10,7 @@ use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusi
 
 pub mod spin;
 
-intrusive_adapter!(WaitersLinkAdapter = UnsafeRef<Waiter>: Waiter { waiters_link: LinkedListAtomicLink });
+intrusive_adapter!(WaitersLinkAdapter = UnsafeRef<Waiter>: Waiter { waiters_link => LinkedListAtomicLink });
 
 struct Waiter {
     waiters_link: LinkedListAtomicLink,

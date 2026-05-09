@@ -9,7 +9,7 @@ pub struct Waiter {
     task: Arc<Task>,
 }
 
-intrusive_adapter!(WaitersLinkAdapter = UnsafeRef<Waiter>: Waiter { waiters_link: LinkedListAtomicLink });
+intrusive_adapter!(WaitersLinkAdapter = UnsafeRef<Waiter>: Waiter { waiters_link => LinkedListAtomicLink });
 
 #[derive(Debug)]
 pub struct Event {

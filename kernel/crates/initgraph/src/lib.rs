@@ -6,9 +6,9 @@ use spin::{Mutex, MutexGuard};
 
 pub use initgraph_proc::*;
 
-intrusive_adapter!(pub InLinkAdapter = &'static Edge: Edge { in_link: LinkedListLink });
-intrusive_adapter!(pub OutLinkAdapter = &'static Edge: Edge { out_link: LinkedListLink });
-intrusive_adapter!(pub PendingLinkAdapter = &'static Node: Node { pending_link: LinkedListLink });
+intrusive_adapter!(pub InLinkAdapter = &'static Edge: Edge { in_link => LinkedListLink });
+intrusive_adapter!(pub OutLinkAdapter = &'static Edge: Edge { out_link => LinkedListLink });
+intrusive_adapter!(pub PendingLinkAdapter = &'static Node: Node { pending_link => LinkedListLink });
 
 pub struct Edge {
     source: &'static Node,

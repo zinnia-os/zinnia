@@ -12,6 +12,11 @@ members = [
 
 [workspace.dependencies]
 zinnia = { path = "kernel" }
+num_enum = { version = "0.7.6", default-features = false }
+intrusive-collections = { version = "0.10.1", features = ["nightly"] }
+bitflags = "2.10.0"
+cfg-if = "1.0.4"
+seq-macro = "0.3.6"
 
 [profile.dev]
 panic = "abort"

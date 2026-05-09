@@ -22,6 +22,11 @@ pub extern crate alloc;
 #[macro_use]
 pub extern crate core;
 
+pub use bitflags;
+pub use num_enum;
+pub use num_traits;
+pub use rustc_demangle;
+
 #[macro_use]
 pub mod macros;
 pub mod arch;

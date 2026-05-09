@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 initgraph_proc = { path = "../initgraph_proc" }
-intrusive-collections = { version = "0.9.7", features = ["nightly"] }
+intrusive-collections = { workspace = true }
 spin = "0.10.0"
