@@ -1,16 +1,14 @@
 #![no_std]
 
 use crate::device::VirtioGpuDevice;
-use virtio::{VirtQueue, VirtioDevice};
+use virtio::VirtioDevice;
 use zinnia::{
     alloc::sync::Arc,
-    arch,
     device::{
         drm::DrmFile,
         pci::{DeviceView, Driver, PciVariant},
     },
     error, log,
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr},
     posix::errno::{EResult, Errno},
     util::mutex::spin::SpinMutex,
 };
@@ -29,6 +27,7 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
 
     // We can accept the features as-is for now
     virtio_dev.set_driver_features(0, device_features & VIRTIO_GPU_SUPPORTED_FEATURES);
+    virtio_dev.finalize_features()?;
 
     // Setup virtqueues (control and cursor)
     let num_queues = virtio_dev.num_queues();
@@ -37,31 +36,20 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
         return Err(Errno::ENODEV);
     }
 
-    // Allocate main queue
-    let ctrl_queue_size = virtio_dev.get_queue_max_size(0);
-    let (ctrl_desc, ctrl_avail, ctrl_used) = allocate_queue_memory(ctrl_queue_size)?;
-    let ctrl_notify_off =
-        virtio_dev.setup_queue(0, ctrl_queue_size, ctrl_desc, ctrl_avail, ctrl_used)?;
-    let ctrl_queue = unsafe { VirtQueue::new(ctrl_queue_size, ctrl_desc, ctrl_avail, ctrl_used) };
+    // Main queue
+    let ctrl_queue = virtio_dev.setup_queue(0)?;
 
-    // Allocate cursor queue
-    let cursor_queue_size = virtio_dev.get_queue_max_size(1);
-    let (cursor_desc, cursor_avail, cursor_used) = allocate_queue_memory(cursor_queue_size)?;
-    let cursor_notify_off =
-        virtio_dev.setup_queue(1, cursor_queue_size, cursor_desc, cursor_avail, cursor_used)?;
-    let cursor_queue =
-        unsafe { VirtQueue::new(cursor_queue_size, cursor_desc, cursor_avail, cursor_used) };
+    // Cursor queue
+    let cursor_queue = virtio_dev.setup_queue(1)?;
 
     // Finalize device initialization
-    virtio_dev.finalize()?;
+    virtio_dev.set_driver_ok();
 
     // Create the GPU device
     let gpu_device = Arc::new(VirtioGpuDevice::new(
         virtio_dev,
         SpinMutex::new(ctrl_queue),
-        ctrl_notify_off,
         SpinMutex::new(cursor_queue),
-        cursor_notify_off,
     )?);
 
     // Create DRM file handle
@@ -73,31 +61,6 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
     zinnia::device::drm::register(drm_file)?;
 
     Ok(())
-}
-
-fn allocate_queue_memory(queue_size: u16) -> EResult<(PhysAddr, PhysAddr, PhysAddr)> {
-    let queue_size_usize = queue_size as usize;
-    let page_size = arch::virt::get_page_size();
-
-    // Descriptor table: 16 bytes per entry
-    let desc_size = queue_size_usize * 16;
-    let desc_pages = desc_size.div_ceil(page_size);
-    let desc_addr =
-        KernelAlloc::alloc(desc_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-
-    // Available ring: 2 + 2 + 2*queue_size + 2 bytes (with padding)
-    let avail_size = 6 + 2 * queue_size_usize;
-    let avail_pages = avail_size.div_ceil(page_size);
-    let avail_addr =
-        KernelAlloc::alloc(avail_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-
-    // Used ring: 2 + 2 + 8*queue_size + 2 bytes (with padding)
-    let used_size = 6 + 8 * queue_size_usize;
-    let used_pages = used_size.div_ceil(page_size);
-    let used_addr =
-        KernelAlloc::alloc(used_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-
-    Ok((desc_addr, avail_addr, used_addr))
 }
 
 static DRIVER: Driver = Driver {

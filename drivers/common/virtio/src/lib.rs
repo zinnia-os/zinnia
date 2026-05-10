@@ -1,10 +1,14 @@
 #![no_std]
 
 use zinnia::{
+    alloc::vec::Vec,
+    arch,
     core::sync::atomic::{self, Ordering},
     device::pci::{DeviceView, PciBar},
     log,
-    memory::{MmioView, PhysAddr, Register, UnsafeMemoryView},
+    memory::{
+        AllocFlags, KernelAlloc, MmioView, PageAllocator, PhysAddr, Register, UnsafeMemoryView,
+    },
     posix::errno::{EResult, Errno},
 };
 
@@ -28,18 +32,24 @@ mod common_cfg {
     pub const DEVICE_FEATURE: Register<u32> = Register::new(0x04).with_le();
     pub const DRIVER_FEATURE_SELECT: Register<u32> = Register::new(0x08).with_le();
     pub const DRIVER_FEATURE: Register<u32> = Register::new(0x0C).with_le();
-    pub const _MSIX_CONFIG: Register<u16> = Register::new(0x10).with_le();
+    pub const MSIX_CONFIG: Register<u16> = Register::new(0x10).with_le();
     pub const NUM_QUEUES: Register<u16> = Register::new(0x12).with_le();
     pub const DEVICE_STATUS: Register<u8> = Register::new(0x14).with_le();
     pub const _CONFIG_GENERATION: Register<u8> = Register::new(0x15).with_le();
     pub const QUEUE_SELECT: Register<u16> = Register::new(0x16).with_le();
     pub const QUEUE_SIZE: Register<u16> = Register::new(0x18).with_le();
-    pub const _QUEUE_MSIX_VECTOR: Register<u16> = Register::new(0x1A).with_le();
+    pub const QUEUE_MSIX_VECTOR: Register<u16> = Register::new(0x1A).with_le();
     pub const QUEUE_ENABLE: Register<u16> = Register::new(0x1C).with_le();
     pub const QUEUE_NOTIFY_OFF: Register<u16> = Register::new(0x1E).with_le();
     pub const QUEUE_DESC: Register<u64> = Register::new(0x20).with_le();
     pub const QUEUE_AVAIL: Register<u64> = Register::new(0x28).with_le();
     pub const QUEUE_USED: Register<u64> = Register::new(0x30).with_le();
+}
+
+mod isr_cfg {
+    use zinnia::memory::Register;
+
+    pub const STATUS: Register<u8> = Register::new(0x00).with_le();
 }
 
 mod virtq_desc {
@@ -94,11 +104,13 @@ pub const VIRTQ_DESC_F_NEXT: u16 = 1;
 pub const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 pub struct VirtQueue {
+    index: u16,
     desc_view: MmioView,
     avail_view: MmioView,
     used_view: MmioView,
     queue_size: u16,
-    next_desc: u16,
+    notify_offset: u16,
+    free_descs: Vec<u16>,
     pub last_used_idx: u16,
 }
 
@@ -107,7 +119,9 @@ impl VirtQueue {
     /// # Safety
     /// The physical addresses must point to valid, properly aligned, zeroed virtqueue memory.
     pub unsafe fn new(
+        index: u16,
         queue_size: u16,
+        notify_offset: u16,
         desc_phys: PhysAddr,
         avail_phys: PhysAddr,
         used_phys: PhysAddr,
@@ -118,13 +132,20 @@ impl VirtQueue {
         let used_size = virtq_used::RING_START + (queue_size as usize) * virtq_used_elem::SIZE + 2; // +2 for avail_event
 
         Self {
+            index,
             desc_view: unsafe { MmioView::new(desc_phys, desc_size) },
             avail_view: unsafe { MmioView::new(avail_phys, avail_size) },
             used_view: unsafe { MmioView::new(used_phys, used_size) },
             queue_size,
-            next_desc: 0,
+            notify_offset,
+            free_descs: (0..queue_size).rev().collect(),
             last_used_idx: 0,
         }
+    }
+
+    /// Returns this virtqueue's device-visible queue index.
+    pub fn index(&self) -> u16 {
+        self.index
     }
 
     /// Returns the queue size.
@@ -139,26 +160,31 @@ impl VirtQueue {
         if buffers.is_empty() {
             return Err(Errno::EINVAL);
         }
+        if buffers.len() > self.free_descs.len() {
+            return Err(Errno::EBUSY);
+        }
 
-        let head = self.next_desc;
         let queue_size = self.queue_size;
+        let mut descs = Vec::with_capacity(buffers.len());
+        for _ in buffers {
+            descs.push(self.free_descs.pop().unwrap());
+        }
+        let head = descs[0];
 
         unsafe {
             for (i, &(addr, len, write)) in buffers.iter().enumerate() {
-                let desc_idx = (self.next_desc + i as u16) % queue_size;
+                let desc_idx = descs[i];
 
                 let mut flags = if write { VIRTQ_DESC_F_WRITE } else { 0 };
                 let next = if i + 1 < buffers.len() {
                     flags |= VIRTQ_DESC_F_NEXT;
-                    (desc_idx + 1) % queue_size
+                    descs[i + 1]
                 } else {
                     0
                 };
 
                 self.set_desc(desc_idx, addr.value() as u64, len as u32, flags, next);
             }
-
-            self.next_desc = (self.next_desc + buffers.len() as u16) % queue_size;
 
             // Write the head descriptor index to the available ring
             let avail_idx = self.read_avail_idx();
@@ -172,6 +198,25 @@ impl VirtQueue {
         }
 
         Ok(head)
+    }
+
+    /// Returns a descriptor chain to the free list after the device has used it.
+    /// `id` must be the head descriptor reported by the device in the used ring.
+    pub fn release_used_chain(&mut self, id: u32) {
+        let mut desc_idx = id as u16;
+
+        loop {
+            debug_assert!(desc_idx < self.queue_size);
+            let flags = unsafe { self.read_desc_flags(desc_idx) };
+            let next = unsafe { self.read_desc_next(desc_idx) };
+            self.free_descs.push(desc_idx);
+
+            if flags & VIRTQ_DESC_F_NEXT == 0 {
+                break;
+            }
+
+            desc_idx = next;
+        }
     }
 
     /// Checks if there are any used buffers available.
@@ -190,6 +235,7 @@ impl VirtQueue {
         }
 
         unsafe {
+            atomic::fence(Ordering::SeqCst);
             let idx = self.last_used_idx % self.queue_size;
             let (id, len) = self.read_used_elem(idx);
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
@@ -281,12 +327,39 @@ impl VirtQueue {
             (id, len)
         }
     }
+
+    unsafe fn read_desc_flags(&self, index: u16) -> u16 {
+        unsafe {
+            let view = self
+                .desc_view
+                .sub_view((index as usize) * virtq_desc::SIZE)
+                .expect("Descriptor index out of bounds");
+
+            view.read_reg(virtq_desc::FLAGS)
+                .expect("Failed to read descriptor flags")
+                .value()
+        }
+    }
+
+    unsafe fn read_desc_next(&self, index: u16) -> u16 {
+        unsafe {
+            let view = self
+                .desc_view
+                .sub_view((index as usize) * virtq_desc::SIZE)
+                .expect("Descriptor index out of bounds");
+
+            view.read_reg(virtq_desc::NEXT)
+                .expect("Failed to read descriptor next")
+                .value()
+        }
+    }
 }
 
 pub struct VirtioDevice {
     common_cfg: MmioView,
     notify_base: MmioView,
     notify_off_multiplier: u32,
+    isr_cfg: MmioView,
     device_cfg: MmioView,
 }
 
@@ -418,6 +491,19 @@ impl VirtioDevice {
             )
         };
 
+        let isr_bar = pci_device.bar(isr_cfg.0 as usize).ok_or(Errno::ENODEV)?;
+        let (isr_bar_addr, _isr_bar_size) = match isr_bar {
+            PciBar::Mmio32 { address, size, .. } => (PhysAddr::new(address as usize), size),
+            PciBar::Mmio64 { address, size, .. } => (PhysAddr::new(address as usize), size),
+            _ => return Err(Errno::EINVAL),
+        };
+        let isr_cfg_view = unsafe {
+            MmioView::new(
+                PhysAddr::new(isr_bar_addr.value() + isr_cfg.1 as usize),
+                isr_cfg.2 as usize,
+            )
+        };
+
         let device_bar = pci_device.bar(device_cfg.0 as usize).ok_or(Errno::ENODEV)?;
         let (device_bar_addr, _device_bar_size) = match device_bar {
             PciBar::Mmio32 { address, size, .. } => (PhysAddr::new(address as usize), size),
@@ -436,6 +522,7 @@ impl VirtioDevice {
             common_cfg: common_cfg_view,
             notify_base: notify_view,
             notify_off_multiplier,
+            isr_cfg: isr_cfg_view,
             device_cfg: device_cfg_view,
         };
 
@@ -517,40 +604,9 @@ impl VirtioDevice {
         }
     }
 
-    pub fn setup_queue(
-        &mut self,
-        queue_idx: u16,
-        size: u16,
-        desc: PhysAddr,
-        avail: PhysAddr,
-        used: PhysAddr,
-    ) -> EResult<u16> {
-        unsafe {
-            self.common_cfg
-                .write_reg(common_cfg::QUEUE_SELECT, queue_idx);
-        }
-
-        let max_size = unsafe {
-            self.common_cfg
-                .read_reg(common_cfg::QUEUE_SIZE)
-                .unwrap()
-                .value()
-        };
-        log!(
-            "Queue {} max_size={}, requested={}",
-            queue_idx,
-            max_size,
-            size
-        );
-        if size > max_size || max_size == 0 {
-            zinnia::error!(
-                "Invalid queue size for queue {}: max={}, requested={}",
-                queue_idx,
-                max_size,
-                size
-            );
-            return Err(Errno::EINVAL);
-        }
+    pub fn setup_queue(&mut self, queue_idx: u16) -> EResult<VirtQueue> {
+        let size = self.get_queue_max_size(queue_idx);
+        let (desc, avail, used) = Self::allocate_queue_memory(size)?;
 
         unsafe {
             self.common_cfg.write_reg(common_cfg::QUEUE_SIZE, size);
@@ -563,31 +619,97 @@ impl VirtioDevice {
             self.common_cfg.write_reg(common_cfg::QUEUE_ENABLE, 1u16);
         }
 
-        let notify_off = unsafe {
+        let notify_offset = unsafe {
             self.common_cfg
                 .read_reg(common_cfg::QUEUE_NOTIFY_OFF)
                 .unwrap()
                 .value()
         };
-        Ok(notify_off)
+        Ok(unsafe { VirtQueue::new(queue_idx, size, notify_offset, desc, avail, used) })
     }
 
-    pub fn notify_queue(&self, notify_off: u16) {
+    fn allocate_queue_memory(queue_size: u16) -> EResult<(PhysAddr, PhysAddr, PhysAddr)> {
+        let queue_size_usize = queue_size as usize;
+        let page_size = arch::virt::get_page_size();
+
+        // Descriptor table: 16 bytes per entry
+        let desc_size = queue_size_usize * 16;
+        let desc_pages = desc_size.div_ceil(page_size);
+        let desc_addr =
+            KernelAlloc::alloc(desc_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
+
+        // Available ring: 2 + 2 + (2 * queue_size) + 2 bytes (with padding)
+        let avail_size = 6 + 2 * queue_size_usize;
+        let avail_pages = avail_size.div_ceil(page_size);
+        let avail_addr =
+            KernelAlloc::alloc(avail_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
+
+        // Used ring: 2 + 2 + (8 * queue_size) + 2 bytes (with padding)
+        let used_size = 6 + 8 * queue_size_usize;
+        let used_pages = used_size.div_ceil(page_size);
+        let used_addr =
+            KernelAlloc::alloc(used_pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
+
+        Ok((desc_addr, avail_addr, used_addr))
+    }
+
+    pub fn notify_queue(&self, queue: &VirtQueue) {
         unsafe {
-            let offset = (notify_off as u32 * self.notify_off_multiplier) as usize;
+            let offset = (queue.notify_offset as u32 * self.notify_off_multiplier) as usize;
             let notify_reg = Register::<u16>::new(offset).with_le();
-            self.notify_base.write_reg(notify_reg, 0);
+            self.notify_base.write_reg(notify_reg, queue.index());
         }
     }
 
-    pub fn finalize(&mut self) -> EResult<()> {
+    pub fn ack_interrupt(&self) -> u8 {
+        unsafe {
+            self.isr_cfg
+                .read_reg(isr_cfg::STATUS)
+                .expect("Failed to read virtio ISR status")
+                .value()
+        }
+    }
+
+    pub fn finalize_features(&mut self) -> EResult<()> {
         self.add_status(VIRTIO_STATUS_FEATURES_OK);
 
         if (self.get_status() & VIRTIO_STATUS_FEATURES_OK) == 0 {
             return Err(Errno::ENOTSUP);
         }
 
-        self.add_status(VIRTIO_STATUS_DRIVER_OK);
         Ok(())
+    }
+
+    pub fn set_driver_ok(&mut self) {
+        self.add_status(VIRTIO_STATUS_DRIVER_OK);
+    }
+
+    pub fn finalize(&mut self) -> EResult<()> {
+        self.finalize_features()?;
+        self.set_driver_ok();
+        Ok(())
+    }
+
+    pub fn set_config_msix_vector(&mut self, vector: u16) -> u16 {
+        unsafe {
+            self.common_cfg.write_reg(common_cfg::MSIX_CONFIG, vector);
+            self.common_cfg
+                .read_reg(common_cfg::MSIX_CONFIG)
+                .unwrap()
+                .value()
+        }
+    }
+
+    pub fn set_queue_msix_vector(&mut self, queue_idx: u16, vector: u16) -> u16 {
+        unsafe {
+            self.common_cfg
+                .write_reg(common_cfg::QUEUE_SELECT, queue_idx);
+            self.common_cfg
+                .write_reg(common_cfg::QUEUE_MSIX_VECTOR, vector);
+            self.common_cfg
+                .read_reg(common_cfg::QUEUE_MSIX_VECTOR)
+                .unwrap()
+                .value()
+        }
     }
 }

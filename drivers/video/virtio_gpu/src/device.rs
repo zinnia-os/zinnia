@@ -25,11 +25,9 @@ use zinnia::{
 
 pub struct VirtioGpuDevice {
     state: DeviceState,
-    virtio: SpinMutex<VirtioDevice>,
-    ctrl_queue: SpinMutex<VirtQueue>,
-    ctrl_notify_off: u16,
-    cursor_queue: SpinMutex<VirtQueue>,
-    cursor_notify_off: u16,
+    virtio: Arc<SpinMutex<VirtioDevice>>,
+    ctrl_queue: Arc<SpinMutex<VirtQueue>>,
+    cursor_queue: Arc<SpinMutex<VirtQueue>>,
     resource_id_counter: AtomicU32,
     scanouts: SpinMutex<Vec<ScanoutInfo>>,
     active_resource: AtomicU32, // Track which resource is active
@@ -87,17 +85,13 @@ impl VirtioGpuDevice {
     pub fn new(
         virtio: VirtioDevice,
         ctrl_queue: SpinMutex<VirtQueue>,
-        ctrl_notify_off: u16,
         cursor_queue: SpinMutex<VirtQueue>,
-        cursor_notify_off: u16,
     ) -> EResult<Self> {
         let device = Self {
             state: DeviceState::new(),
-            virtio: SpinMutex::new(virtio),
-            ctrl_queue,
-            ctrl_notify_off,
-            cursor_queue,
-            cursor_notify_off,
+            virtio: Arc::new(SpinMutex::new(virtio)),
+            ctrl_queue: Arc::new(ctrl_queue),
+            cursor_queue: Arc::new(cursor_queue),
             resource_id_counter: AtomicU32::new(1),
             scanouts: SpinMutex::new(Vec::new()),
             active_resource: AtomicU32::new(0),
@@ -119,7 +113,11 @@ impl VirtioGpuDevice {
         self.resource_id_counter.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn send_command<T: Copy, R: Copy>(&self, cmd: &T) -> EResult<R> {
+    fn send_ctrl_command<T: Copy, R: Copy>(
+        virtio: &SpinMutex<VirtioDevice>,
+        ctrl_queue: &SpinMutex<VirtQueue>,
+        cmd: &T,
+    ) -> EResult<R> {
         let cmd_ptr = cmd as *const T as *const u8;
         let cmd_phys = VirtAddr::from(cmd_ptr).as_hhdm().ok_or(Errno::EFAULT)?;
 
@@ -133,17 +131,16 @@ impl VirtioGpuDevice {
         ];
 
         {
-            let mut queue = self.ctrl_queue.lock();
+            let mut queue = ctrl_queue.lock();
             queue.add_buffer(&buffers)?;
+            virtio.lock().notify_queue(&queue);
         }
-
-        // Notify device
-        self.virtio.lock().notify_queue(self.ctrl_notify_off);
 
         // Wait for response
         loop {
-            let mut queue = self.ctrl_queue.lock();
-            if queue.get_used().is_some() {
+            let mut queue = ctrl_queue.lock();
+            if let Some((desc_id, _)) = queue.get_used() {
+                queue.release_used_chain(desc_id);
                 break;
             }
             drop(queue);
@@ -153,6 +150,10 @@ impl VirtioGpuDevice {
 
         let response = unsafe { core::ptr::read_volatile(resp_ptr) };
         Ok(response)
+    }
+
+    fn send_command<T: Copy, R: Copy>(&self, cmd: &T) -> EResult<R> {
+        Self::send_ctrl_command(&self.virtio, &self.ctrl_queue, cmd)
     }
 
     fn get_display_info(&self) -> EResult<()> {
@@ -251,16 +252,18 @@ impl VirtioGpuDevice {
             (resp.phys(), core::mem::size_of::<VirtioGpuCtrlHdr>(), true),
         ];
 
-        let mut queue = self.ctrl_queue.lock();
-        queue.add_buffer(&buffers)?;
-        drop(queue);
+        {
+            let mut queue = self.ctrl_queue.lock();
+            queue.add_buffer(&buffers)?;
 
-        self.virtio.lock().notify_queue(self.ctrl_notify_off);
+            self.virtio.lock().notify_queue(&queue);
+        }
 
         // Wait for response
         loop {
             let mut queue = self.ctrl_queue.lock();
-            if let Some((_, _)) = queue.get_used() {
+            if let Some((desc_id, _)) = queue.get_used() {
+                queue.release_used_chain(desc_id);
                 break;
             }
             drop(queue);
@@ -454,14 +457,14 @@ impl VirtioGpuDevice {
         {
             let mut queue = self.cursor_queue.lock();
             queue.add_buffer(&buffers)?;
+            self.virtio.lock().notify_queue(&queue);
         }
-
-        self.virtio.lock().notify_queue(self.cursor_notify_off);
 
         // Wait for completion
         loop {
             let mut queue = self.cursor_queue.lock();
-            if queue.get_used().is_some() {
+            if let Some((desc_id, _)) = queue.get_used() {
+                queue.release_used_chain(desc_id);
                 break;
             }
             drop(queue);
@@ -529,6 +532,8 @@ impl Device for VirtioGpuDevice {
             size,
             width,
             height,
+            virtio: self.virtio.clone(),
+            ctrl_queue: self.ctrl_queue.clone(),
         });
 
         log!(
@@ -729,6 +734,8 @@ pub struct VirtioGpuBuffer {
     size: usize,
     width: u32,
     height: u32,
+    virtio: Arc<SpinMutex<VirtioDevice>>,
+    ctrl_queue: Arc<SpinMutex<VirtQueue>>,
 }
 
 impl Drop for VirtioGpuBuffer {
