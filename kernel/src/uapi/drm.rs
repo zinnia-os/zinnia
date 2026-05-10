@@ -622,6 +622,7 @@ pub const DRM_MODE_FLAG_NHSYNC: u32 = 1 << 1;
 pub const DRM_MODE_FLAG_PVSYNC: u32 = 1 << 2;
 pub const DRM_MODE_FLAG_NVSYNC: u32 = 1 << 3;
 pub const DRM_MODE_FLAG_INTERLACE: u32 = 1 << 4;
+pub const DRM_MODE_TYPE_PREFERRED: u32 = 1 << 3;
 pub const DRM_MODE_TYPE_DRIVER: u32 = 1 << 6;
 
 pub const DRM_IOCTL_VERSION: u32 = drm_iowr::<drm_version>(0x00);

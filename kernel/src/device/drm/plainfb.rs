@@ -5,7 +5,11 @@ use super::{
 use crate::{
     arch,
     boot::BootInfo,
-    device::drm::{Device, DrmFile, IdAllocator, modes::DMT_MODES, object::Framebuffer},
+    device::drm::{
+        Device, DrmFile, IdAllocator,
+        modes::{DMT_MODES, synthesize_preferred_mode},
+        object::Framebuffer,
+    },
     memory::{
         MemoryObject, MmioView, PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
@@ -15,8 +19,9 @@ use crate::{
         DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, DRM_PLANE_TYPE_PRIMARY,
         drm_mode_connector_state, drm_mode_connector_type,
     },
+    util::mutex::spin::SpinMutex,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec};
 use core::any::Any;
 
 struct CursorState {
@@ -37,7 +42,7 @@ struct PlainDevice {
     stride: u32,
     addr: MmioView, // Shared DRM object storage (device-global)
     obj_counter: IdAllocator,
-    cursor: crate::util::mutex::spin::SpinMutex<CursorState>,
+    cursor: SpinMutex<CursorState>,
 }
 
 impl PlainDevice {
@@ -104,10 +109,10 @@ impl Device for PlainDevice {
         height: u32,
         bpp: u32,
     ) -> EResult<(Arc<dyn BufferObject>, u32)> {
-        // Allow exact framebuffer size or cursor-sized (up to 64x64) allocations
-        let is_fb_size = width == self.width && height == self.height && bpp == self.bpp;
-        let is_cursor_size = width <= 64 && height <= 64 && bpp == 32;
-        if !is_fb_size && !is_cursor_size {
+        if bpp != 32 || width == 0 || height == 0 {
+            return Err(Errno::EINVAL);
+        }
+        if width > 16384 || height > 16384 {
             return Err(Errno::EINVAL);
         }
 
@@ -158,13 +163,28 @@ impl Device for PlainDevice {
                 && let Some(buffer) =
                     (framebuffer.buffer.as_ref() as &dyn Any).downcast_ref::<PlainDumbBuffer>()
             {
-                // Copy from buffer to framebuffer
-                let src = buffer.addr.as_hhdm::<u8>();
-                let dst = self.addr.base() as _;
-                let size = buffer.size.min(self.addr.len());
+                // Copy line by line so mismatched source/destination pitches don't corrupt the scanout image.
+                let src_base = buffer.addr.as_hhdm::<u8>();
+                let dst_base = self.addr.base() as *mut u8;
+                let src_stride = framebuffer.pitch as usize;
+                let dst_stride = self.stride as usize;
+                let bpp_bytes = (self.bpp.div_ceil(8)) as usize;
+                let copy_w = (framebuffer.width as usize).min(self.width as usize) * bpp_bytes;
+                let copy_h = (framebuffer.height as usize).min(self.height as usize);
 
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst, size);
+                for y in 0..copy_h {
+                    let src_off = y * src_stride + framebuffer.offset as usize;
+                    let dst_off = y * dst_stride;
+                    if src_off + copy_w > buffer.size || dst_off + copy_w > self.addr.len() {
+                        break;
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_base.add(src_off),
+                            dst_base.add(dst_off),
+                            copy_w,
+                        );
+                    }
                 }
 
                 // Composite cursor on top if active
@@ -242,7 +262,13 @@ impl BufferObject for PlainDumbBuffer {
 
 impl MemoryObject for PlainDumbBuffer {
     fn try_get_page(&self, page_index: usize) -> Option<PhysAddr> {
-        Some(self.addr + (page_index * arch::virt::get_page_size()))
+        let page_size = arch::virt::get_page_size();
+        let offset = page_index * page_size;
+        if offset < self.size {
+            Some(self.addr + offset)
+        } else {
+            None
+        }
     }
 }
 
@@ -273,7 +299,7 @@ fn PLAINFB_STAGE() {
         stride: fb.pitch as _,
         addr: unsafe { MmioView::new(fb.base, fb.pitch * fb.height) },
         obj_counter: IdAllocator::new(),
-        cursor: crate::util::mutex::spin::SpinMutex::new(CursorState {
+        cursor: SpinMutex::new(CursorState {
             buffer: None,
             x: 0,
             y: 0,
@@ -299,15 +325,18 @@ fn PLAINFB_STAGE() {
         DRM_PLANE_TYPE_PRIMARY,
         vec![DRM_FORMAT_XRGB8888],
     ));
+    let mut modes = vec![synthesize_preferred_mode(fb.width as u32, fb.height as u32)];
+    modes.extend(
+        DMT_MODES
+            .iter()
+            .filter(|&x| x.hdisplay == fb.width as _ && x.vdisplay == fb.height as _)
+            .cloned(),
+    );
 
     let connector = Arc::new(Connector::new(
         device.obj_counter.alloc(),
         drm_mode_connector_state::Connected,
-        DMT_MODES
-            .iter()
-            .filter(|&x| x.hdisplay == fb.width as _ && x.vdisplay == fb.height as _)
-            .cloned()
-            .collect::<Vec<_>>(),
+        modes,
         vec![encoder.clone()],
         drm_mode_connector_type::Virtual,
     ));

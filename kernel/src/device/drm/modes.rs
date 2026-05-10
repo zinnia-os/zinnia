@@ -1,7 +1,52 @@
 use crate::uapi::drm::{
     DRM_MODE_FLAG_INTERLACE, DRM_MODE_FLAG_NHSYNC, DRM_MODE_FLAG_NVSYNC, DRM_MODE_FLAG_PHSYNC,
-    DRM_MODE_FLAG_PVSYNC, DRM_MODE_TYPE_DRIVER, drm_mode_modeinfo,
+    DRM_MODE_FLAG_PVSYNC, DRM_MODE_TYPE_DRIVER, DRM_MODE_TYPE_PREFERRED, drm_mode_modeinfo,
 };
+
+pub fn synthesize_preferred_mode(width: u32, height: u32) -> drm_mode_modeinfo {
+    // CVT-RB v1 fixed blanking values.
+    const H_BLANK: u32 = 160;
+    const H_FRONT: u32 = 48;
+    const H_SYNC: u32 = 32;
+    const V_FRONT: u32 = 3;
+    const V_SYNC: u32 = 4;
+    const V_BACK: u32 = 6;
+    const V_BLANK: u32 = V_FRONT + V_SYNC + V_BACK;
+
+    let htotal = width + H_BLANK;
+    let vtotal = height + V_BLANK;
+    let hsync_start = width + H_FRONT;
+    let hsync_end = hsync_start + H_SYNC;
+    let vsync_start = height + V_FRONT;
+    let vsync_end = vsync_start + V_SYNC;
+
+    // Pixel clock in kHz at ~60 Hz refresh.
+    let clock = ((htotal as u64) * (vtotal as u64) * 60 / 1000) as u32;
+
+    let mut name = [0u8; 32];
+    let s = format!("{}x{}", width, height);
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(name.len() - 1);
+    name[..n].copy_from_slice(&bytes[..n]);
+
+    drm_mode_modeinfo {
+        clock,
+        hdisplay: width as u16,
+        hsync_start: hsync_start as u16,
+        hsync_end: hsync_end as u16,
+        htotal: htotal as u16,
+        hskew: 0,
+        vdisplay: height as u16,
+        vsync_start: vsync_start as u16,
+        vsync_end: vsync_end as u16,
+        vtotal: vtotal as u16,
+        vscan: 0,
+        vrefresh: 60,
+        flags: DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC,
+        typ: DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+        name,
+    }
+}
 
 const fn drm_mode(
     name: &str,

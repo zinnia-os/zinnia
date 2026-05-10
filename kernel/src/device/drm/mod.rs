@@ -505,9 +505,8 @@ impl FileOps for DrmFile {
                 val.pitch = pitch;
                 val.size = buffer.size() as u64;
 
-                buffers.push(buffer);
-
                 ptr.write(val).ok_or(Errno::EFAULT)?;
+                buffers.push(buffer);
             }
             drm::DRM_IOCTL_MODE_MAP_DUMB => {
                 let mut ptr = UserPtr::<drm::drm_mode_map_dumb>::new(arg);
@@ -561,9 +560,9 @@ impl FileOps for DrmFile {
                     .create_fb(self, buffer, val.width, val.height, fourcc, val.pitch)?;
 
                 val.fb_id = framebuffer.id();
-                self.device.state().framebuffers.lock().push(framebuffer);
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
+                self.device.state().framebuffers.lock().push(framebuffer);
             }
             drm::DRM_IOCTL_MODE_ADDFB2 => {
                 let mut ptr = UserPtr::<drm::drm_mode_fb_cmd2>::new(arg);
@@ -599,9 +598,9 @@ impl FileOps for DrmFile {
                 )?;
 
                 val.fb_id = framebuffer.id();
-                self.device.state().framebuffers.lock().push(framebuffer);
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
+                self.device.state().framebuffers.lock().push(framebuffer);
             }
             drm::DRM_IOCTL_MODE_RMFB => {
                 let ptr = UserPtr::<u32>::new(arg);
