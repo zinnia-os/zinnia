@@ -132,11 +132,11 @@ pub extern "C" fn main(_: usize, _: usize) {
         .lock()
         .insert(init_proc.get_pid(), Arc::downgrade(&init_proc));
 
-    let tty = match BootInfo::get().command_line.get_string("console") {
-        Some(x) => device::tty::get_tty_by_name(x),
-        None => device::tty::get_tty(0),
-    }
-    .expect("Unable to open TTY for init");
+    let console_name = BootInfo::get()
+        .command_line
+        .get_string("console")
+        .unwrap_or("tty1");
+    let tty = device::tty::get_tty_by_name(console_name).expect("Unable to open TTY for init");
 
     {
         *tty.session.lock() = Some(init_proc.get_pid());
@@ -151,11 +151,7 @@ pub extern "C" fn main(_: usize, _: usize) {
         let console = File::open(
             dev.clone(),
             dev,
-            BootInfo::get()
-                .command_line
-                .get_string("console")
-                .unwrap_or("com1")
-                .as_bytes(),
+            console_name.as_bytes(),
             OpenFlags::ReadWrite,
             Mode::empty(),
             Identity::get_kernel(),

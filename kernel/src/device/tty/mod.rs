@@ -19,7 +19,7 @@ use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub trait TtyDriver: Send + Sync {
-    fn write_output(&self, data: &[u8]);
+    fn write_output(&self, data: &[u8]) -> EResult<()>;
 
     fn get_winsize(&self) -> winsize {
         winsize {
@@ -268,7 +268,7 @@ impl Tty {
     pub fn input_byte(&self, byte: u8) {
         let output = self.input_byte_internal(byte);
         if !output.is_empty() {
-            self.driver.write_output(&output);
+            let _ = self.driver.write_output(&output);
         }
     }
 
@@ -290,7 +290,11 @@ impl Tty {
     }
 
     pub fn register_device_with_ops(self: Arc<Self>, ops: Arc<dyn FileOps>) -> EResult<()> {
-        let dev_name = self.as_ref().name.as_bytes();
+        let name = self.as_ref().name.as_bytes();
+        let dev_name = name
+            .strip_prefix(b"/dev/")
+            .or_else(|| name.strip_prefix(b"/"))
+            .unwrap_or(name);
         let root = devtmpfs::get_root();
 
         vfs::mknod(
@@ -510,7 +514,7 @@ impl FileOps for TtyFileOps {
         buffer.copy_to_slice(&mut data)?;
 
         let output = self.tty.ldisc.lock().write_output(&data);
-        self.tty.driver.write_output(&output);
+        self.tty.driver.write_output(&output)?;
 
         Ok(total as isize)
     }

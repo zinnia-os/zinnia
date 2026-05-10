@@ -17,7 +17,11 @@ use crate::{
         inode::{Device, Mode},
     },
 };
-use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec};
+use alloc::{
+    collections::{btree_map::BTreeMap, vec_deque::VecDeque},
+    sync::Arc,
+    vec,
+};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -48,7 +52,7 @@ pub trait EventDeviceOps: Send + Sync {
 pub struct EventDevice {
     index: usize,
     ops: Arc<dyn EventDeviceOps>,
-    event_buf: SpinMutex<VecDeque<InputEvent>>,
+    readers: SpinMutex<BTreeMap<usize, VecDeque<InputEvent>>>,
     rd_event: Event,
 }
 
@@ -58,7 +62,7 @@ impl EventDevice {
         Arc::new(Self {
             index,
             ops,
-            event_buf: SpinMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
+            readers: SpinMutex::new(BTreeMap::new()),
             rd_event: Event::new(),
         })
     }
@@ -79,16 +83,17 @@ impl EventDevice {
             value,
         };
 
-        let mut buf = self.event_buf.lock();
-        if buf.len() >= EVENT_QUEUE_CAPACITY {
-            buf.pop_front(); // Drop oldest event on overflow.
+        let mut readers = self.readers.lock();
+        for buf in readers.values_mut() {
+            if buf.len() >= EVENT_QUEUE_CAPACITY {
+                buf.pop_front();
+            }
+            buf.push_back(ev);
         }
-        buf.push_back(ev);
 
-        // Only wake after releasing the event_buf lock would be ideal,
-        // but since wake_all just enqueues tasks, it's fine under the lock.
-        drop(buf);
+        drop(readers);
         self.rd_event.wake_all();
+        handle_console_event(ev.typ, ev.code, ev.value);
     }
 
     pub fn register_device(self: &Arc<Self>) -> EResult<()> {
@@ -115,6 +120,19 @@ impl EventDevice {
 }
 
 impl FileOps for EventDevice {
+    fn acquire(&self, file: &File, _flags: OpenFlags) -> EResult<()> {
+        self.readers.lock().insert(
+            Self::reader_key(file),
+            VecDeque::with_capacity(EVENT_QUEUE_CAPACITY),
+        );
+        Ok(())
+    }
+
+    fn release(&self, file: &File) -> EResult<()> {
+        self.readers.lock().remove(&Self::reader_key(file));
+        Ok(())
+    }
+
     fn read(&self, file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
         let ev_size = size_of::<InputEvent>();
         if buffer.len() < ev_size {
@@ -122,20 +140,22 @@ impl FileOps for EventDevice {
         }
 
         if file.flags.lock().contains(OpenFlags::NonBlocking) {
-            let mut buf = self.event_buf.lock();
+            let mut readers = self.readers.lock();
+            let buf = readers.get_mut(&Self::reader_key(file)).ok_or(Errno::EIO)?;
             if buf.is_empty() {
                 return Err(Errno::EAGAIN);
             }
-            return Self::drain_events(&mut buf, buffer, ev_size);
+            return Self::drain_events(buf, buffer, ev_size);
         }
 
         // Wait for events if we can block.
         loop {
             let guard = self.rd_event.guard();
             {
-                let mut buf = self.event_buf.lock();
+                let mut readers = self.readers.lock();
+                let buf = readers.get_mut(&Self::reader_key(file)).ok_or(Errno::EIO)?;
                 if !buf.is_empty() {
-                    return Self::drain_events(&mut buf, buffer, ev_size);
+                    return Self::drain_events(buf, buffer, ev_size);
                 }
             }
             guard.wait();
@@ -191,7 +211,7 @@ impl FileOps for EventDevice {
                 }
                 Ok(0)
             }
-            // EVIOCGPROP(len) — device properties bitmap (none)
+            // EVIOCGPROP(len)
             0x09 => {
                 let zeros = vec![0u8; size];
                 if size > 0 {
@@ -255,11 +275,14 @@ impl FileOps for EventDevice {
         }
     }
 
-    fn poll(&self, _file: &File, mask: PollFlags) -> EResult<PollFlags> {
+    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
         let mut revents = PollFlags::empty();
         if mask.contains(PollFlags::In) {
-            let buf = self.event_buf.lock();
-            if !buf.is_empty() {
+            let readers = self.readers.lock();
+            if readers
+                .get(&Self::reader_key(file))
+                .is_some_and(|buf| !buf.is_empty())
+            {
                 revents |= PollFlags::In;
             }
         }
@@ -276,6 +299,10 @@ impl FileOps for EventDevice {
 }
 
 impl EventDevice {
+    fn reader_key(file: &File) -> usize {
+        file as *const File as usize
+    }
+
     /// Drain as many events as fit into the user buffer (in multiples of event size). Returns bytes copied.
     fn drain_events(
         buf: &mut VecDeque<InputEvent>,
@@ -298,6 +325,215 @@ impl EventDevice {
 
         Ok(total)
     }
+}
+
+struct KeyboardState {
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    caps_lock: bool,
+}
+
+impl KeyboardState {
+    const fn new() -> Self {
+        Self {
+            shift: false,
+            ctrl: false,
+            alt: false,
+            caps_lock: false,
+        }
+    }
+}
+
+static KEYBOARD_STATE: SpinMutex<KeyboardState> = SpinMutex::new(KeyboardState::new());
+
+fn handle_console_event(typ: u16, code: u16, value: i32) {
+    if typ != input::EV_KEY {
+        return;
+    }
+
+    let mut state = KEYBOARD_STATE.lock();
+    match code {
+        input::KEY_LEFTSHIFT | input::KEY_RIGHTSHIFT => {
+            state.shift = value != 0;
+            return;
+        }
+        input::KEY_LEFTCTRL | input::KEY_RIGHTCTRL => {
+            state.ctrl = value != 0;
+            return;
+        }
+        input::KEY_LEFTALT | input::KEY_RIGHTALT => {
+            state.alt = value != 0;
+            return;
+        }
+        input::KEY_CAPSLOCK => {
+            if value == 1 {
+                state.caps_lock = !state.caps_lock;
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    if value == 0 {
+        return;
+    }
+
+    if let Some(bytes) = special_key_bytes(code) {
+        crate::device::vt::input_bytes(bytes);
+        return;
+    }
+
+    let Some(byte) = key_byte(code, &state) else {
+        return;
+    };
+
+    if state.alt {
+        crate::device::vt::input_bytes(&[0x1b, byte]);
+    } else {
+        crate::device::vt::input_bytes(&[byte]);
+    }
+}
+
+fn special_key_bytes(code: u16) -> Option<&'static [u8]> {
+    Some(match code {
+        input::KEY_UP => b"\x1b[A",
+        input::KEY_DOWN => b"\x1b[B",
+        input::KEY_RIGHT => b"\x1b[C",
+        input::KEY_LEFT => b"\x1b[D",
+        input::KEY_HOME => b"\x1b[H",
+        input::KEY_END => b"\x1b[F",
+        input::KEY_INSERT => b"\x1b[2~",
+        input::KEY_DELETE => b"\x1b[3~",
+        input::KEY_PAGEUP => b"\x1b[5~",
+        input::KEY_PAGEDOWN => b"\x1b[6~",
+        input::KEY_F1 => b"\x1bOP",
+        input::KEY_F2 => b"\x1bOQ",
+        input::KEY_F3 => b"\x1bOR",
+        input::KEY_F4 => b"\x1bOS",
+        input::KEY_F5 => b"\x1b[15~",
+        input::KEY_F6 => b"\x1b[17~",
+        input::KEY_F7 => b"\x1b[18~",
+        input::KEY_F8 => b"\x1b[19~",
+        input::KEY_F9 => b"\x1b[20~",
+        input::KEY_F10 => b"\x1b[21~",
+        input::KEY_F11 => b"\x1b[23~",
+        input::KEY_F12 => b"\x1b[24~",
+        _ => return None,
+    })
+}
+
+fn key_byte(code: u16, state: &KeyboardState) -> Option<u8> {
+    if state.ctrl {
+        return ctrl_key_byte(code);
+    }
+
+    if let Some(lower) = letter_key_byte(code) {
+        let upper = state.shift ^ state.caps_lock;
+        return Some(if upper {
+            lower.to_ascii_uppercase()
+        } else {
+            lower
+        });
+    }
+
+    match code {
+        input::KEY_1 => Some(if state.shift { b'!' } else { b'1' }),
+        input::KEY_2 => Some(if state.shift { b'@' } else { b'2' }),
+        input::KEY_3 => Some(if state.shift { b'#' } else { b'3' }),
+        input::KEY_4 => Some(if state.shift { b'$' } else { b'4' }),
+        input::KEY_5 => Some(if state.shift { b'%' } else { b'5' }),
+        input::KEY_6 => Some(if state.shift { b'^' } else { b'6' }),
+        input::KEY_7 => Some(if state.shift { b'&' } else { b'7' }),
+        input::KEY_8 => Some(if state.shift { b'*' } else { b'8' }),
+        input::KEY_9 => Some(if state.shift { b'(' } else { b'9' }),
+        input::KEY_0 => Some(if state.shift { b')' } else { b'0' }),
+        input::KEY_MINUS => Some(if state.shift { b'_' } else { b'-' }),
+        input::KEY_EQUAL => Some(if state.shift { b'+' } else { b'=' }),
+        input::KEY_LEFTBRACE => Some(if state.shift { b'{' } else { b'[' }),
+        input::KEY_RIGHTBRACE => Some(if state.shift { b'}' } else { b']' }),
+        input::KEY_BACKSLASH => Some(if state.shift { b'|' } else { b'\\' }),
+        input::KEY_SEMICOLON => Some(if state.shift { b':' } else { b';' }),
+        input::KEY_APOSTROPHE => Some(if state.shift { b'"' } else { b'\'' }),
+        input::KEY_GRAVE => Some(if state.shift { b'~' } else { b'`' }),
+        input::KEY_COMMA => Some(if state.shift { b'<' } else { b',' }),
+        input::KEY_DOT => Some(if state.shift { b'>' } else { b'.' }),
+        input::KEY_SLASH => Some(if state.shift { b'?' } else { b'/' }),
+        input::KEY_KPSLASH => Some(b'/'),
+        input::KEY_KPASTERISK => Some(b'*'),
+        input::KEY_KPMINUS => Some(b'-'),
+        input::KEY_KPPLUS => Some(b'+'),
+        input::KEY_KPENTER | input::KEY_ENTER => Some(b'\n'),
+        input::KEY_BACKSPACE => Some(0x7f),
+        input::KEY_TAB => Some(b'\t'),
+        input::KEY_ESC => Some(0x1b),
+        input::KEY_SPACE => Some(b' '),
+        input::KEY_KP0 => Some(b'0'),
+        input::KEY_KP1 => Some(b'1'),
+        input::KEY_KP2 => Some(b'2'),
+        input::KEY_KP3 => Some(b'3'),
+        input::KEY_KP4 => Some(b'4'),
+        input::KEY_KP5 => Some(b'5'),
+        input::KEY_KP6 => Some(b'6'),
+        input::KEY_KP7 => Some(b'7'),
+        input::KEY_KP8 => Some(b'8'),
+        input::KEY_KP9 => Some(b'9'),
+        input::KEY_KPDOT => Some(b'.'),
+        _ => None,
+    }
+}
+
+fn ctrl_key_byte(code: u16) -> Option<u8> {
+    if let Some(lower) = letter_key_byte(code) {
+        return Some(lower - b'a' + 1);
+    }
+
+    match code {
+        input::KEY_LEFTBRACE => Some(0x1b),
+        input::KEY_BACKSLASH => Some(0x1c),
+        input::KEY_RIGHTBRACE => Some(0x1d),
+        input::KEY_6 => Some(0x1e),
+        input::KEY_MINUS => Some(0x1f),
+        input::KEY_2 => Some(0x00),
+        input::KEY_8 => Some(0x7f),
+        input::KEY_KPENTER | input::KEY_ENTER => Some(b'\n'),
+        input::KEY_BACKSPACE => Some(0x7f),
+        input::KEY_TAB => Some(b'\t'),
+        input::KEY_ESC => Some(0x1b),
+        _ => None,
+    }
+}
+
+fn letter_key_byte(code: u16) -> Option<u8> {
+    Some(match code {
+        input::KEY_A => b'a',
+        input::KEY_B => b'b',
+        input::KEY_C => b'c',
+        input::KEY_D => b'd',
+        input::KEY_E => b'e',
+        input::KEY_F => b'f',
+        input::KEY_G => b'g',
+        input::KEY_H => b'h',
+        input::KEY_I => b'i',
+        input::KEY_J => b'j',
+        input::KEY_K => b'k',
+        input::KEY_L => b'l',
+        input::KEY_M => b'm',
+        input::KEY_N => b'n',
+        input::KEY_O => b'o',
+        input::KEY_P => b'p',
+        input::KEY_Q => b'q',
+        input::KEY_R => b'r',
+        input::KEY_S => b's',
+        input::KEY_T => b't',
+        input::KEY_U => b'u',
+        input::KEY_V => b'v',
+        input::KEY_W => b'w',
+        input::KEY_X => b'x',
+        input::KEY_Y => b'y',
+        input::KEY_Z => b'z',
+        _ => return None,
+    })
 }
 
 #[initgraph::task(

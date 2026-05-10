@@ -2,7 +2,7 @@
 
 use crate::{
     boot::BootInfo,
-    device::tty::{Tty, TtyDriver},
+    device::vt::{self, VtDisplay},
     log::{self, LoggerSink},
     memory::{
         PhysAddr, free, malloc,
@@ -11,7 +11,7 @@ use crate::{
     },
     uapi::termios::winsize,
 };
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     ffi::{c_char, c_void},
     ptr::null_mut,
@@ -135,7 +135,7 @@ impl Drop for FbCon {
     }
 }
 
-impl TtyDriver for FbCon {
+impl VtDisplay for FbCon {
     fn write_output(&self, data: &[u8]) {
         for &byte in data {
             unsafe { flanterm_write(self.ctx, &byte as *const u8 as *const c_char, 1) };
@@ -169,6 +169,7 @@ impl LoggerSink for FbCon {
     depends = [
         crate::memory::MEMORY_STAGE,
         crate::vfs::fs::devtmpfs::DEVTMPFS_STAGE,
+        crate::device::vt::VT_STAGE,
     ],
 )]
 pub fn FBCON_STAGE() {
@@ -183,8 +184,6 @@ pub fn FBCON_STAGE() {
     {
         let fbcon = FbCon::new(&fb);
         log::add_sink(Box::new(fbcon.clone()));
-
-        let tty = Tty::new(String::from("fbcon"), Arc::new(fbcon));
-        tty.register_device().expect("Unable to create fbcon");
+        vt::attach_display(Arc::new(fbcon));
     }
 }

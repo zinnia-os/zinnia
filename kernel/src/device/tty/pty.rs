@@ -3,6 +3,7 @@ use crate::{
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::{Identity, PROCESS_TABLE, signal::Signal},
+    sched::Scheduler,
     uapi::{self, termios::winsize},
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
     vfs::{
@@ -47,8 +48,8 @@ pub struct PtyPair {
     pub slave_count: AtomicUsize,
     /// TIOCPKT packet mode flag.
     pub packet: AtomicBool,
-    /// Pending TIOCPKT control bits (STOP/START/FLUSH…). Consumed on the
-    /// next master read when packet mode is active.
+    /// Pending TIOCPKT control bits (STOP/START/FLUSH).
+    /// Consumed on the next master read when packet mode is active.
     pub packet_flags: AtomicU8,
 }
 
@@ -59,9 +60,9 @@ struct PtySlaveTtyDriver {
 }
 
 impl TtyDriver for PtySlaveTtyDriver {
-    fn write_output(&self, data: &[u8]) {
+    fn write_output(&self, data: &[u8]) -> EResult<()> {
         let Some(pair) = self.pair.upgrade() else {
-            return;
+            return Ok(());
         };
         let mut written = 0;
         while written < data.len() {
@@ -78,11 +79,15 @@ impl TtyDriver for PtySlaveTtyDriver {
             }
 
             if !slave_side_is_present(&pair) {
-                return;
+                return Ok(());
             }
 
             guard.wait();
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
+            }
         }
+        Ok(())
     }
 
     fn get_winsize(&self) -> winsize {
@@ -268,7 +273,7 @@ impl FileOps for PtyMaster {
             }
 
             guard.wait();
-            if crate::sched::Scheduler::get_current().has_pending_signals() {
+            if Scheduler::get_current().has_pending_signals() {
                 return Err(Errno::EINTR);
             }
         }

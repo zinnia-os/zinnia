@@ -3,6 +3,7 @@ use crate::{
     device::tty::{Tty, TtyDriver},
     irq::{IrqHandler, IrqLine},
     log::{self, LoggerSink},
+    posix::errno::EResult,
     uapi::termios::winsize,
 };
 use alloc::{boxed::Box, string::String, sync::Arc};
@@ -50,13 +51,14 @@ impl LoggerSink for SerialLogger {
 struct SerialTtyDriver;
 
 impl TtyDriver for SerialTtyDriver {
-    fn write_output(&self, data: &[u8]) {
+    fn write_output(&self, data: &[u8]) -> EResult<()> {
         for &ch in data {
             while !SerialLogger::is_tx_ready() {
                 core::hint::spin_loop();
             }
             unsafe { write8(COM1_BASE + DATA_REG, ch) };
         }
+        Ok(())
     }
 
     fn get_winsize(&self) -> winsize {

@@ -19,3 +19,4 @@ pub mod memfiles;
 pub mod net;
 pub mod pci;
 pub mod tty;
+pub mod vt;
