@@ -11,17 +11,17 @@ use alloc::collections::btree_map::BTreeMap;
 #[derive(Debug, Clone, Copy)]
 pub struct PciVariant {
     /// Match the primary vendor ID.
-    vendor: Option<u16>,
+    pub vendor: Option<u16>,
     /// Match the primary device ID.
-    device: Option<u16>,
+    pub device: Option<u16>,
     /// Match a generic class.
-    class: Option<u8>,
+    pub class: Option<u8>,
     /// Match a generic sub-class.
-    sub_class: Option<u8>,
+    pub sub_class: Option<u8>,
     /// Match a generic function.
-    prog_if: Option<u8>,
+    pub prog_if: Option<u8>,
     /// Driver-specific data.
-    data: usize,
+    pub data: Option<usize>,
 }
 
 impl PciVariant {
@@ -32,7 +32,7 @@ impl PciVariant {
             class: None,
             sub_class: None,
             prog_if: None,
-            data: 0,
+            data: None,
         }
     }
 
@@ -62,7 +62,7 @@ impl PciVariant {
     }
 
     pub const fn with_data(mut self, data: usize) -> Self {
-        self.data = data;
+        self.data = Some(data);
         return self;
     }
 }
