@@ -395,7 +395,7 @@ pub(in crate::arch) fn setup_signal_frame(
 
     let mut ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_sp));
     if ptr.write(frame).is_none() {
-        Process::exit(0x7f + Signal::SigSegv as u8);
+        Process::exit_signal(Signal::SigSegv);
     }
 
     // Place the restorer return address BELOW the signal frame so the
@@ -404,7 +404,7 @@ pub(in crate::arch) fn setup_signal_frame(
     let ret_sp = frame_sp - 8;
     let mut ret_ptr = UserPtr::<u64>::new(VirtAddr::new(ret_sp));
     if ret_ptr.write(restorer as u64).is_none() {
-        Process::exit(0x7f + signal as u8);
+        Process::exit_signal(Signal::SigSegv);
     }
 
     // Modify context to jump to the handler.
@@ -417,7 +417,7 @@ pub(in crate::arch) fn setup_signal_frame(
 pub(in crate::arch) fn restore_signal_frame(context: &mut Context) {
     let ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(context.rsp as usize));
     let Some(frame) = ptr.read() else {
-        Process::exit(0x7f + Signal::SigSegv as u8);
+        Process::exit_signal(Signal::SigSegv);
     };
 
     // Restore the saved context.
