@@ -417,9 +417,8 @@ struct MouseIrqHandler {
 
 impl IrqHandler for MouseIrqHandler {
     fn raise(&mut self) -> Status {
-        // IRQ 12 is exclusively the mouse line, so we don't need to check
-        // STATUS_MOUSE_DATA — just verify data is available.
-        if unsafe { read8(STATUS_PORT) } & STATUS_OUTPUT_FULL == 0 {
+        let status = unsafe { read8(STATUS_PORT) };
+        if status & STATUS_OUTPUT_FULL == 0 || status & STATUS_MOUSE_DATA == 0 {
             return Status::Ignored;
         }
         let byte = unsafe { read8(DATA_PORT) };
@@ -441,6 +440,10 @@ impl IrqHandler for MouseIrqHandler {
         self.byte_index = 0;
 
         let flags = self.packet[0];
+        if flags & 0xC0 != 0 {
+            return Status::Handled;
+        }
+
         let buttons = flags & 0x07;
 
         // Sign-extend movement deltas.
