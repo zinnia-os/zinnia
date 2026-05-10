@@ -84,11 +84,17 @@ struct TcpInner {
     snd_nxt: u32,
     rcv_nxt: u32,
     peer_mss: usize,
+    peer_window: usize,
 }
 
 impl TcpInner {
     fn recv_window(&self) -> u16 {
         self.recv_buf.get_available_len().min(u16::MAX as usize) as u16
+    }
+
+    fn send_window_available(&self) -> usize {
+        let in_flight = self.snd_nxt.wrapping_sub(self.snd_una) as usize;
+        self.peer_window.saturating_sub(in_flight)
     }
 }
 
@@ -105,6 +111,7 @@ struct TcpSegment<'a> {
     seq: u32,
     ack: u32,
     flags: u16,
+    window: u16,
     options: &'a [u8],
     payload: &'a [u8],
 }
@@ -263,7 +270,8 @@ impl TcpSocket {
         };
         register_connection(local, endpoint, self_ref);
 
-        if let Err(e) = send_segment_raw(&interface, local, endpoint, iss, 0, SYN, 0, &[]) {
+        let window = self.inner.lock().recv_window();
+        if let Err(e) = send_segment_raw(&interface, local, endpoint, iss, 0, SYN, window, &[]) {
             unregister_connection(local, endpoint);
             self.inner.lock().state = TcpState::Bound;
             return Err(e);
@@ -348,6 +356,7 @@ impl TcpSocket {
                         inner.rcv_nxt = segment.seq.wrapping_add(1);
                         inner.snd_una = segment.ack;
                         inner.peer_mss = parse_mss(segment.options);
+                        inner.peer_window = segment.window as usize;
                         inner.state = TcpState::Established;
                         ack_after = true;
                         self.wr_event.wake_all();
@@ -356,6 +365,7 @@ impl TcpSocket {
                 TcpState::SynReceived => {
                     if segment.flags & ACK != 0 && segment.ack == inner.snd_nxt {
                         inner.snd_una = segment.ack;
+                        inner.peer_window = segment.window as usize;
                         inner.state = TcpState::Established;
                         finish_accept = true;
                         self.wr_event.wake_all();
@@ -368,29 +378,30 @@ impl TcpSocket {
                 | TcpState::Closing
                 | TcpState::LastAck
                 | TcpState::TimeWait => {
-                    if segment.flags & ACK != 0
-                        && seq_between(segment.ack, inner.snd_una, inner.snd_nxt)
-                    {
-                        inner.snd_una = segment.ack;
-                        match inner.state {
-                            TcpState::FinWait1 if segment.ack == inner.snd_nxt => {
-                                inner.state = if inner.peer_closed {
-                                    TcpState::TimeWait
-                                } else {
-                                    TcpState::FinWait2
-                                };
+                    if segment.flags & ACK != 0 {
+                        inner.peer_window = segment.window as usize;
+                        if seq_between(segment.ack, inner.snd_una, inner.snd_nxt) {
+                            inner.snd_una = segment.ack;
+                            match inner.state {
+                                TcpState::FinWait1 if segment.ack == inner.snd_nxt => {
+                                    inner.state = if inner.peer_closed {
+                                        TcpState::TimeWait
+                                    } else {
+                                        TcpState::FinWait2
+                                    };
+                                }
+                                TcpState::Closing if segment.ack == inner.snd_nxt => {
+                                    inner.state = TcpState::TimeWait;
+                                }
+                                TcpState::LastAck if segment.ack == inner.snd_nxt => {
+                                    inner.state = TcpState::Closed;
+                                    unregister = inner.peer.map(|peer| (inner.local, peer));
+                                    drop_close_ref = true;
+                                }
+                                _ => {}
                             }
-                            TcpState::Closing if segment.ack == inner.snd_nxt => {
-                                inner.state = TcpState::TimeWait;
-                            }
-                            TcpState::LastAck if segment.ack == inner.snd_nxt => {
-                                inner.state = TcpState::Closed;
-                                unregister = inner.peer.map(|peer| (inner.local, peer));
-                                drop_close_ref = true;
-                            }
-                            _ => {}
+                            self.wr_event.wake_all();
                         }
-                        self.wr_event.wake_all();
                     }
 
                     if segment.seq == inner.rcv_nxt && !segment.payload.is_empty() {
@@ -550,7 +561,7 @@ impl SocketOps for TcpSocket {
         addr: Option<&[u8]>,
         control: &[u8],
         _flags: u32,
-        _nonblocking: bool,
+        nonblocking: bool,
     ) -> EResult<isize> {
         let _ = (addr, control);
         if buf.is_empty() {
@@ -559,28 +570,49 @@ impl SocketOps for TcpSocket {
 
         let mut sent = 0usize;
         while !buf.is_finished() {
-            let state = self.inner.lock().state;
-            if !matches!(state, TcpState::Established | TcpState::CloseWait) {
-                return if sent > 0 {
-                    Ok(sent as isize)
-                } else {
-                    Err(Errno::ENOTCONN)
-                };
-            }
-            if self.inner.lock().shutdown.contains(ShutdownFlags::Write) {
-                return if sent > 0 {
-                    Ok(sent as isize)
-                } else {
-                    Err(Errno::EPIPE)
-                };
-            }
+            let chunk_len = loop {
+                let guard = self.wr_event.guard();
+                {
+                    let inner = self.inner.lock();
+                    if !matches!(inner.state, TcpState::Established | TcpState::CloseWait) {
+                        return if sent > 0 {
+                            Ok(sent as isize)
+                        } else {
+                            Err(Errno::ENOTCONN)
+                        };
+                    }
+                    if inner.shutdown.contains(ShutdownFlags::Write) {
+                        return if sent > 0 {
+                            Ok(sent as isize)
+                        } else {
+                            Err(Errno::EPIPE)
+                        };
+                    }
 
-            let chunk_len = {
-                let inner = self.inner.lock();
-                min(
-                    buf.len() - buf.total_offset(),
-                    min(MAX_TCP_PAYLOAD_LEN, inner.peer_mss),
-                )
+                    let available = inner.send_window_available();
+                    if available > 0 {
+                        break min(
+                            buf.len() - buf.total_offset(),
+                            min(inner.peer_mss, available),
+                        );
+                    }
+                }
+
+                if nonblocking {
+                    return if sent > 0 {
+                        Ok(sent as isize)
+                    } else {
+                        Err(Errno::EAGAIN)
+                    };
+                }
+                guard.wait();
+                if Scheduler::get_current().has_pending_signals() {
+                    return if sent > 0 {
+                        Ok(sent as isize)
+                    } else {
+                        Err(Errno::EINTR)
+                    };
+                };
             };
             let mut data = vec![0u8; chunk_len];
             buf.copy_to_slice(&mut data)?;
@@ -890,6 +922,7 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
         inner.snd_nxt = iss.wrapping_add(1);
         inner.rcv_nxt = segment.seq.wrapping_add(1);
         inner.peer_mss = parse_mss(segment.options);
+        inner.peer_window = segment.window as usize;
     }
     let (child_local, child_ref) = {
         let inner = child.inner.lock();
@@ -946,6 +979,7 @@ fn make_socket(state: TcpState) -> EResult<Arc<TcpSocket>> {
             snd_nxt: 0,
             rcv_nxt: 0,
             peer_mss: MAX_TCP_PAYLOAD_LEN,
+            peer_window: 0,
         }),
         rd_event: Event::new(),
         wr_event: Event::new(),
@@ -977,6 +1011,7 @@ fn parse_segment<'a>(ipv4: &'a Ipv4Header<'_>) -> Option<TcpSegment<'a>> {
         seq: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
         ack: u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]),
         flags: (((packet[12] as u16) & 0x01) << 8) | packet[13] as u16,
+        window: u16::from_be_bytes([packet[14], packet[15]]),
         options: &packet[TCP_HEADER_LEN..header_len],
         payload: &packet[header_len..],
     })
