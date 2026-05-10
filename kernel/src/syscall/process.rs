@@ -10,7 +10,7 @@ use crate::{
         to_user,
     },
     sched::Scheduler,
-    uapi::{self, limits::PATH_MAX, pid_t, uid_t},
+    uapi::{self, gid_t, limits::PATH_MAX, pid_t, uid_t},
     vfs::{File, file::OpenFlags, inode::Mode},
     wrap_syscall,
 };
@@ -77,13 +77,82 @@ pub fn getresuid(ruid: VirtAddr, euid: VirtAddr, suid: VirtAddr) -> EResult<()> 
 }
 
 #[wrap_syscall]
+pub fn setuid(uid: uid_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let mut ident = proc.identity.lock();
+    if ident.is_effective_superuser() {
+        ident.user_id = uid;
+        ident.effective_user_id = uid;
+        ident.set_user_id = uid;
+        Ok(())
+    } else if uid == ident.user_id || uid == ident.effective_user_id || uid == ident.set_user_id {
+        ident.effective_user_id = uid;
+        Ok(())
+    } else {
+        Err(Errno::EPERM)
+    }
+}
+
+#[wrap_syscall]
+pub fn seteuid(euid: uid_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let mut ident = proc.identity.lock();
+    if ident.is_effective_superuser()
+        || euid == ident.user_id
+        || euid == ident.effective_user_id
+        || euid == ident.set_user_id
+    {
+        ident.effective_user_id = euid;
+        Ok(())
+    } else {
+        Err(Errno::EPERM)
+    }
+}
+
+#[wrap_syscall]
+pub fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) -> EResult<()> {
+    setresuid_inner(ruid, euid, suid)
+}
+
+#[wrap_syscall]
+pub fn setreuid(ruid: uid_t, euid: uid_t) -> EResult<()> {
+    setresuid_inner(ruid, euid, uid_t::MAX)
+}
+
+fn setresuid_inner(ruid: uid_t, euid: uid_t, suid: uid_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let mut ident = proc.identity.lock();
+    if !ident.is_effective_superuser() {
+        for uid in [ruid, euid, suid] {
+            if uid != uid_t::MAX
+                && uid != ident.user_id
+                && uid != ident.effective_user_id
+                && uid != ident.set_user_id
+            {
+                return Err(Errno::EPERM);
+            }
+        }
+    }
+    if ruid != uid_t::MAX {
+        ident.user_id = ruid;
+    }
+    if euid != uid_t::MAX {
+        ident.effective_user_id = euid;
+    }
+    if suid != uid_t::MAX {
+        ident.set_user_id = suid;
+    }
+    Ok(())
+}
+
+#[wrap_syscall]
 pub fn getresgid(rgid: VirtAddr, egid: VirtAddr, sgid: VirtAddr) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let ident = proc.identity.lock();
 
-    let mut rgid_ptr = UserPtr::<uid_t>::new(rgid);
-    let mut egid_ptr = UserPtr::<uid_t>::new(egid);
-    let mut sgid_ptr = UserPtr::<uid_t>::new(sgid);
+    let mut rgid_ptr = UserPtr::<gid_t>::new(rgid);
+    let mut egid_ptr = UserPtr::<gid_t>::new(egid);
+    let mut sgid_ptr = UserPtr::<gid_t>::new(sgid);
 
     rgid_ptr.write(ident.group_id).ok_or(Errno::EFAULT)?;
     egid_ptr
@@ -91,6 +160,76 @@ pub fn getresgid(rgid: VirtAddr, egid: VirtAddr, sgid: VirtAddr) -> EResult<()> 
         .ok_or(Errno::EFAULT)?;
     sgid_ptr.write(ident.set_group_id).ok_or(Errno::EFAULT)?;
 
+    Ok(())
+}
+
+#[wrap_syscall]
+pub fn setgid(gid: gid_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let mut ident = proc.identity.lock();
+    if ident.is_effective_superuser() {
+        ident.group_id = gid;
+        ident.effective_group_id = gid;
+        ident.set_group_id = gid;
+        Ok(())
+    } else if gid == ident.group_id || gid == ident.effective_group_id || gid == ident.set_group_id
+    {
+        ident.effective_group_id = gid;
+        Ok(())
+    } else {
+        Err(Errno::EPERM)
+    }
+}
+
+#[wrap_syscall]
+pub fn setegid(egid: gid_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let mut ident = proc.identity.lock();
+    if ident.is_effective_superuser()
+        || egid == ident.group_id
+        || egid == ident.effective_group_id
+        || egid == ident.set_group_id
+    {
+        ident.effective_group_id = egid;
+        Ok(())
+    } else {
+        Err(Errno::EPERM)
+    }
+}
+
+#[wrap_syscall]
+pub fn setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t) -> EResult<()> {
+    setresgid_inner(rgid, egid, sgid)
+}
+
+#[wrap_syscall]
+pub fn setregid(rgid: gid_t, egid: gid_t) -> EResult<()> {
+    setresgid_inner(rgid, egid, gid_t::MAX)
+}
+
+fn setresgid_inner(rgid: gid_t, egid: gid_t, sgid: gid_t) -> EResult<()> {
+    let proc = Scheduler::get_current().get_process();
+    let mut ident = proc.identity.lock();
+    if !ident.is_effective_superuser() {
+        for gid in [rgid, egid, sgid] {
+            if gid != gid_t::MAX
+                && gid != ident.group_id
+                && gid != ident.effective_group_id
+                && gid != ident.set_group_id
+            {
+                return Err(Errno::EPERM);
+            }
+        }
+    }
+    if rgid != gid_t::MAX {
+        ident.group_id = rgid;
+    }
+    if egid != gid_t::MAX {
+        ident.effective_group_id = egid;
+    }
+    if sgid != gid_t::MAX {
+        ident.set_group_id = sgid;
+    }
     Ok(())
 }
 
@@ -344,6 +483,10 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
             return Ok(0);
         }
 
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::EINTR);
+        }
+
         drop(children);
         guard.wait();
 
@@ -358,6 +501,7 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
                 }
                 let state = child.status.lock();
                 matches!(*state, ProcessState::Exited(_))
+                    || matches!(*state, ProcessState::Signaled(_))
                     || ((options & uapi::wait::WUNTRACED) != 0
                         && child.stop_unwaited.load(Ordering::Acquire))
                     || ((options & uapi::wait::WCONTINUED) != 0
