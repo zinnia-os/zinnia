@@ -58,6 +58,21 @@ pub struct sockaddr_un {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct in_addr {
+    pub s_addr: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sockaddr_in {
+    pub sin_family: sa_family_t,
+    pub sin_port: u16,
+    pub sin_addr: in_addr,
+    pub sin_zero: [u8; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ucred {
     pub pid: super::pid_t,
     pub uid: super::uid_t,
@@ -78,6 +93,9 @@ pub const SOCK_CLOEXEC: u32 = 1 << 16;
 pub const SOCK_CLOFORK: u32 = 1 << 17;
 
 pub const SOL_SOCKET: u32 = 1;
+pub const SOL_IP: u32 = 0;
+pub const SOL_TCP: u32 = 6;
+pub const SOL_UDP: u32 = 17;
 pub const SOL_IPV6: u32 = 41;
 pub const SOL_PACKET: u32 = 263;
 pub const SOL_NETLINK: u32 = 270;
@@ -130,11 +148,11 @@ pub const MSG_CONFIRM: u32 = 0x800;
 pub const MSG_DONTWAIT: u32 = 0x1000;
 pub const MSG_CMSG_CLOEXEC: u32 = 0x2000;
 
+pub const AF_UNSPEC: u32 = 0;
 pub const AF_INET: u32 = 1;
 pub const AF_INET6: u32 = 2;
 pub const AF_UNIX: u32 = 3;
 pub const AF_LOCAL: u32 = 3;
-pub const AF_UNSPEC: u32 = 4;
 pub const AF_NETLINK: u32 = 5;
 pub const AF_BRIDGE: u32 = 6;
 pub const AF_APPLETALK: u32 = 7;
@@ -150,6 +168,11 @@ pub const AF_ROSE: u32 = 16;
 pub const AF_TIPC: u32 = 30;
 pub const AF_ALG: u32 = 38;
 pub const AF_MAX: u32 = 46;
+
+pub const IPPROTO_IP: u32 = 0;
+pub const IPPROTO_ICMP: u32 = 1;
+pub const IPPROTO_TCP: u32 = 6;
+pub const IPPROTO_UDP: u32 = 17;
 
 pub const SHUT_RD: u32 = 1;
 pub const SHUT_WR: u32 = 2;

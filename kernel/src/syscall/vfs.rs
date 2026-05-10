@@ -27,6 +27,7 @@ use crate::{
         self, File, MountFlags, PathNode,
         cache::LookupFlags,
         epoll::EpollFile,
+        eventfd::EventfdFile,
         file::{FileDescription, FileOps, OpenFlags, PollFlags, SeekAnchor},
         fs,
         inode::{INode, Mode, NodeOps},
@@ -1810,6 +1811,36 @@ pub fn signalfd_create(mask: UserPtr<sigset_t>, flags: i32) -> EResult<i32> {
             FileDescription {
                 file,
                 close_on_exec: AtomicBool::new(flags & SFD_CLOEXEC as i32 != 0),
+            },
+            0,
+        )
+        .ok_or(Errno::EMFILE)
+}
+
+#[wrap_syscall]
+pub fn eventfd_create(initval: u32, flags: i32) -> EResult<i32> {
+    const EFD_SEMAPHORE: i32 = 1;
+
+    let allowed = EFD_SEMAPHORE | O_CLOEXEC as i32 | O_NONBLOCK as i32;
+    if flags & !allowed != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let ops: Arc<dyn FileOps> = Arc::new(EventfdFile::new(initval, flags as u32));
+
+    let mut open_flags = OpenFlags::ReadWrite;
+    if flags & O_NONBLOCK as i32 != 0 {
+        open_flags |= OpenFlags::NonBlocking;
+    }
+    let file = File::open_disconnected(ops, open_flags)?;
+
+    let mut open_files = proc.open_files.lock();
+    open_files
+        .open_file(
+            FileDescription {
+                file,
+                close_on_exec: AtomicBool::new(flags & O_CLOEXEC as i32 != 0),
             },
             0,
         )

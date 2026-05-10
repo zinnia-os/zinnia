@@ -273,8 +273,6 @@ impl LocalSocket {
 
         let available = control.len();
         if available <= header_aligned {
-            // Userspace gave us a buffer too small even for one fd — drop
-            // them all and signal truncation, matching Linux behaviour.
             let _ = core::mem::take(&mut section.files);
             *out_flags |= MSG_CTRUNC;
             return Ok(0);
@@ -499,21 +497,23 @@ impl SocketOps for LocalSocket {
     }
 
     fn send(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize> {
-        self.sendmsg(buf, &[], flags, nonblocking)
+        self.sendmsg(buf, None, &[], flags, nonblocking)
     }
 
     fn recv(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize> {
-        let (n, _, _) = self.recvmsg(buf, &mut [], flags, nonblocking)?;
+        let (n, _, _, _) = self.recvmsg(buf, None, &mut [], flags, nonblocking)?;
         Ok(n)
     }
 
     fn sendmsg(
         &self,
         buf: &mut IovecIter,
+        addr: Option<&[u8]>,
         control: &[u8],
         flags: u32,
         nonblocking: bool,
     ) -> EResult<isize> {
+        let _ = addr;
         if buf.is_empty() && control.is_empty() {
             return Ok(0);
         }
@@ -587,12 +587,14 @@ impl SocketOps for LocalSocket {
     fn recvmsg(
         &self,
         buf: &mut IovecIter,
+        addr: Option<&mut [u8]>,
         control: &mut [u8],
         flags: u32,
         nonblocking: bool,
-    ) -> EResult<(isize, usize, u32)> {
+    ) -> EResult<(isize, usize, usize, u32)> {
+        let _ = addr;
         if buf.is_empty() && control.is_empty() {
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, 0));
         }
 
         let peek = flags & MSG_PEEK != 0;
@@ -645,7 +647,7 @@ impl SocketOps for LocalSocket {
                         self.wr_event.wake_one();
                     }
 
-                    return Ok((len as isize, ctrl_written, out_flags));
+                    return Ok((len as isize, 0, ctrl_written, out_flags));
                 }
 
                 if inner.shutdown.contains(ShutdownFlags::Read) || inner.peer_closed {
@@ -653,7 +655,7 @@ impl SocketOps for LocalSocket {
                     let mut out_flags = 0u32;
                     let ctrl_written =
                         Self::build_cmsg(&mut inner.inflight, control, flags, &mut out_flags)?;
-                    return Ok((0, ctrl_written, out_flags));
+                    return Ok((0, 0, ctrl_written, out_flags));
                 }
             }
 

@@ -133,5 +133,5 @@ pub const TIMERFD_CREATE: usize = 131;
 pub const TIMERFD_GETTIME: usize = 132;
 pub const TIMERFD_SETTIME: usize = 133;
 pub const SIGNALFD_CREATE: usize = 134;
-pub const _EVENTFD_CREATE: usize = 135; // TODO
+pub const EVENTFD_CREATE: usize = 135;
 pub const MSYNC: usize = 136;

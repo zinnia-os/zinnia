@@ -4,7 +4,7 @@ use alloc::alloc::AllocError;
 /// Encapsulates an Errno value as a result.
 pub type EResult<T> = Result<T, Errno>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[repr(u32)]
 pub enum Errno {
     EPERM = EPERM,

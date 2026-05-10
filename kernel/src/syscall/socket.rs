@@ -1,5 +1,9 @@
 use crate::{
-    device::net::{Socket, SocketFlags, SocketOps, local::LocalSocket},
+    device::net::{
+        Socket, SocketFlags, SocketOps,
+        l4::{tcp::TcpSocket, udp::UdpSocket},
+        local::LocalSocket,
+    },
     memory::{IovecIter, UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
     sched::Scheduler,
@@ -68,12 +72,17 @@ fn write_sockaddr(
 }
 
 #[wrap_syscall]
-pub fn socket(family: i32, socket_type: i32, _protocol: i32) -> EResult<usize> {
+pub fn socket(family: i32, socket_type: i32, protocol: i32) -> EResult<usize> {
     let flags = SocketFlags::from_bits_truncate(socket_type as u32);
     let sock_type = socket_type as u32 & !(SOCK_NONBLOCK | SOCK_CLOEXEC | SOCK_CLOFORK);
 
     let ops: Arc<dyn SocketOps> = match family as u32 {
         AF_UNIX => LocalSocket::new(sock_type)?,
+        AF_INET => match sock_type {
+            SOCK_DGRAM => UdpSocket::new(sock_type, protocol)?,
+            SOCK_STREAM => TcpSocket::new(sock_type, protocol)?,
+            _ => return Err(Errno::ESOCKTNOSUPPORT),
+        },
         _ => return Err(Errno::EAFNOSUPPORT),
     };
 
@@ -243,9 +252,23 @@ pub fn sendmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
         Vec::new()
     };
 
+    let name_buf = if msg.msg_namelen > 0 && !msg.msg_name.is_null() {
+        let ptr = UserPtr::<u8>::new(msg.msg_name.addr());
+        let mut v = vec![0u8; msg.msg_namelen as usize];
+        ptr.read_slice(&mut v).ok_or(Errno::EFAULT)?;
+        v
+    } else {
+        Vec::new()
+    };
+    let name = if name_buf.is_empty() {
+        None
+    } else {
+        Some(name_buf.as_slice())
+    };
+
     let sent = socket
         .ops
-        .sendmsg(&mut iter, &ctrl_buf, flags as u32, nonblocking)?;
+        .sendmsg(&mut iter, name, &ctrl_buf, flags as u32, nonblocking)?;
 
     Ok(sent as usize)
 }
@@ -268,15 +291,27 @@ pub fn recvmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
 
     let ctrl_cap = msg.msg_controllen as usize;
     let mut ctrl_buf = vec![0u8; ctrl_cap];
+    let name_cap = msg.msg_namelen as usize;
+    let mut name_buf = vec![0u8; name_cap];
+    let name = if name_cap > 0 && !msg.msg_name.is_null() {
+        Some(name_buf.as_mut_slice())
+    } else {
+        None
+    };
 
-    let (received, ctrl_written, out_flags) =
+    let (received, name_written, ctrl_written, out_flags) =
         socket
             .ops
-            .recvmsg(&mut iter, &mut ctrl_buf, flags as u32, nonblocking)?;
+            .recvmsg(&mut iter, name, &mut ctrl_buf, flags as u32, nonblocking)?;
 
     if ctrl_written > 0 && !msg.msg_control.is_null() {
         let mut ptr = UserPtr::<u8>::new(msg.msg_control.addr());
         ptr.write_slice(&ctrl_buf[..ctrl_written])
+            .ok_or(Errno::EFAULT)?;
+    }
+    if name_written > 0 && !msg.msg_name.is_null() {
+        let mut ptr = UserPtr::<u8>::new(msg.msg_name.addr());
+        ptr.write_slice(&name_buf[..name_written.min(name_cap)])
             .ok_or(Errno::EFAULT)?;
     }
 
@@ -287,6 +322,12 @@ pub fn recvmsg(fd: i32, hdr: VirtAddr, flags: i32) -> EResult<usize> {
     );
     controllen_ptr
         .write(ctrl_written as socklen_t)
+        .ok_or(Errno::EFAULT)?;
+
+    let mut namelen_ptr =
+        UserPtr::<socklen_t>::new(hdr_ptr.addr() + VirtAddr::new(offset_of!(msghdr, msg_namelen)));
+    namelen_ptr
+        .write(name_written as socklen_t)
         .ok_or(Errno::EFAULT)?;
 
     let mut flags_ptr =

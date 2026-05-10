@@ -11,7 +11,13 @@ use alloc::sync::Arc;
 use bitflags::bitflags;
 use core::any::Any;
 
+pub mod dev;
+pub mod interface;
+pub mod l2;
+pub mod l3;
+pub mod l4;
 pub mod local;
+pub mod nic;
 
 pub struct Socket {
     pub ops: Arc<dyn SocketOps>,
@@ -71,11 +77,12 @@ pub trait SocketOps: Send + Sync + Any {
     fn sendmsg(
         &self,
         buf: &mut IovecIter,
+        addr: Option<&[u8]>,
         control: &[u8],
         flags: u32,
         nonblocking: bool,
     ) -> EResult<isize> {
-        let _ = control;
+        let _ = (addr, control);
         self.send(buf, flags, nonblocking)
     }
 
@@ -88,13 +95,14 @@ pub trait SocketOps: Send + Sync + Any {
     fn recvmsg(
         &self,
         buf: &mut IovecIter,
+        addr: Option<&mut [u8]>,
         control: &mut [u8],
         flags: u32,
         nonblocking: bool,
-    ) -> EResult<(isize, usize, u32)> {
-        let _ = control;
+    ) -> EResult<(isize, usize, usize, u32)> {
+        let _ = (addr, control);
         let n = self.recv(buf, flags, nonblocking)?;
-        Ok((n, 0, 0))
+        Ok((n, 0, 0, 0))
     }
 
     /// Shutdown read/write/both.

@@ -219,7 +219,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::DUP => vfs::dup,
         numbers::DUP3 => vfs::dup3,
         numbers::SYNC => sys_unimpl!("sync", Err(Errno::ENOSYS)),
-        numbers::FSYNC => sys_unimpl!("fsync", Err(Errno::ENOSYS)),
+        numbers::FSYNC => sys_unimpl!("fsync", Ok(0)),
         numbers::FDATASYNC => sys_unimpl!("fdatasync", Err(Errno::ENOSYS)),
         numbers::CHROOT => vfs::chroot,
         numbers::MOUNT => vfs::mount,
@@ -232,6 +232,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::TIMERFD_GETTIME => vfs::timerfd_gettime,
         numbers::TIMERFD_SETTIME => vfs::timerfd_settime,
         numbers::SIGNALFD_CREATE => vfs::signalfd_create,
+        numbers::EVENTFD_CREATE => vfs::eventfd_create,
 
         // Sockets
         numbers::SOCKET => socket::socket,
