@@ -8,8 +8,23 @@ use crate::{
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
 static TSC_FREQUENCY: AtomicU64 = AtomicU64::new(0);
-static TSC_BASE: AtomicU64 = AtomicU64::new(0);
+static TSC_BASE_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+fn cycles_to_ns(cycles: u64, frequency: u64) -> usize {
+    let seconds = cycles / frequency;
+    let remaining_cycles = cycles % frequency;
+
+    let fractional_ns =
+        (remaining_cycles as u128 * NANOS_PER_SECOND as u128 / frequency as u128) as u64;
+    let ns = seconds
+        .saturating_mul(NANOS_PER_SECOND)
+        .saturating_add(fractional_ns);
+
+    return ns.min(usize::MAX as u64) as usize;
+}
 
 struct TscClock;
 impl ClockSource for TscClock {
@@ -19,10 +34,7 @@ impl ClockSource for TscClock {
 
     fn reset(&mut self) {
         // The TSC can't be set manually, so we record whatever value it had when `reset` was called and subtract that.
-        TSC_BASE.store(
-            asm::rdtsc() * 1_000_000_000 / TSC_FREQUENCY.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        TSC_BASE_CYCLES.store(asm::rdtsc(), Ordering::Relaxed);
     }
 
     fn get_priority(&self) -> u8 {
@@ -30,10 +42,9 @@ impl ClockSource for TscClock {
         return 255;
     }
 
-    // TODO: This wraps after like 5 seconds. Fix this, then reenable tsc as default.
     fn get_elapsed_ns(&self) -> usize {
-        return (asm::rdtsc() * 1_000_000_000 / TSC_FREQUENCY.load(Ordering::Relaxed)
-            - TSC_BASE.load(Ordering::Relaxed)) as usize;
+        let cycles = asm::rdtsc() - TSC_BASE_CYCLES.load(Ordering::Relaxed);
+        return cycles_to_ns(cycles, TSC_FREQUENCY.load(Ordering::Relaxed));
     }
 }
 
@@ -52,14 +63,14 @@ fn TSC_STAGE() {
     }
 
     // Check if we have the TSC info leaf.
-    let cpuid = match asm::cpuid(0x8000_0000, 0).eax >= 0x15 {
+    let cpuid = match asm::cpuid(0, 0).eax >= 0x15 {
         true => Some(asm::cpuid(0x15, 0)),
         false => None,
     };
 
     // First, always try using another known good clock to calibrate.
     let freq = if clock::has_clock() {
-        log!("Calibrating using exisiting clock");
+        log!("Calibrating using existing clock");
 
         // Wait for 10ms.
         let t1 = asm::rdtsc();
@@ -90,12 +101,7 @@ fn TSC_STAGE() {
     log!("Timer frequency is {} MHz ({} Hz)", freq / 1_000_000, freq);
     TSC_FREQUENCY.store(freq, Ordering::Relaxed);
 
-    // TODO: Until the timestamp calculation is fixed, disable the TSC by default.
-    if BootInfo::get()
-        .command_line
-        .get_bool("tsc")
-        .unwrap_or(false)
-    {
+    if BootInfo::get().command_line.get_bool("tsc").unwrap_or(true) {
         clock::switch(Box::new(TscClock)).unwrap();
     }
 }
