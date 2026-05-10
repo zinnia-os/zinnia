@@ -177,7 +177,10 @@ unsafe impl GlobalAlloc for SlabAllocator {
         unsafe {
             if ptr as usize == align_down(ptr as usize, arch::virt::get_page_size()) {
                 let info = ptr.sub(arch::virt::get_page_size()) as *mut SlabInfo;
-                KernelAlloc::dealloc((VirtAddr::from(info)).as_hhdm().unwrap(), (*info).num_pages);
+                KernelAlloc::dealloc(
+                    (VirtAddr::from(info)).as_hhdm().unwrap(),
+                    (*info).num_pages + 1,
+                );
             } else {
                 let header =
                     align_down(ptr as usize, arch::virt::get_page_size()) as *mut SlabHeader;

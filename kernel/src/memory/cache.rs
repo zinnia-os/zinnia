@@ -231,6 +231,7 @@ pub enum PagerError {
 /// A pager which uses kernel memory to get physical pages.
 #[derive(Debug)]
 struct PhysPager;
+
 impl Pager for PhysPager {
     fn has_page(&self, _: usize) -> bool {
         // We always have pages.

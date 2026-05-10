@@ -10,6 +10,7 @@ use alloc::alloc::AllocError;
 use bitflags::bitflags;
 use core::{
     hint::unlikely,
+    panic::Location,
     ptr::{NonNull, null_mut, write_bytes},
     slice,
     sync::atomic::{AtomicPtr, Ordering},
@@ -139,7 +140,10 @@ impl PageAllocator for KernelAlloc {
                 }
                 Ok(x)
             }
-            None => Err(AllocError),
+            None => {
+                error!("Unable to allocate for \"{}\"", Location::caller());
+                Err(AllocError)
+            }
         }
     }
 
