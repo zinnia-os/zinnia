@@ -218,6 +218,54 @@ impl VirtioGpuDevice {
         Ok(())
     }
 
+    fn detach_backing_raw(
+        virtio: &SpinMutex<VirtioDevice>,
+        ctrl_queue: &SpinMutex<VirtQueue>,
+        resource_id: u32,
+    ) -> EResult<()> {
+        let cmd = VirtioGpuResourceDetachBacking {
+            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING),
+            resource_id,
+            padding: 0,
+        };
+
+        let resp: VirtioGpuCtrlHdr = Self::send_ctrl_command(virtio, ctrl_queue, &cmd)?;
+        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err(Errno::EIO);
+        }
+        Ok(())
+    }
+
+    fn unref_resource_raw(
+        virtio: &SpinMutex<VirtioDevice>,
+        ctrl_queue: &SpinMutex<VirtQueue>,
+        resource_id: u32,
+    ) -> EResult<()> {
+        let cmd = _VirtioGpuResourceUnref {
+            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_UNREF),
+            resource_id,
+            padding: 0,
+        };
+
+        let resp: VirtioGpuCtrlHdr = Self::send_ctrl_command(virtio, ctrl_queue, &cmd)?;
+        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err(Errno::EIO);
+        }
+        Ok(())
+    }
+
+    fn destroy_resource_raw(
+        virtio: &SpinMutex<VirtioDevice>,
+        ctrl_queue: &SpinMutex<VirtQueue>,
+        resource_id: u32,
+        has_backing: bool,
+    ) {
+        if has_backing {
+            Self::detach_backing_raw(virtio, ctrl_queue, resource_id).ok();
+        }
+        Self::unref_resource_raw(virtio, ctrl_queue, resource_id).ok();
+    }
+
     pub fn attach_backing(&self, resource_id: u32, pages: &[PhysAddr]) -> EResult<()> {
         let page_size = arch::virt::get_page_size();
         // Allocate command buffer for header + memory entries
@@ -501,15 +549,17 @@ impl Device for VirtioGpuDevice {
         let pitch = width * bytes_per_pixel;
         let size = (pitch * height) as usize;
 
-        let num_pages = size.div_ceil(page_size);
-        log!("Allocating {} pages for buffer (size={})", num_pages, size);
-        let base_addr = PhysPageAllocation::new(num_pages)?.into_phys();
-
-        let resource_id = self.alloc_resource_id();
         let format = match bpp {
             32 => VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
             _ => return Err(Errno::EINVAL),
         };
+
+        let num_pages = size.div_ceil(page_size);
+        log!("Allocating {} pages for buffer (size={})", num_pages, size);
+        let allocation = PhysPageAllocation::new(num_pages)?;
+        let base_addr = allocation.phys();
+
+        let resource_id = self.alloc_resource_id();
         log!("Using format {} for resource", format);
 
         self.create_resource_2d(resource_id, width, height, format)?;
@@ -518,11 +568,16 @@ impl Device for VirtioGpuDevice {
         let page_addrs: Vec<PhysAddr> = (0..num_pages)
             .map(|i| base_addr + (i * page_size))
             .collect();
-        self.attach_backing(resource_id, &page_addrs)?;
+        if let Err(e) = self.attach_backing(resource_id, &page_addrs) {
+            Self::destroy_resource_raw(&self.virtio, &self.ctrl_queue, resource_id, false);
+            return Err(e);
+        }
 
         // Store this as the active resource
         self.active_resource.store(resource_id, Ordering::SeqCst);
         log!("Set active resource to {}", resource_id);
+
+        let base_addr = allocation.into_phys();
 
         let buffer_id = self.obj_counter.alloc();
         let buffer = Arc::new(VirtioGpuBuffer {
@@ -740,6 +795,13 @@ pub struct VirtioGpuBuffer {
 
 impl Drop for VirtioGpuBuffer {
     fn drop(&mut self) {
+        VirtioGpuDevice::destroy_resource_raw(
+            &self.virtio,
+            &self.ctrl_queue,
+            self.resource_id,
+            true,
+        );
+
         let page_size = arch::virt::get_page_size();
         let pages = self.size.div_ceil(page_size);
         unsafe {

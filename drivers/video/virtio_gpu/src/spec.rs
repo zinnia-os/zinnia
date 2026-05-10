@@ -12,12 +12,12 @@ pub const VIRTIO_GPU_SUPPORTED_FEATURES: u32 = VIRTIO_GPU_F_EDID;
 // Control queue command types
 pub const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 pub const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
-pub const _VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
+pub const VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
 pub const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 pub const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 pub const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 pub const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
-pub const _VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
+pub const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 pub const _VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 pub const _VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 pub const _VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010a;
@@ -175,7 +175,7 @@ pub struct VirtioGpuResourceAttachBacking {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct _VirtioGpuResourceDetachBacking {
+pub struct VirtioGpuResourceDetachBacking {
     pub hdr: VirtioGpuCtrlHdr,
     pub resource_id: u32,
     pub padding: u32,
