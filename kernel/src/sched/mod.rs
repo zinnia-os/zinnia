@@ -89,9 +89,15 @@ impl Scheduler {
         least_loaded_cpu.scheduler.add_task(task);
     }
 
+    /// Wakes a task on the CPU it was last assigned to.
+    /// Falls back to the local CPU if it has never run or the recorded CPU is offline.
     pub fn wake_task(task: Arc<Task>) {
         let current_cpu = CpuData::get();
-        let target_cpu = Self::choose_target_cpu();
+        let last_cpu_id = task.last_cpu.load(Ordering::Relaxed);
+        let target_cpu = match CpuData::get_for(last_cpu_id) {
+            Some(last) if last.online.load(Ordering::Acquire) => last,
+            _ => current_cpu,
+        };
         target_cpu.scheduler.add_task(task);
 
         if target_cpu.id != current_cpu.id {

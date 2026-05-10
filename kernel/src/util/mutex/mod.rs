@@ -124,7 +124,7 @@ impl<T: ?Sized> Mutex<T> {
 
         // If there were waiters for this mutex at some point, wake them up.
         if let Some(waiter) = inner.waiters.pop_front() {
-            CpuData::get().scheduler.add_task(waiter.task.clone());
+            Scheduler::wake_task(waiter.task.clone());
         } else {
             // If there were no more waiters, we're done.
             self.flag.store(false, Ordering::Release);

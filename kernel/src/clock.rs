@@ -2,7 +2,10 @@
 // TODO: Try to get rid of some locks.
 
 use super::util::mutex::spin::SpinMutex;
-use crate::{process, process::task::Task, sched::Scheduler};
+use crate::{
+    process::{self, task::Task},
+    sched::Scheduler,
+};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
@@ -158,7 +161,7 @@ fn wake_timeout_waiters(now: usize) {
     }
 
     for task in expired {
-        crate::percpu::CpuData::get().scheduler.add_task(task);
+        Scheduler::wake_task(task);
     }
 }
 

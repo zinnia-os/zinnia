@@ -14,7 +14,7 @@ use core::{
     alloc::Layout,
     panic,
     ptr::null_mut,
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +65,8 @@ pub struct Task {
     pub signal: SpinMutex<ThreadSignalState>,
     /// The display name of this thread.
     pub name: SpinMutex<String>,
+    /// CPU id this task last ran on.
+    pub last_cpu: AtomicU32,
 }
 
 const STACK_LAYOUT: Layout = match Layout::from_size_align(KERNEL_STACK_SIZE, 0x1000) {
@@ -99,6 +101,7 @@ impl Task {
             ticks: 0,
             priority: 0,
             name: SpinMutex::new(String::new()),
+            last_cpu: AtomicU32::new(u32::MAX),
         };
 
         {
