@@ -130,7 +130,7 @@ impl Drop for FbCon {
         unsafe { flanterm_sys::flanterm_deinit(self.ctx, Some(free)) };
 
         PageTable::get_kernel()
-            .unmap_range::<KernelAlloc>(self.mem.into(), self.pitch * self.height)
+            .unmap_memory::<KernelAlloc>(self.mem.into(), self.pitch * self.height)
             .unwrap();
     }
 }

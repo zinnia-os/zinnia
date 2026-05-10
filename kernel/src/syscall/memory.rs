@@ -1,10 +1,8 @@
 use crate::{
-    arch::virt::get_page_size,
     memory::{VirtAddr, virt::VmFlags},
     posix::errno::{EResult, Errno},
     sched::Scheduler,
     uapi,
-    util::align_up,
     vfs::file::MmapFlags,
     wrap_syscall,
 };
@@ -38,18 +36,6 @@ pub fn mmap(
     vm_prot.set(VmFlags::Shared, flags.contains(MmapFlags::Shared));
 
     let proc = Scheduler::get_current().get_process();
-    let mut mmap_head = proc.mmap_head.lock();
-
-    // If MAP_FIXED isn't specified, we must find a suitable address.
-    let addr = if !flags.contains(MmapFlags::Fixed) {
-        let cur = *mmap_head;
-        *mmap_head = align_up((cur + length).value(), get_page_size()).into();
-
-        cur
-    } else {
-        addr
-    };
-
     let file = match flags.contains(MmapFlags::Anonymous) {
         true => None,
         false => {
@@ -57,11 +43,19 @@ pub fn mmap(
             Some(proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?)
         }
     };
+    let len = NonZeroUsize::new(length).ok_or(Errno::EINVAL)?;
+    let mut space = proc.address_space.lock();
+    let addr = if flags.contains(MmapFlags::Fixed) {
+        addr
+    } else {
+        space.find_mmap_addr(len)?
+    };
+
     crate::vfs::mmap(
         file.map(|x| x.file.clone()),
-        &mut proc.address_space.lock(),
+        &mut space,
         addr,
-        NonZeroUsize::new(length).ok_or(Errno::EINVAL)?,
+        len,
         vm_prot,
         flags,
         offset,

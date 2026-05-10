@@ -26,7 +26,7 @@ use crate::{
 };
 use alloc::{
     boxed::Box,
-    collections::{btree_map::BTreeMap, btree_set::BTreeSet},
+    collections::btree_map::BTreeMap,
     string::String,
     sync::{Arc, Weak},
     vec::Vec,
@@ -69,8 +69,6 @@ pub struct Process {
     pub open_files: SpinMutex<FdTable>,
     /// Per-process signal action table.
     pub signal_actions: SpinMutex<SignalState>,
-    /// A pointer to the next free memory region.
-    pub mmap_head: SpinMutex<VirtAddr>,
     /// Process group ID.
     pub pgrp: SpinMutex<uapi::pid_t>,
     /// Session ID.
@@ -144,7 +142,6 @@ impl Process {
             identity: SpinMutex::new(self.identity.lock().clone()),
             open_files: SpinMutex::new(self.open_files.lock().clone()),
             signal_actions: SpinMutex::new(self.signal_actions.lock().clone()),
-            mmap_head: SpinMutex::new(*self.mmap_head.lock()),
             pgrp: SpinMutex::new(*self.pgrp.lock()),
             session: SpinMutex::new(*self.session.lock()),
             controlling_tty: SpinMutex::new(self.controlling_tty.lock().clone()),
@@ -220,8 +217,6 @@ impl Process {
             identity: SpinMutex::new(identity),
             open_files: SpinMutex::new(FdTable::new()),
             signal_actions: SpinMutex::new(SignalState::new()),
-            // TODO: This address should be determined from the highest loaded segment.
-            mmap_head: SpinMutex::new(VirtAddr::new(0x1_0000_0000)),
             pgrp: SpinMutex::new(pgrp),
             session: SpinMutex::new(session),
             controlling_tty: SpinMutex::new(ctty),
@@ -534,10 +529,7 @@ pub fn PROCESS_STAGE() {
             Process::new_with_space(
                 "kernel".into(),
                 None,
-                AddressSpace {
-                    table: super::memory::virt::KERNEL_PAGE_TABLE.get().clone(),
-                    mappings: BTreeSet::new(),
-                },
+                AddressSpace::new_kernel(super::memory::virt::KERNEL_PAGE_TABLE.get().clone()),
             )
             .expect("Unable to create the main kernel process"),
         ))

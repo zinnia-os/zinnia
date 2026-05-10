@@ -1,24 +1,27 @@
+pub mod allocator;
 pub mod fault;
 pub mod mmu;
 
+use self::allocator::VirtualAllocator;
 use super::{VirtAddr, pmm::AllocFlags};
 use crate::{
     arch::{self},
     memory::{cache::MemoryObject, pmm::KernelAlloc, virt::mmu::PageTable},
     posix::errno::{EResult, Errno},
     uapi,
-    util::{divide_up, once::Once},
+    util::{divide_up, mutex::spin::SpinMutex, once::Once},
 };
 use alloc::{collections::btree_set::BTreeSet, sync::Arc, vec::Vec};
 use bitflags::bitflags;
 use core::{
     fmt::Debug,
     num::NonZeroUsize,
-    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 // TODO: Kernel stacks should be mapped, not just on the HHDM. Otherwise we can't check for overflows.
 pub const KERNEL_STACK_SIZE: usize = 0x8000;
+const USER_MMAP_BASE: usize = 0x1_0000_0000;
 
 bitflags! {
     /// PTE protection flags.
@@ -81,12 +84,11 @@ pub enum PageTableError {
 }
 
 pub(crate) static KERNEL_PAGE_TABLE: Once<Arc<PageTable>> = Once::new();
-
-// TODO: Replace with allocator.
-pub static KERNEL_MMAP_BASE_ADDR: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static KERNEL_VIRTUAL_ALLOCATOR: Once<SpinMutex<VirtualAllocator>> = Once::new();
 
 pub struct AddressSpace {
     pub table: Arc<PageTable>,
+    allocator: VirtualAllocator,
     /// A map that translates global page offsets (virt / page_size) to a physical page and the flags of the mapping.
     pub mappings: BTreeSet<MappedObject>,
 }
@@ -155,8 +157,28 @@ impl AddressSpace {
     pub fn new() -> Self {
         Self {
             table: Arc::new(PageTable::new_user::<KernelAlloc>(AllocFlags::empty())),
+            allocator: Self::new_user_allocator(),
             mappings: BTreeSet::new(),
         }
+    }
+
+    pub fn new_kernel(table: Arc<PageTable>) -> Self {
+        Self {
+            table,
+            allocator: Self::new_user_allocator(),
+            mappings: BTreeSet::new(),
+        }
+    }
+
+    fn new_user_allocator() -> VirtualAllocator {
+        let page_size = arch::virt::get_page_size();
+        let user_end = 1usize << (arch::virt::get_highest_bit_shift() - 1);
+
+        VirtualAllocator::new(page_size.into(), user_end.into()).unwrap()
+    }
+
+    pub fn find_mmap_addr(&self, len: NonZeroUsize) -> EResult<VirtAddr> {
+        self.allocator.find_free_from(USER_MMAP_BASE.into(), len)
     }
 
     /// Maps an object into the address space.
@@ -180,6 +202,9 @@ impl AddressSpace {
 
         let start_page = addr.value() / page_size;
         let end_page = start_page + divide_up(len.into(), page_size);
+
+        self.allocator.release(addr, len)?;
+        self.allocator.reserve(addr, len)?;
 
         let overlapping = self
             .mappings
@@ -284,12 +309,15 @@ impl AddressSpace {
             }
             // If new mapping partially shadows the old mapping.
             else {
-                // TODO
                 self.mappings.remove(&mapping);
+
+                let overlap_start = start_page.max(mapping.start_page);
+                let overlap_end = end_page.min(mapping.end_page);
                 self.table
-                    .unmap_range::<KernelAlloc>(
-                        (start_page.max(mapping.start_page) * page_size).into(),
-                        (end_page.min(mapping.end_page) - start_page) * page_size,
+                    .remap_range::<KernelAlloc>(
+                        (overlap_start * page_size).into(),
+                        prot,
+                        (overlap_end - overlap_start) * page_size,
                     )
                     .map_err(|_| Errno::ENOMEM)?;
 
@@ -321,8 +349,11 @@ impl AddressSpace {
 
                 // Insert the new mapping.
                 self.mappings.insert(MappedObject {
+                    start_page: overlap_start,
+                    end_page: overlap_end,
+                    offset_page: mapping.offset_page + (overlap_start - mapping.start_page),
+                    object: mapping.object.clone(),
                     flags: AtomicU8::new(prot.bits()),
-                    ..mapping
                 });
             }
         }
@@ -382,6 +413,8 @@ impl AddressSpace {
             }
         }
 
+        self.allocator.release(addr, len)?;
+
         Ok(())
     }
 
@@ -390,34 +423,40 @@ impl AddressSpace {
         let page_size = arch::virt::get_page_size();
         let num_pages = divide_up(len, page_size);
         let start_page = addr.value() / page_size;
+        let end_page = start_page + num_pages;
 
-        let mut prev = None;
+        let mut covered_until = start_page;
 
-        for mapping in self.mappings.iter().filter(|mapping| {
-            start_page < mapping.end_page && mapping.start_page < start_page + num_pages
-        }) {
-            if let Some(e) = prev
-                && e + 1 != mapping.start_page
-            {
+        for mapping in self
+            .mappings
+            .iter()
+            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
+        {
+            if mapping.start_page > covered_until {
                 return false;
             }
 
-            prev = Some(mapping.end_page);
+            covered_until = covered_until.max(mapping.end_page);
+            if covered_until >= end_page {
+                return true;
+            }
         }
 
-        // If the filter didn't contain any matches, the range is completely outside of any
-        // mapped memory. This would fall through and skip the gap check, so we need to check
-        // if there was at least one iteration.
-        prev.is_some()
+        false
     }
 
     pub fn clear(&mut self) {
         self.mappings.clear();
+        self.allocator.clear();
     }
 
     pub fn fork(&self) -> EResult<Self> {
         let page_size = arch::virt::get_page_size();
-        let mut result = Self::new();
+        let mut result = Self {
+            table: Arc::new(PageTable::new_user::<KernelAlloc>(AllocFlags::empty())),
+            allocator: self.allocator.clone(),
+            mappings: BTreeSet::new(),
+        };
 
         // Copy over existing mappings, but make a copy of private mappings.
         for obj in self.mappings.iter() {

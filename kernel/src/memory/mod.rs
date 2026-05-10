@@ -20,8 +20,8 @@ use super::util::once::Once;
 use crate::{
     arch::{self, virt::get_page_size},
     boot::{BootInfo, PhysMemoryUsage},
-    memory::virt::mmu::PageTable,
-    util::{align_down, align_up},
+    memory::virt::{allocator::VirtualAllocator, mmu::PageTable},
+    util::{align_down, align_up, mutex::spin::SpinMutex},
 };
 use alloc::sync::Arc;
 use bump::BumpAllocator;
@@ -391,7 +391,13 @@ pub fn MEMORY_STAGE() {
     // Save the page table.
     unsafe { virt::KERNEL_PAGE_TABLE.init(Arc::new(table)) };
 
-    // Set the MMAP base to right after the page table. Make sure this lands on a new PTE so we can map regular pages.
-    // TODO: Use a virtual memory allocator instead.
-    virt::KERNEL_MMAP_BASE_ADDR.store(arch::virt::get_map_base().value(), Ordering::Relaxed);
+    unsafe {
+        virt::KERNEL_VIRTUAL_ALLOCATOR.init(SpinMutex::new(
+            VirtualAllocator::new(
+                arch::virt::get_map_base(),
+                virt::allocator::kernel_map_end(),
+            )
+            .unwrap(),
+        ))
+    };
 }

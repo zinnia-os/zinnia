@@ -4,13 +4,15 @@ use crate::{
         memory::{
             PhysAddr, VirtAddr,
             pmm::{AllocFlags, KernelAlloc, PageAllocator},
-            virt::{KERNEL_MMAP_BASE_ADDR, KERNEL_PAGE_TABLE, PageTableError, PteFlags, VmFlags},
+            virt::{
+                KERNEL_PAGE_TABLE, KERNEL_VIRTUAL_ALLOCATOR, PageTableError, PteFlags, VmFlags,
+            },
         },
         util::{align_up, mutex::spin::SpinMutex},
     },
 };
 use alloc::{alloc::AllocError, slice};
-use core::sync::atomic::Ordering;
+use core::num::NonZeroUsize;
 
 /// Represents a virtual address space.
 #[derive(Debug)]
@@ -65,15 +67,36 @@ impl PageTable {
         length: usize,
     ) -> Result<*mut u8, AllocError> {
         let aligned_len = align_up(length, arch::virt::get_page_size());
+        let len = NonZeroUsize::new(aligned_len).ok_or(AllocError)?;
 
-        // Increase mapping base.
-        // TODO: Use actual virtual address allocator.
-        let virt = KERNEL_MMAP_BASE_ADDR.fetch_add(aligned_len, Ordering::SeqCst);
-
-        // Map memory.
-        self.map_range::<P>(VirtAddr(virt), phys, flags, aligned_len)
+        let virt = KERNEL_VIRTUAL_ALLOCATOR
+            .get()
+            .lock()
+            .allocate(len)
             .map_err(|_| AllocError)?;
-        return Ok(virt as *mut u8);
+
+        if self.map_range::<P>(virt, phys, flags, aligned_len).is_err() {
+            _ = KERNEL_VIRTUAL_ALLOCATOR.get().lock().release(virt, len);
+            return Err(AllocError);
+        }
+
+        return Ok(virt.as_ptr());
+    }
+
+    /// Unmaps memory previously mapped by [`Self::map_memory`].
+    pub fn unmap_memory<P: PageAllocator>(
+        &self,
+        virt: VirtAddr,
+        length: usize,
+    ) -> Result<(), PageTableError> {
+        let aligned_len = align_up(length, arch::virt::get_page_size());
+        let Some(len) = NonZeroUsize::new(aligned_len) else {
+            return Ok(());
+        };
+
+        self.unmap_range::<P>(virt, aligned_len)?;
+        _ = KERNEL_VIRTUAL_ALLOCATOR.get().lock().release(virt, len);
+        Ok(())
     }
 }
 

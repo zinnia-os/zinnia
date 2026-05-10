@@ -1,13 +1,13 @@
 use crate::arch;
 use crate::memory::pmm::{AllocFlags, KernelAlloc, PageAllocator};
-use crate::memory::virt::{self, KERNEL_MMAP_BASE_ADDR, VmFlags, mmu::PageTable};
+use crate::memory::virt::{self, KERNEL_VIRTUAL_ALLOCATOR, VmFlags, mmu::PageTable};
 use crate::memory::{PhysAddr, VirtAddr};
 use crate::posix::errno::{EResult, Errno};
 use crate::util::{align_down, align_up, mutex::spin::SpinMutex};
 use crate::vfs::exec::elf::{self, ElfHashTable, ElfHdr, ElfPhdr, ElfRela, ElfSym};
 use alloc::{borrow::ToOwned, collections::btree_map::BTreeMap, string::String, vec::Vec};
 use core::str;
-use core::{ffi::CStr, slice, sync::atomic::Ordering};
+use core::{ffi::CStr, num::NonZeroUsize, slice};
 
 // TODO: This can use RwLocks.
 pub(crate) static SYMBOL_TABLE: SpinMutex<BTreeMap<String, (elf::ElfSym, Option<&ModuleInfo>)>> =
@@ -33,6 +33,55 @@ pub struct ModuleInfo {
     pub author: String,
     pub entry: Option<ModuleEntryFn>,
     pub mappings: Vec<(PhysAddr, VirtAddr, usize, VmFlags)>,
+}
+
+/// Records all mappings made while loading.
+/// If [`Self::disarm()`] is not called, before it is dropped, it reverts all mappings made by the kernel.
+/// This is used to prevent resource leaks after memory is freed.
+struct ModuleLoadGuard {
+    virt: VirtAddr,
+    length: NonZeroUsize,
+    mappings: Vec<(PhysAddr, VirtAddr, usize)>,
+    active: bool,
+}
+
+impl ModuleLoadGuard {
+    fn new(virt: VirtAddr, length: NonZeroUsize) -> Self {
+        Self {
+            virt,
+            length,
+            mappings: Vec::new(),
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ModuleLoadGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        let page_size = arch::virt::get_page_size();
+        let page_table = PageTable::get_kernel();
+        for (phys, virt, length) in &self.mappings {
+            let length = align_up(*length, page_size);
+            for page in (0..length).step_by(page_size) {
+                _ = page_table.unmap_single::<KernelAlloc>(*virt + page);
+            }
+
+            unsafe { KernelAlloc::dealloc_bytes(*phys, length) };
+        }
+
+        _ = KERNEL_VIRTUAL_ALLOCATOR
+            .get()
+            .lock()
+            .release(self.virt, self.length);
+    }
 }
 
 /// Sets up the module system.
@@ -114,7 +163,36 @@ pub fn load(data: &[u8], cmdline: &[u8]) -> EResult<()> {
     )
     .map_err(|_| Errno::ENOEXEC)?;
 
-    let mut load_base = 0;
+    let page_size = arch::virt::get_page_size();
+    let mut load_min = usize::MAX;
+    let mut load_end = 0usize;
+
+    for phdr in phdrs.iter().filter(|phdr| phdr.p_type == elf::PT_LOAD) {
+        let aligned_virt = align_down(phdr.p_vaddr as usize, page_size);
+        let misalign = phdr.p_vaddr as usize - aligned_virt;
+        let memsz = align_up(phdr.p_memsz as usize + misalign, page_size);
+        let end = aligned_virt.checked_add(memsz).ok_or(Errno::ENOMEM)?;
+
+        load_min = load_min.min(aligned_virt);
+        load_end = load_end.max(end);
+    }
+
+    if load_min == usize::MAX || load_end <= load_min {
+        return Err(Errno::EINVAL);
+    }
+
+    let load_size = NonZeroUsize::new(load_end - load_min).ok_or(Errno::EINVAL)?;
+    let load_addr = KERNEL_VIRTUAL_ALLOCATOR
+        .get()
+        .lock()
+        .allocate(load_size)
+        .map_err(|_| Errno::ENOMEM)?;
+    let load_base = load_addr
+        .value()
+        .checked_sub(load_min)
+        .ok_or(Errno::ENOMEM)?;
+    let mut load_guard = ModuleLoadGuard::new(load_addr, load_size);
+
     let mut info = ModuleInfo {
         version: String::new(),
         description: String::new(),
@@ -140,27 +218,20 @@ pub fn load(data: &[u8], cmdline: &[u8]) -> EResult<()> {
         match phdr.p_type {
             // Load the segment into memory.
             elf::PT_LOAD => {
-                // Record where the first PHDR was loaded at.
-                if load_base == 0 {
-                    load_base = KERNEL_MMAP_BASE_ADDR.load(Ordering::Acquire);
-                }
-
-                let mut memsz = phdr.p_memsz as usize;
-
                 // Fix potentially unaligned addresses.
-                let aligned_virt = align_down(phdr.p_vaddr as usize, arch::virt::get_page_size());
-                if aligned_virt < phdr.p_vaddr as usize {
-                    memsz += arch::virt::get_page_size()
-                        - (phdr.p_memsz as usize % arch::virt::get_page_size());
-                }
+                let aligned_virt = align_down(phdr.p_vaddr as usize, page_size);
+                let misalign = phdr.p_vaddr as usize - aligned_virt;
+                let memsz = align_up(phdr.p_memsz as usize + misalign, page_size);
 
                 // Allocate physical memory.
                 let phys = KernelAlloc::alloc_bytes(memsz, AllocFlags::empty())?;
 
                 let page_table = PageTable::get_kernel();
+                let virt = (load_base + aligned_virt).into();
+                load_guard.mappings.push((phys, virt, memsz));
 
                 // Map memory with RW permissions.
-                for page in (0..memsz).step_by(arch::virt::get_page_size()) {
+                for page in (0..memsz).step_by(page_size) {
                     page_table
                         .map_single::<KernelAlloc>(
                             (load_base + aligned_virt + page).into(),
@@ -168,8 +239,6 @@ pub fn load(data: &[u8], cmdline: &[u8]) -> EResult<()> {
                             VmFlags::Read | VmFlags::Write,
                         )
                         .map_err(|_| Errno::ENOMEM)?;
-
-                    KERNEL_MMAP_BASE_ADDR.fetch_add(arch::virt::get_page_size(), Ordering::AcqRel);
                 }
 
                 let virt = load_base + phdr.p_vaddr as usize;
@@ -401,6 +470,7 @@ pub fn load(data: &[u8], cmdline: &[u8]) -> EResult<()> {
         (entry_point)(cmd_str.as_ptr(), cmd_str.len());
     }
 
+    load_guard.disarm();
     MODULE_TABLE.lock().insert(name.to_owned(), info);
 
     return Ok(());

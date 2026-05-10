@@ -300,7 +300,7 @@ impl MmioView {
 impl Drop for MmioView {
     fn drop(&mut self) {
         PageTable::get_kernel()
-            .unmap_range::<KernelAlloc>(VirtAddr(self.base as usize), self.len)
+            .unmap_memory::<KernelAlloc>(VirtAddr(self.base as usize), self.len)
             .unwrap();
     }
 }
