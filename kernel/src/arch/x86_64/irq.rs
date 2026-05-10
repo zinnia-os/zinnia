@@ -272,8 +272,9 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
         consts::IDT_IPI_RESCHED => {
             clock::handle_tick();
             unsafe { crate::arch::sched::preempt_disable() };
-            if unsafe { crate::arch::sched::preempt_enable() } {
-                LAPIC.get().eoi();
+            let should_reschedule = unsafe { crate::arch::sched::preempt_enable() };
+            LAPIC.get().eoi();
+            if should_reschedule {
                 CpuData::get().scheduler.reschedule();
             }
         }
