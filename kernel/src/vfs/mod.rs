@@ -163,10 +163,11 @@ pub fn mmap(
     return Ok(addr);
 }
 
-pub fn pipe() -> EResult<(Arc<File>, Arc<File>)> {
+pub fn pipe(flags: OpenFlags) -> EResult<(Arc<File>, Arc<File>)> {
     let pipe = Arc::try_new(pipe::PipeBuffer::new())?;
-    let endpoint1 = File::open_disconnected(pipe.clone(), OpenFlags::Read)?;
-    let endpoint2 = File::open_disconnected(pipe, OpenFlags::Write)?;
+    let status_flags = flags & OpenFlags::NonBlocking;
+    let endpoint1 = File::open_disconnected(pipe.clone(), OpenFlags::Read | status_flags)?;
+    let endpoint2 = File::open_disconnected(pipe, OpenFlags::Write | status_flags)?;
 
     Ok((endpoint1, endpoint2))
 }

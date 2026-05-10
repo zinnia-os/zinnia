@@ -1,6 +1,7 @@
 use crate::{
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
+    sched::Scheduler,
     uapi,
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
     vfs::{
@@ -85,8 +86,8 @@ impl FileOps for PipeBuffer {
             return Ok(0);
         }
 
-        let read = self.rd_queue.guard();
         loop {
+            let read = self.rd_queue.guard();
             let mut inner = self.inner.lock();
             let mut v = vec![0u8; buf.len()];
             let len = inner.buffer.read(&mut v);
@@ -105,9 +106,12 @@ impl FileOps for PipeBuffer {
             if file.flags.lock().contains(OpenFlags::NonBlocking) {
                 return Err(Errno::EAGAIN);
             } else {
+                if Scheduler::get_current().has_pending_signals() {
+                    return Err(Errno::EINTR);
+                }
                 drop(inner);
                 read.wait();
-                if crate::sched::Scheduler::get_current().has_pending_signals() {
+                if Scheduler::get_current().has_pending_signals() {
                     return Err(Errno::EINTR);
                 }
             }
@@ -119,8 +123,8 @@ impl FileOps for PipeBuffer {
             return Ok(0);
         }
 
-        let write = self.wr_queue.guard();
         loop {
+            let write = self.wr_queue.guard();
             let len = {
                 let mut inner = self.inner.lock();
 
@@ -142,8 +146,11 @@ impl FileOps for PipeBuffer {
             if file.flags.lock().contains(OpenFlags::NonBlocking) {
                 return Err(Errno::EAGAIN);
             } else {
+                if Scheduler::get_current().has_pending_signals() {
+                    return Err(Errno::EINTR);
+                }
                 write.wait();
-                if crate::sched::Scheduler::get_current().has_pending_signals() {
+                if Scheduler::get_current().has_pending_signals() {
                     return Err(Errno::EINTR);
                 }
             }

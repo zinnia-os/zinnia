@@ -760,18 +760,24 @@ pub fn ppoll(
 }
 
 #[wrap_syscall]
-pub fn pipe(filedes: VirtAddr) -> EResult<()> {
+pub fn pipe(filedes: VirtAddr, flags: usize) -> EResult<()> {
+    if flags & !((O_CLOEXEC | O_NONBLOCK) as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let flags = OpenFlags::from_bits_truncate(flags as _);
+
     let mut filedes = UserPtr::<[i32; 2]>::new(filedes);
     let fds = {
         let proc = Scheduler::get_current().get_process();
         let mut files = proc.open_files.lock();
-        let (pipe1, pipe2) = vfs::pipe()?;
+        let (pipe1, pipe2) = vfs::pipe(flags)?;
+        let close_on_exec = flags.contains(OpenFlags::CloseOnExec);
         [
             files
                 .open_file(
                     FileDescription {
                         file: pipe1,
-                        close_on_exec: AtomicBool::new(false),
+                        close_on_exec: AtomicBool::new(close_on_exec),
                     },
                     0,
                 )
@@ -780,7 +786,7 @@ pub fn pipe(filedes: VirtAddr) -> EResult<()> {
                 .open_file(
                     FileDescription {
                         file: pipe2,
-                        close_on_exec: AtomicBool::new(false),
+                        close_on_exec: AtomicBool::new(close_on_exec),
                     },
                     0,
                 )
