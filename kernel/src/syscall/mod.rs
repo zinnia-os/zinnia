@@ -143,6 +143,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::SETUNAME => system::setuname,
         numbers::ARCHCTL => system::archctl,
         numbers::REBOOT => system::reboot,
+        numbers::SYSCONF => system::sysconf,
 
         // Mapped memory
         numbers::MMAP => memory::mmap,

@@ -1,6 +1,7 @@
 use crate::{
     clock,
     memory::{VirtAddr, user::UserPtr},
+    percpu::CpuData,
     posix::{
         errno::{EResult, Errno},
         utsname::UTSNAME,
@@ -389,6 +390,17 @@ fn timespec_to_ns(value: timespec) -> EResult<usize> {
     seconds
         .checked_add(value.tv_nsec as usize)
         .ok_or(Errno::EINVAL)
+}
+
+#[wrap_syscall]
+pub fn sysconf(value: i32) -> EResult<usize> {
+    let ret = match value {
+        uapi::sysconf::NPROCESSORS_ONLN => CpuData::num_online(),
+        uapi::sysconf::NPROCESSORS_CONF => CpuData::num_present(),
+        _ => return Err(Errno::EINVAL),
+    };
+
+    Ok(ret)
 }
 
 static FUTEXES: SpinMutex<Vec<Weak<FutexQueue>>> = SpinMutex::new(Vec::new());

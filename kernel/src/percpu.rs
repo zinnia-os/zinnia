@@ -56,6 +56,20 @@ impl CpuData {
     pub fn iter() -> CpuDataIter {
         CpuDataIter { id: 0 }
     }
+
+    /// Amount of present and online CPUs.
+    pub fn num_online() -> usize {
+        CpuData::iter()
+            .filter(|x| x.online.load(Ordering::Relaxed))
+            .count()
+    }
+
+    /// Amount of present CPUs.
+    pub fn num_present() -> usize {
+        CpuData::iter()
+            .filter(|x| x.present.load(Ordering::Relaxed))
+            .count()
+    }
 }
 
 pub struct CpuDataIter {

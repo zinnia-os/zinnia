@@ -135,3 +135,4 @@ pub const TIMERFD_SETTIME: usize = 133;
 pub const SIGNALFD_CREATE: usize = 134;
 pub const EVENTFD_CREATE: usize = 135;
 pub const MSYNC: usize = 136;
+pub const SYSCONF: usize = 137;

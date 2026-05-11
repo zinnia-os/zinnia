@@ -19,6 +19,7 @@ pub mod signal;
 pub mod socket;
 pub mod stat;
 pub mod statvfs;
+pub mod sysconf;
 pub mod termios;
 pub mod time;
 pub mod uio;
