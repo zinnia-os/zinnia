@@ -96,12 +96,30 @@ impl<T: ?Sized> Mutex<T> {
                 task: Scheduler::get_current(),
             };
 
-            self.inner
-                .lock()
-                .waiters
-                .push_back(unsafe { UnsafeRef::from_raw(&waiter) });
+            {
+                let mut inner = self.inner.lock();
+                inner
+                    .waiters
+                    .push_back(unsafe { UnsafeRef::from_raw(&waiter) });
+            }
 
-            CpuData::get().scheduler.do_yield();
+            while waiter.waiters_link.is_linked() {
+                if self
+                    .flag
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    let mut inner = self.inner.lock();
+                    if waiter.waiters_link.is_linked() {
+                        let mut cursor =
+                            unsafe { inner.waiters.cursor_mut_from_ptr(&waiter as *const Waiter) };
+                        cursor.remove();
+                    }
+                    break;
+                }
+
+                CpuData::get().scheduler.do_yield();
+            }
         }
 
         let mut inner = self.inner.lock();

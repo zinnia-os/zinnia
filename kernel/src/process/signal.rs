@@ -7,7 +7,7 @@ use crate::{
         signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
     },
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::{ops, sync::atomic::Ordering};
 use num_enum::TryFromPrimitive;
 

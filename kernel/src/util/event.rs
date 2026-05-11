@@ -1,12 +1,16 @@
 use crate::{percpu::CpuData, process::task::Task, sched::Scheduler, util::mutex::spin::SpinMutex};
 use alloc::{boxed::Box, sync::Arc};
-use core::pin::Pin;
+use core::{
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 
 #[derive(Debug)]
 pub struct Waiter {
     waiters_link: LinkedListAtomicLink,
     task: Arc<Task>,
+    woken: AtomicBool,
 }
 
 intrusive_adapter!(WaitersLinkAdapter = UnsafeRef<Waiter>: Waiter { waiters_link => LinkedListAtomicLink });
@@ -27,6 +31,7 @@ impl Event {
         let waiter = Box::pin(Waiter {
             waiters_link: LinkedListAtomicLink::new(),
             task: Scheduler::get_current(),
+            woken: AtomicBool::new(false),
         });
 
         let mut waiters = self.waiters.lock();
@@ -44,6 +49,7 @@ impl Event {
     pub fn wake_one(&self) -> usize {
         let mut waiters = self.waiters.lock();
         if let Some(waiter) = waiters.pop_front() {
+            waiter.woken.store(true, Ordering::Release);
             Scheduler::wake_task(waiter.task.clone());
             1
         } else {
@@ -55,6 +61,7 @@ impl Event {
         let mut waiters = self.waiters.lock();
         let mut woke = 0;
         for waiter in waiters.iter() {
+            waiter.woken.store(true, Ordering::Release);
             Scheduler::wake_task(waiter.task.clone());
             woke += 1;
         }
@@ -78,6 +85,9 @@ unsafe impl Sync for EventGuard<'_> {}
 
 impl<'n> EventGuard<'n> {
     pub fn wait(&self) {
+        if self.waiter.woken.load(Ordering::Acquire) {
+            return;
+        }
         CpuData::get().scheduler.do_yield();
     }
 }
