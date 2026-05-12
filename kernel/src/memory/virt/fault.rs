@@ -27,8 +27,7 @@ pub struct PageFaultInfo {
 /// Generic page fault handler for MMU-generated faults.
 pub fn handler(info: &PageFaultInfo) -> bool {
     let task = Scheduler::get_current();
-    let proc = task.get_process();
-    let mut space = proc.address_space.lock();
+    let mut space = task.address_space.lock();
 
     // Check if the current address space has a theoretical mapping at the faulting address.
     let page_size = arch::virt::get_page_size();

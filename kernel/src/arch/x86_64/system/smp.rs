@@ -215,10 +215,7 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
 
     // Create a dummy task to drop right after the first reschedule.
     let dummy = Arc::new(Task::new(sched::dummy_fn, 0, 0, Process::get_kernel(), false).unwrap());
-    cpu_ctx
-        .scheduler
-        .current
-        .store(Arc::into_raw(dummy) as *mut _, Ordering::Release);
+    cpu_ctx.scheduler.set_task(dummy);
 
     assert!(
         cpu_ctx.present.load(Ordering::Acquire),
@@ -322,7 +319,11 @@ fn start_ap(temp_cr3: u32, id: u32) {
     while unsafe { booted.read_volatile() } == 0 {
         clock::block_ns(1_000_000).unwrap();
     }
-    unsafe { KernelAlloc::dealloc(mem, 1) };
+
+    unsafe {
+        KernelAlloc::dealloc(mem, 1);
+        KernelAlloc::dealloc_bytes(stack_mem, KERNEL_STACK_SIZE);
+    }
 }
 
 static FOUND_APS: SpinMutex<Vec<u32>> = SpinMutex::new(Vec::new());

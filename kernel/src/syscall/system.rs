@@ -312,9 +312,10 @@ pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
 }
 
 fn get_futex_queue(pointer: VirtAddr) -> Arc<FutexQueue> {
-    let proc = Scheduler::get_current().get_process();
+    let task = Scheduler::get_current();
+    let address_space = task.address_space.clone();
     let key = FutexKey {
-        address_space: Arc::as_ptr(&proc.address_space) as usize,
+        address_space: Arc::as_ptr(&address_space) as usize,
         addr: pointer,
     };
 
@@ -342,9 +343,10 @@ fn get_futex_queue(pointer: VirtAddr) -> Arc<FutexQueue> {
 }
 
 fn find_futex_queue(pointer: VirtAddr) -> Option<Arc<FutexQueue>> {
-    let proc = Scheduler::get_current().get_process();
+    let task = Scheduler::get_current();
+    let address_space = task.address_space.clone();
     let key = FutexKey {
-        address_space: Arc::as_ptr(&proc.address_space) as usize,
+        address_space: Arc::as_ptr(&address_space) as usize,
         addr: pointer,
     };
 

@@ -6,7 +6,6 @@ use core::{
 };
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 
-#[derive(Debug)]
 pub struct Waiter {
     waiters_link: LinkedListAtomicLink,
     task: Arc<Task>,

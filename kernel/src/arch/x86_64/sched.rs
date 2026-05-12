@@ -7,12 +7,12 @@ use super::{
     system::{apic::LAPIC, gdt::TSS},
 };
 use crate::{
-    irq::lock::{IrqGuard, IrqLock},
+    irq::lock::IrqLock,
     memory::{UserPtr, VirtAddr, virt::KERNEL_STACK_SIZE},
     percpu::CpuData,
     posix::errno::EResult,
     process::{
-        Process,
+        Process, State,
         signal::{Signal, SignalSet},
         task::Task,
     },
@@ -147,8 +147,9 @@ struct TaskFrame {
     rip: u64,
 }
 
-pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task, irq_guard: IrqGuard) {
+pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task) -> *mut Task {
     unsafe {
+        let previous = from as *mut Task;
         let from = from.as_ref().unwrap();
         let to = to.as_ref().unwrap();
 
@@ -156,7 +157,7 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task, irq_gua
         let to_context = to.task_context.lock();
 
         let cpu = ARCH_DATA.get();
-        TSS.get().lock().rsp0 = (to.kernel_stack.load(Ordering::Relaxed) + KERNEL_STACK_SIZE) as _;
+        TSS.get().lock().rsp0 = to.kernel_entry_stack.load(Ordering::Relaxed) as _;
 
         if from.is_user() {
             cpu.fpu_save.get()(from_context.fpu_region.as_mut_ptr());
@@ -190,13 +191,16 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task, irq_gua
 
         drop(from_context);
         drop(to_context);
-        core::mem::forget(irq_guard);
-        perform_switch(old_rsp, new_rsp);
+        perform_switch(old_rsp, new_rsp, previous)
     }
 }
 
 #[unsafe(naked)]
-unsafe extern "C" fn perform_switch(old_rsp: *mut u64, new_rsp: u64) {
+unsafe extern "C" fn perform_switch(
+    old_rsp: *mut u64,
+    new_rsp: u64,
+    previous: *mut Task,
+) -> *mut Task {
     naked_asm!(
         "sub rsp, 0x30", // Make room for all regs (except RIP).
         "mov [rsp + {rbx}], rbx",
@@ -214,7 +218,7 @@ unsafe extern "C" fn perform_switch(old_rsp: *mut u64, new_rsp: u64) {
         "mov r14, [rsp + {r14}]",
         "mov r15, [rsp + {r15}]",
         "add rsp, 0x30",
-        "call {finish}",
+        "mov rax, rdx",
         "ret", // This will conveniently move us to the RIP we put at this stack entry.
         rbx = const offset_of!(TaskFrame, rbx),
         rbp = const offset_of!(TaskFrame, rbp),
@@ -222,12 +226,7 @@ unsafe extern "C" fn perform_switch(old_rsp: *mut u64, new_rsp: u64) {
         r13 = const offset_of!(TaskFrame, r13),
         r14 = const offset_of!(TaskFrame, r14),
         r15 = const offset_of!(TaskFrame, r15),
-        finish = sym finish_switch,
     );
-}
-
-extern "C" fn finish_switch() {
-    let _ = unsafe { IrqGuard::new_fake() };
 }
 
 pub(in crate::arch) fn init_task(
@@ -268,12 +267,13 @@ pub(in crate::arch) fn init_task(
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_thunk() -> ! {
     naked_asm!(
-        "mov rdi, rbx",
-        "mov rsi, r12",
-        "mov rdx, r13",
+        "mov rdi, rax",
+        "mov rsi, rbx",
+        "mov rdx, r12",
+        "mov rcx, r13",
         "push 0", // Make sure to zero this so stack tracing stops here.
         "jmp {task_thunk}",
-        task_thunk = sym crate::sched::task_entry,
+        task_thunk = sym crate::sched::task_entry_after_switch,
     );
 }
 
@@ -395,7 +395,7 @@ pub(in crate::arch) fn setup_signal_frame(
 
     let mut ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_sp));
     if ptr.write(frame).is_none() {
-        Process::exit_signal(Signal::SigSegv);
+        Process::exit(State::Signaled(Signal::SigSegv));
     }
 
     // Place the restorer return address BELOW the signal frame so the
@@ -404,7 +404,7 @@ pub(in crate::arch) fn setup_signal_frame(
     let ret_sp = frame_sp - 8;
     let mut ret_ptr = UserPtr::<u64>::new(VirtAddr::new(ret_sp));
     if ret_ptr.write(restorer as u64).is_none() {
-        Process::exit_signal(Signal::SigSegv);
+        Process::exit(State::Signaled(Signal::SigSegv));
     }
 
     // Modify context to jump to the handler.
@@ -417,7 +417,7 @@ pub(in crate::arch) fn setup_signal_frame(
 pub(in crate::arch) fn restore_signal_frame(context: &mut Context) {
     let ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(context.rsp as usize));
     let Some(frame) = ptr.read() else {
-        Process::exit_signal(Signal::SigSegv);
+        Process::exit(State::Signaled(Signal::SigSegv));
     };
 
     // Restore the saved context.

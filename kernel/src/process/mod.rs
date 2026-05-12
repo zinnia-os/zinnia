@@ -37,7 +37,7 @@ use core::{
 };
 
 #[derive(Debug)]
-pub enum ProcessState {
+pub enum State {
     Running,
     Stopped(Signal),
     Exited(u8),
@@ -54,13 +54,13 @@ pub struct Process {
     /// A list of [`Task`]s associated with this process.
     pub threads: SpinMutex<Vec<Arc<Task>>>,
     /// The address space for this process.
-    pub address_space: Arc<SpinMutex<AddressSpace>>,
+    pub address_space: SpinMutex<Arc<SpinMutex<AddressSpace>>>,
     /// The root directory for this process.
     pub root_dir: SpinMutex<PathNode>,
     /// Current working directory.
     pub working_dir: SpinMutex<PathNode>,
     /// The status of this process.
-    pub status: SpinMutex<ProcessState>,
+    pub status: SpinMutex<State>,
     /// Child processes owned by this process.
     pub children: SpinMutex<Vec<Arc<Process>>>,
     /// The user identity of this process.
@@ -128,16 +128,25 @@ impl Process {
         Self::new_with_space(name, parent, AddressSpace::new())
     }
 
+    fn replace_address_space(
+        &self,
+        address_space: Arc<SpinMutex<AddressSpace>>,
+    ) -> Arc<SpinMutex<AddressSpace>> {
+        mem::replace(&mut *self.address_space.lock(), address_space)
+    }
+
     pub fn fork(self: Arc<Self>, context: &Context) -> EResult<(Arc<Self>, Arc<Task>)> {
         let forked = Arc::new(Self {
             id: PID_COUNTER.fetch_add(1, Ordering::Acquire) as _,
             name: self.name.clone(),
             parent: SpinMutex::new(Some(Arc::downgrade(&self))),
             threads: SpinMutex::new(Vec::new()),
-            address_space: Arc::new(SpinMutex::new(self.address_space.lock().fork()?)),
+            address_space: SpinMutex::new(Arc::new(SpinMutex::new(
+                self.address_space.lock().lock().fork()?,
+            ))),
             root_dir: SpinMutex::new(self.root_dir.lock().clone()),
             working_dir: SpinMutex::new(self.working_dir.lock().clone()),
-            status: SpinMutex::new(ProcessState::Running),
+            status: SpinMutex::new(State::Running),
             children: SpinMutex::new(Vec::new()),
             identity: SpinMutex::new(self.identity.lock().clone()),
             open_files: SpinMutex::new(self.open_files.lock().clone()),
@@ -209,8 +218,8 @@ impl Process {
             name,
             parent: SpinMutex::new(parent.map(|x| Arc::downgrade(&x))),
             threads: SpinMutex::new(Vec::new()),
-            address_space: Arc::new(SpinMutex::new(space)),
-            status: SpinMutex::new(ProcessState::Running),
+            address_space: SpinMutex::new(Arc::new(SpinMutex::new(space))),
+            status: SpinMutex::new(State::Running),
             children: SpinMutex::new(Vec::new()),
             root_dir: SpinMutex::new(root),
             working_dir: SpinMutex::new(cwd),
@@ -257,21 +266,22 @@ impl Process {
             };
 
             let format = vfs::exec::identify(&file).ok_or(Errno::ENOEXEC)?;
-            let init = Arc::try_new(format.load(&self, &mut info)?)?;
+            let mut init_task = format.load(&self, &mut info)?;
+            let new_address_space = Arc::new(SpinMutex::new(info.space));
+            init_task.address_space = new_address_space.clone();
+            let init = Arc::try_new(init_task)?;
 
             // If we get here, then the loading of the executable was successful.
             let mut threads = self.threads.lock();
             threads.clear();
             threads.push(init.clone());
 
-            let mut space = self.address_space.lock();
-            let old_space = mem::replace(&mut *space, info.space);
-            let new_table = space.table.clone();
+            let old_space = self.replace_address_space(new_address_space.clone());
+            let new_table = new_address_space.lock().table.clone();
 
             self.open_files.lock().close_exec();
             self.signal_actions.lock().reset_on_exec();
 
-            drop(space);
             unsafe { new_table.set_active() };
             drop(old_space);
             CpuData::get().scheduler.add_task(init);
@@ -284,17 +294,8 @@ impl Process {
         Scheduler::kill_current();
     }
 
-    /// Exits the current process normally with the given exit code.
-    pub fn exit(code: u8) -> ! {
-        Self::exit_with_state(ProcessState::Exited(code));
-    }
-
-    /// Exits the current process because of an unhandled terminating signal.
-    pub fn exit_signal(sig: Signal) -> ! {
-        Self::exit_with_state(ProcessState::Signaled(sig));
-    }
-
-    fn exit_with_state(new_state: ProcessState) -> ! {
+    /// Exits the current process.
+    pub fn exit(new_state: State) -> ! {
         let task = Scheduler::get_current();
         let proc = task.get_process();
         let pid = proc.get_pid();
@@ -304,34 +305,33 @@ impl Process {
         }
 
         PROCESS_TABLE.lock().remove(&proc.get_pid());
-        let zombie_space = AddressSpace::new();
+
+        let old_space = proc.replace_address_space(Arc::new(SpinMutex::new(
+            AddressSpace::new_kernel(crate::memory::virt::KERNEL_PAGE_TABLE.get().clone()),
+        )));
+
         {
             let mut open_files = proc.open_files.lock();
             let mut threads = proc.threads.lock();
             let mut status = proc.status.lock();
-            let mut space = proc.address_space.lock();
 
             // Kill all threads.
             for thread in threads.iter() {
-                *thread.state.lock() = task::TaskState::Dead;
+                *thread.state.lock() = task::State::Dead;
             }
             threads.clear();
 
             // Close all files.
             open_files.close_all();
 
-            let old_space = mem::replace(&mut *space, zombie_space);
-            let new_table = space.table.clone();
             *status = new_state;
 
-            drop(space);
             drop(status);
             drop(threads);
             drop(open_files);
-
-            unsafe { new_table.set_active() };
-            drop(old_space);
         }
+
+        drop(old_space);
 
         // Reparent orphaned children to the init process.
         {

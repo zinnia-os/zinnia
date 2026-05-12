@@ -5,7 +5,7 @@ use crate::{
     memory::{UserCStr, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::{
-        PROCESS_TABLE, Process, ProcessState,
+        PROCESS_TABLE, Process, State,
         signal::{self, Signal},
         to_user,
     },
@@ -324,7 +324,7 @@ pub fn setsid() -> EResult<pid_t> {
 }
 
 pub fn exit(error: usize) -> ! {
-    Process::exit(error as _);
+    Process::exit(State::Exited(error as _));
 }
 
 pub fn fork(ctx: &Context) -> EResult<pid_t> {
@@ -439,15 +439,15 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
 
             let state = child.status.lock();
             match *state {
-                ProcessState::Exited(code) => {
+                State::Exited(code) => {
                     reap = Some((idx, child.get_pid(), encode_exit(code)));
                     break;
                 }
-                ProcessState::Signaled(sig) => {
+                State::Signaled(sig) => {
                     reap = Some((idx, child.get_pid(), encode_signaled(sig as u32)));
                     break;
                 }
-                ProcessState::Stopped(sig)
+                State::Stopped(sig)
                     if (options & uapi::wait::WUNTRACED) != 0
                         && child.stop_unwaited.swap(false, Ordering::AcqRel) =>
                 {
@@ -500,8 +500,8 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
                     return false;
                 }
                 let state = child.status.lock();
-                matches!(*state, ProcessState::Exited(_))
-                    || matches!(*state, ProcessState::Signaled(_))
+                matches!(*state, State::Exited(_))
+                    || matches!(*state, State::Signaled(_))
                     || ((options & uapi::wait::WUNTRACED) != 0
                         && child.stop_unwaited.load(Ordering::Acquire))
                     || ((options & uapi::wait::WCONTINUED) != 0
@@ -545,7 +545,7 @@ pub fn thread_exit() -> ! {
     if last_thread {
         drop(proc);
         drop(task);
-        Process::exit(0);
+        Process::exit(State::Exited(0));
     }
 
     drop(proc);

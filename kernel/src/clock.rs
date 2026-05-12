@@ -77,7 +77,6 @@ pub fn has_clock() -> bool {
     return CLOCK.lock().current.is_some();
 }
 
-#[derive(Debug)]
 struct TimeoutWaiter {
     task: Arc<Task>,
     deadline: usize,

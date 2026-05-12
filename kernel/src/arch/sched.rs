@@ -1,9 +1,9 @@
 use super::internal;
-use crate::irq::lock::IrqGuard;
-use crate::memory::VirtAddr;
-use crate::posix::errno::EResult;
-use crate::process::signal::SignalSet;
-use crate::process::task::Task;
+use crate::{
+    memory::VirtAddr,
+    posix::errno::EResult,
+    process::{signal::SignalSet, task::Task},
+};
 use core::fmt::Debug;
 
 pub use internal::sched::Context;
@@ -37,8 +37,8 @@ pub unsafe fn preempt_enable() -> bool {
 /// # Safety
 /// The caller must ensure that `from` and `to` are both valid tasks and
 /// that both arguments do not point to the same task.
-pub unsafe fn switch(from: *const Task, to: *const Task, irq_guard: IrqGuard) {
-    unsafe { internal::sched::switch(from, to, irq_guard) }
+pub unsafe fn switch(from: *const Task, to: *const Task) -> *mut Task {
+    unsafe { internal::sched::switch(from, to) }
 }
 
 /// Performs a reschedule on a given CPU.

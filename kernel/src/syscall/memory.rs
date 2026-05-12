@@ -35,7 +35,8 @@ pub fn mmap(
     vm_prot.set(VmFlags::Exec, prot & PROT_EXEC != 0);
     vm_prot.set(VmFlags::Shared, flags.contains(MmapFlags::Shared));
 
-    let proc = Scheduler::get_current().get_process();
+    let task = Scheduler::get_current();
+    let proc = task.get_process();
     let file = match flags.contains(MmapFlags::Anonymous) {
         true => None,
         false => {
@@ -44,7 +45,8 @@ pub fn mmap(
         }
     };
     let len = NonZeroUsize::new(length).ok_or(Errno::EINVAL)?;
-    let mut space = proc.address_space.lock();
+
+    let mut space = task.address_space.lock();
     let addr = if flags.contains(MmapFlags::Fixed) {
         addr
     } else {
@@ -70,8 +72,8 @@ pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
     vm_prot.set(VmFlags::Write, prot & PROT_WRITE != 0);
     vm_prot.set(VmFlags::Exec, prot & PROT_EXEC != 0);
 
-    let proc = Scheduler::get_current().get_process();
-    proc.address_space.lock().protect(
+    let task = Scheduler::get_current();
+    task.address_space.lock().protect(
         addr,
         NonZeroUsize::new(size).ok_or(Errno::EINVAL)?,
         vm_prot,
@@ -82,8 +84,8 @@ pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn munmap(addr: VirtAddr, size: usize) -> EResult<usize> {
-    let proc = Scheduler::get_current().get_process();
-    let mut space = proc.address_space.lock();
+    let task = Scheduler::get_current();
+    let mut space = task.address_space.lock();
     space
         .unmap(addr, NonZeroUsize::new(size).ok_or(Errno::EINVAL)?)
         .map(|_| 0)

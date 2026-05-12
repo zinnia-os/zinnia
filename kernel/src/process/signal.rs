@@ -1,6 +1,6 @@
 use crate::{
     arch::sched::Context,
-    process::{Process, ProcessState, task::Task},
+    process::{Process, State, task::Task},
     sched::Scheduler,
     uapi::{
         pid_t,
@@ -310,8 +310,8 @@ pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
     if sig == Signal::SigCont || sig == Signal::SigKill {
         let was_stopped = {
             let mut state = proc.status.lock();
-            if matches!(*state, ProcessState::Stopped(_)) {
-                *state = ProcessState::Running;
+            if matches!(*state, State::Stopped(_)) {
+                *state = State::Running;
                 proc.continue_unwaited.store(true, Ordering::Release);
                 true
             } else {
@@ -425,7 +425,7 @@ pub fn deliver_pending_signals(context: &mut Context) {
             match sig.default_action() {
                 DefaultAction::Ignore | DefaultAction::Continue => continue,
                 DefaultAction::Terminate | DefaultAction::CoreDump => {
-                    Process::exit_signal(sig);
+                    Process::exit(State::Signaled(Signal::SigSegv));
                 }
                 DefaultAction::Stop => {
                     enter_stopped_state(&proc, sig);
@@ -466,14 +466,14 @@ pub fn deliver_pending_signals(context: &mut Context) {
 /// Transition the process into the Stopped state and block until SIGCONT.
 /// Called from  [`deliver_pending_signals`] when a stop signal's default action fires.
 fn enter_stopped_state(proc: &Arc<Process>, sig: Signal) {
-    *proc.status.lock() = ProcessState::Stopped(sig);
+    *proc.status.lock() = State::Stopped(sig);
     proc.stop_unwaited.store(true, Ordering::Release);
     notify_parent_of_child_state_change(proc, true);
 
     // Park on cont_event until SIGCONT (or SIGKILL) flips us back to Running.
     loop {
         let guard = proc.cont_event.guard();
-        if !matches!(*proc.status.lock(), ProcessState::Stopped(_)) {
+        if !matches!(*proc.status.lock(), State::Stopped(_)) {
             break;
         }
         guard.wait();

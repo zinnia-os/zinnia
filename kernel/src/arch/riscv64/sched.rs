@@ -1,5 +1,4 @@
 use crate::{
-    irq::lock::IrqGuard,
     memory::{VirtAddr, virt::KERNEL_STACK_SIZE},
     posix::errno::{EResult, Errno},
     process::{signal::SignalSet, task::Task},
@@ -111,8 +110,9 @@ pub unsafe fn preempt_enable() -> bool {
     true
 }
 
-pub unsafe fn switch(from: *const Task, to: *const Task, irq_guard: IrqGuard) {
+pub unsafe fn switch(from: *const Task, to: *const Task) -> *mut Task {
     unsafe {
+        let previous = from as *mut Task;
         let from = from.as_ref().unwrap();
         let to = to.as_ref().unwrap();
 
@@ -122,13 +122,18 @@ pub unsafe fn switch(from: *const Task, to: *const Task, irq_guard: IrqGuard) {
         let old_sp = &raw mut from_context.sp;
         let new_sp = to_context.sp;
 
-        drop(irq_guard);
-        perform_switch(old_sp, new_sp);
+        drop(from_context);
+        drop(to_context);
+        perform_switch(old_sp, new_sp, previous)
     }
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn perform_switch(old_sp: *mut u64, new_sp: u64) {
+pub unsafe extern "C" fn perform_switch(
+    old_sp: *mut u64,
+    new_sp: u64,
+    previous: *mut Task,
+) -> *mut Task {
     naked_asm!(
         "addi sp, sp, -{size}", // Make room for all regs.
         "sd ra, {ra}(sp)",
@@ -162,6 +167,7 @@ pub unsafe extern "C" fn perform_switch(old_sp: *mut u64, new_sp: u64) {
         "ld s10, {s10}(sp)",
         "ld s11, {s11}(sp)",
         "addi sp, sp, {size}",
+        "mv a0, a2",
         "ret",
         size = const size_of::<TaskFrame>(),
         ra = const offset_of!(TaskFrame, ra),
@@ -177,7 +183,7 @@ pub unsafe extern "C" fn perform_switch(old_sp: *mut u64, new_sp: u64) {
         s8 = const offset_of!(TaskFrame, s8),
         s9 = const offset_of!(TaskFrame, s9),
         s10 = const offset_of!(TaskFrame, s10),
-        s11 = const offset_of!(TaskFrame, s11)
+        s11 = const offset_of!(TaskFrame, s11),
     );
 }
 
@@ -212,13 +218,13 @@ pub fn init_task(
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_thunk() -> ! {
     naked_asm!(
-        "mv a0, s0",
-        "mv a1, s1",
-        "mv a2, s2",
+        "mv a1, s0",
+        "mv a2, s1",
+        "mv a3, s2",
         "mv ra, zero",
         "la t0, {task_thunk}",
         "jr t0",
-        task_thunk = sym crate::sched::task_entry,
+        task_thunk = sym crate::sched::task_entry_after_switch,
     );
 }
 

@@ -142,7 +142,7 @@ pub static CPU_DATA: PerCpuData<CpuData> = PerCpuData::new(CpuData {
     user_stack: AtomicUsize::new(0),
     online: AtomicBool::new(false),
     present: AtomicBool::new(false),
-    scheduler: Scheduler::new(),
+    scheduler: Scheduler::new_for_cpu(0),
 });
 
 /// Counts how many CPUs have been allocated. ID 0 is always used for the BSP.
@@ -176,7 +176,7 @@ pub(crate) fn allocate_cpu() -> EResult<&'static CpuData> {
             user_stack: AtomicUsize::new(0),
             online: AtomicBool::new(false),
             present: AtomicBool::new(false),
-            scheduler: Scheduler::new(),
+            scheduler: Scheduler::new_for_cpu(id),
         });
         let new_context = this_ptr.as_ref().unwrap();
 
