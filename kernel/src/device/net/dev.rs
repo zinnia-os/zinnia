@@ -1,6 +1,9 @@
 use crate::{
     boot::BootInfo,
-    device::net::{interface::ManagedInterface, l3::ipv4::Ipv4Addr, nic::NicDevice},
+    device::{
+        self,
+        net::{interface::ManagedInterface, l3::ipv4::Ipv4Addr, nic::NicDevice},
+    },
     memory::IovecIter,
     posix::errno::EResult,
     process::Identity,
@@ -8,16 +11,16 @@ use crate::{
         self, File,
         file::FileOps,
         fs::devtmpfs,
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::{format, sync::Arc};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const MAX_FRAME_LEN: usize = 1518;
 const DEFAULT_NETMASK: Ipv4Addr = Ipv4Addr::new([255, 255, 255, 0]);
 
-static ETH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static ETH_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct NicFile {
     nic: Arc<dyn NicDevice>,
@@ -78,7 +81,11 @@ pub fn register_nic(nic: Arc<dyn NicDevice>) -> EResult<()> {
         root,
         name.as_bytes(),
         Mode::from_bits_truncate(0o660),
-        Some(Device::CharacterDevice(Arc::new(NicFile { nic }))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(NicFile { nic }),
+            0,
+            idx,
+        ))),
         &Identity::get_kernel(),
     )
 }

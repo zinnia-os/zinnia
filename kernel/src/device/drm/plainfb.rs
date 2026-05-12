@@ -355,5 +355,5 @@ fn PLAINFB_STAGE() {
     device.state.planes.lock().push(plane.clone());
     device.state.planes.lock().push(cursor_plane);
 
-    super::register(DrmFile::new(device)).expect("Unable to create plainfb DRM card");
+    super::register(device).expect("Unable to create plainfb DRM card");
 }

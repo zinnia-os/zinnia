@@ -1,6 +1,7 @@
 pub mod gpt;
 pub mod partition;
 
+use crate::device::Device;
 use crate::{
     memory::{AllocFlags, IovecIter, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
@@ -9,13 +10,13 @@ use crate::{
         self, File,
         file::{FileOps, PollFlags},
         fs::devtmpfs,
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::{format, sync::Arc};
 use core::slice;
 
-pub trait BlockDevice: FileOps {
+pub trait BlockDevice: FileOps + Device {
     /// Gets the size of a sector in bytes.
     fn get_lba_size(&self) -> usize;
 
@@ -60,7 +61,7 @@ pub fn register_block_device(name: &str, device: Arc<dyn BlockDevice>) -> EResul
         root,
         format!("block/{}", name).as_bytes(),
         Mode::from_bits_truncate(0o660),
-        Some(Device::BlockDevice(device.clone())),
+        Some(MknodTarget::BlockDevice(device.clone())),
         &Identity::get_kernel(),
     )?;
 
@@ -94,7 +95,7 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             root.clone(),
             format!("block/{}", part_name).as_bytes(),
             Mode::from_bits_truncate(0o660),
-            Some(Device::BlockDevice(part_dev)),
+            Some(MknodTarget::BlockDevice(part_dev)),
             &Identity::get_kernel(),
         )?;
 

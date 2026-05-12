@@ -15,7 +15,7 @@ use crate::{
         self, File, PathNode,
         cache::LookupFlags,
         file::{FileDescription, PollEventSet, PollFlags},
-        inode::{Device, Mode, NodeOps},
+        inode::{MknodTarget, Mode, NodeOps},
     },
 };
 
@@ -306,7 +306,7 @@ impl LocalSocket {
         }
 
         // Discard any fds in this section that we could not (or chose not to) deliver.
-        // Dropping the Arc<File> runs File::close when the last ref goes away.
+        // Dropping the Arc<File> runs File cleanup when the last ref goes away.
         if !section.files.is_empty() {
             *out_flags |= MSG_CTRUNC;
             section.files.clear();
@@ -384,7 +384,7 @@ impl SocketOps for LocalSocket {
             cwd,
             path,
             mode,
-            Some(Device::Socket(socket.clone())),
+            Some(MknodTarget::Socket(socket.clone())),
             &identity,
         )?;
 
@@ -786,16 +786,21 @@ impl SocketOps for LocalSocket {
                 if inner.peer_closed {
                     revents |= PollFlags::Hup;
                 }
-                let peer_can_recv = inner
-                    .peer
+                let peer = inner.peer.clone();
+                let shutdown_write = inner.shutdown.contains(ShutdownFlags::Write);
+                let err = inner.shutdown.contains(ShutdownFlags::Write) && inner.peer_closed;
+                drop(inner);
+
+                let peer_can_recv = peer
                     .as_ref()
                     .is_some_and(|p| p.inner.lock().recv_buf.get_available_len() > 0);
-                if peer_can_recv && !inner.shutdown.contains(ShutdownFlags::Write) {
+                if peer_can_recv && !shutdown_write {
                     revents |= PollFlags::Out;
                 }
-                if inner.shutdown.contains(ShutdownFlags::Write) && inner.peer_closed {
+                if err {
                     revents |= PollFlags::Err;
                 }
+                return Ok(revents & (mask | PollFlags::Err | PollFlags::Hup));
             }
             _ => {
                 revents |= PollFlags::Out;
@@ -818,8 +823,10 @@ impl SocketOps for LocalSocket {
         }
         events
     }
+}
 
-    fn release(&self) -> EResult<()> {
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
         let (peer, inflight) = {
             let mut inner = self.inner.lock();
             inner.state = State::Unconnected;
@@ -830,21 +837,12 @@ impl SocketOps for LocalSocket {
             (peer, inflight)
         };
 
-        // Close any undelivered in-flight files. If we hold the last Arc, File::close runs the underlying ops.release.
-        for section in inflight {
-            for file in section.files {
-                if Arc::strong_count(&file) == 1 {
-                    let _ = file.close();
-                }
-            }
-        }
+        drop(inflight);
 
         if let Some(peer) = peer {
             peer.inner.lock().peer_closed = true;
             peer.rd_event.wake_all();
             peer.wr_event.wake_all();
         }
-
-        Ok(())
     }
 }

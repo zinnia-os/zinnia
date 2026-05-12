@@ -92,7 +92,6 @@ pub struct File {
     /// File open flags.
     pub flags: SpinMutex<OpenFlags>,
     pub position: FilePosition,
-    pub released: AtomicBool,
 }
 
 pub struct FileDescription {
@@ -197,18 +196,6 @@ impl FileDescription {
 /// generic implementation, which treats it as unimplemented.
 /// Inputs have been sanitized when these functions are called.
 pub trait FileOps: Sync + Send + Any {
-    /// Called when the file is being opened.
-    fn acquire(&self, file: &File, flags: OpenFlags) -> EResult<()> {
-        let _ = (file, flags);
-        Ok(())
-    }
-
-    /// Called when the last reference to the file is being dropped.
-    fn release(&self, file: &File) -> EResult<()> {
-        let _ = file;
-        Ok(())
-    }
-
     /// Reads from the file into a buffer.
     /// Returns actual bytes read and the new offset.
     fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
@@ -266,17 +253,6 @@ impl File {
             }
             _ => FilePosition::Position(Mutex::new(0)),
         }
-    }
-
-    fn release_once(&self) -> EResult<()> {
-        if self
-            .released
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.ops.release(self)?;
-        }
-        Ok(())
     }
 
     fn advance_offset(offset: &mut u64, amount: isize) -> EResult<()> {
@@ -348,18 +324,7 @@ impl File {
                 };
 
                 let file_node = file_path.entry.get_inode().unwrap();
-                Self::do_open_inode(file_path.clone(), &file_node, flags, identity)?;
-
-                let result = File {
-                    path: Some(file_path.clone()),
-                    ops: file_node.file_ops(),
-                    inode: Some(file_node.clone()),
-                    flags: SpinMutex::new(flags),
-                    position: Self::position_for_inode(&file_node),
-                    released: AtomicBool::new(false),
-                };
-                result.ops.acquire(&result, flags)?;
-                Ok(Arc::try_new(result)?)
+                Self::do_open_inode(file_path, &file_node, flags, identity)
             }
         }
     }
@@ -371,10 +336,8 @@ impl File {
             inode: None,
             flags: SpinMutex::new(flags),
             position: FilePosition::Stream,
-            released: AtomicBool::new(false),
         };
 
-        file.ops.acquire(&file, flags)?;
         Ok(Arc::try_new(file)?)
     }
 
@@ -401,7 +364,6 @@ impl File {
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
-                    released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
             }
@@ -413,18 +375,16 @@ impl File {
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
-                    released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
             }
             NodeOps::CharacterDevice(x) => {
                 let result = File {
                     path: Some(file_path),
-                    ops: x.clone(),
+                    ops: x.clone().open(flags)?,
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
-                    released: AtomicBool::new(false),
                 };
                 Arc::try_new(result)?
             }
@@ -434,7 +394,6 @@ impl File {
             _ => return Err(Errno::ENOTSUP),
         };
 
-        file.ops.acquire(&file, flags)?;
         Ok(file)
     }
 
@@ -584,15 +543,5 @@ impl File {
 
     pub fn ioctl(&self, request: usize, arg: VirtAddr) -> EResult<usize> {
         self.ops.ioctl(self, request, arg)
-    }
-
-    pub fn close(&self) -> EResult<()> {
-        self.release_once()
-    }
-}
-
-impl Drop for File {
-    fn drop(&mut self) {
-        _ = self.release_once();
     }
 }

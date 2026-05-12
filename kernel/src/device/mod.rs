@@ -20,3 +20,41 @@ pub mod net;
 pub mod pci;
 pub mod tty;
 pub mod vt;
+
+use crate::{
+    posix::errno::EResult,
+    vfs::file::{FileOps, OpenFlags},
+};
+use alloc::sync::Arc;
+use core::any::Any;
+
+pub trait Device: Sync + Send + Any {
+    fn open(self: Arc<Self>, flags: OpenFlags) -> EResult<Arc<dyn FileOps>>;
+    fn major(&self) -> u32;
+    fn minor(&self) -> u32;
+}
+
+struct SharedDevice {
+    ops: Arc<dyn FileOps>,
+    major: u32,
+    minor: u32,
+}
+
+impl Device for SharedDevice {
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
+        Ok(self.ops.clone())
+    }
+
+    fn major(&self) -> u32 {
+        self.major
+    }
+
+    fn minor(&self) -> u32 {
+        self.minor
+    }
+}
+
+/// Creates a fake device that wraps around FileOps.
+pub fn make_shared(ops: Arc<dyn FileOps>, major: u32, minor: u32) -> Arc<dyn Device> {
+    Arc::new(SharedDevice { ops, major, minor })
+}

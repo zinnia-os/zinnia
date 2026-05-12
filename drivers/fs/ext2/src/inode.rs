@@ -2,7 +2,7 @@ use super::{Ext2Super, structs::*};
 use zinnia::{
     alloc::{sync::Arc, vec, vec::Vec},
     arch,
-    core::{fmt::Debug, num::NonZeroUsize, sync::atomic::AtomicBool},
+    core::{fmt::Debug, num::NonZeroUsize},
     memory::{
         AddressSpace, IovecIter, PagedMemoryObject, VirtAddr, VmFlags,
         cache::{MemoryObject, Pager, PagerError},
@@ -16,7 +16,7 @@ use zinnia::{
         Entry, PathNode,
         cache::EntryState,
         file::{File, FileOps, FilePosition, MmapFlags, OpenFlags},
-        inode::{Device, DirectoryOps, INode, Mode, NodeOps, RegularOps, SymlinkOps},
+        inode::{DirectoryOps, INode, MknodTarget, Mode, NodeOps, RegularOps, SymlinkOps},
     },
 };
 
@@ -560,7 +560,6 @@ impl DirectoryOps for Ext2Dir {
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
             position: FilePosition::AtomicPosition(Mutex::new(0)),
-            released: AtomicBool::new(false),
         };
         Ok(Arc::new(file))
     }
@@ -868,7 +867,7 @@ impl DirectoryOps for Ext2Dir {
         &self,
         self_node: &Arc<INode>,
         mode: Mode,
-        dev: Option<Device>,
+        dev: Option<MknodTarget>,
         identity: &Identity,
     ) -> EResult<Arc<INode>> {
         let _ = (self_node, mode, dev, identity);

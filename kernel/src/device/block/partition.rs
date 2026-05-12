@@ -2,9 +2,14 @@ use super::BlockDevice;
 use crate::{
     memory::{PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
-    vfs::File,
+    vfs::{
+        File,
+        file::{FileOps, OpenFlags},
+    },
 };
 use alloc::sync::Arc;
+
+use crate::device::Device;
 
 /// A block device that represents a partition on a parent device.
 /// Offsets all LBA addresses by `start_lba` and bounds-checks against `lba_count`.
@@ -50,5 +55,19 @@ impl BlockDevice for PartitionDevice {
 
     fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         self.parent.handle_ioctl(file, request, arg)
+    }
+}
+
+impl Device for PartitionDevice {
+    fn open(self: Arc<Self>, flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
+        self.parent.clone().open(flags)
+    }
+
+    fn major(&self) -> u32 {
+        self.parent.major()
+    }
+
+    fn minor(&self) -> u32 {
+        self.parent.minor()
     }
 }

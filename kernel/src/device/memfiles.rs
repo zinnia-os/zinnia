@@ -1,4 +1,5 @@
 use crate::{
+    device,
     memory::IovecIter,
     posix::errno::{EResult, Errno},
     process::{Identity, PROCESS_STAGE},
@@ -6,7 +7,7 @@ use crate::{
         self, File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::sync::Arc;
@@ -64,7 +65,11 @@ fn MEMFILES_STAGE() {
         root.clone(),
         b"null",
         Mode::from_bits_truncate(0o666),
-        Some(Device::CharacterDevice(Arc::new(NullFile))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(NullFile),
+            1,
+            3,
+        ))),
         &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/null");
@@ -74,7 +79,11 @@ fn MEMFILES_STAGE() {
         root.clone(),
         b"full",
         Mode::from_bits_truncate(0o666),
-        Some(Device::CharacterDevice(Arc::new(FullFile))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(FullFile),
+            1,
+            7,
+        ))),
         &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/full");
@@ -84,7 +93,11 @@ fn MEMFILES_STAGE() {
         root,
         b"zero",
         Mode::from_bits_truncate(0o666),
-        Some(Device::CharacterDevice(Arc::new(ZeroFile))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(ZeroFile),
+            1,
+            5,
+        ))),
         &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/zero");

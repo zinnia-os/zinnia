@@ -408,28 +408,10 @@ impl FdTable {
     }
 
     pub fn close(&mut self, fd: i32) -> Option<()> {
-        let desc = self.inner.remove(&fd);
-        match desc {
-            Some(desc) => {
-                if Arc::strong_count(&desc.file) == 1 {
-                    _ = desc.file.close();
-                }
-                Some(())
-            }
-            None => None,
-        }
+        self.inner.remove(&fd).map(drop)
     }
 
     pub fn close_all(&mut self) {
-        let fds = self.inner.keys().cloned().collect::<Vec<_>>();
-        for fd in fds {
-            let desc = self.inner.remove(&fd);
-            if let Some(desc) = desc
-                && Arc::strong_count(&desc.file) == 1
-            {
-                _ = desc.file.close();
-            }
-        }
         self.inner.clear();
     }
 
@@ -447,12 +429,7 @@ impl FdTable {
                 continue;
             }
 
-            let desc = self.inner.remove(&fd);
-            if let Some(desc) = desc
-                && Arc::strong_count(&desc.file) == 1
-            {
-                _ = desc.file.close();
-            }
+            self.inner.remove(&fd);
         }
     }
 }

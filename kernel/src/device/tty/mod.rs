@@ -2,6 +2,7 @@ pub mod pty;
 
 use crate::{
     clock,
+    device::{self, Device},
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::{self, Identity, signal::Signal},
@@ -12,11 +13,11 @@ use crate::{
         self, File,
         file::{FileOps, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub trait TtyDriver: Send + Sync {
     fn write_output(&self, data: &[u8]) -> EResult<()>;
@@ -217,12 +218,12 @@ fn default_termios() -> termios {
     t
 }
 
-static TTY_INDEX: AtomicUsize = AtomicUsize::new(0);
-static TTYS: SpinMutex<BTreeMap<usize, Arc<Tty>>> = SpinMutex::new(BTreeMap::new());
+static TTY_INDEX: AtomicU32 = AtomicU32::new(0);
+static TTYS: SpinMutex<BTreeMap<u32, Arc<Tty>>> = SpinMutex::new(BTreeMap::new());
 
 pub struct Tty {
     pub name: String,
-    pub index: usize,
+    pub index: u32,
     pub ldisc: SpinMutex<LineDiscipline>,
     pub driver: Arc<dyn TtyDriver>,
     pub winsize: SpinMutex<winsize>,
@@ -290,6 +291,11 @@ impl Tty {
     }
 
     pub fn register_device_with_ops(self: Arc<Self>, ops: Arc<dyn FileOps>) -> EResult<()> {
+        let minor = self.index;
+        self.register_device_with_opener(device::make_shared(ops, 4, minor))
+    }
+
+    pub fn register_device_with_opener(self: Arc<Self>, opener: Arc<dyn Device>) -> EResult<()> {
         let name = self.as_ref().name.as_bytes();
         let dev_name = name
             .strip_prefix(b"/dev/")
@@ -302,13 +308,13 @@ impl Tty {
             root,
             dev_name,
             Mode::from_bits_truncate(0o666),
-            Some(Device::CharacterDevice(ops)),
+            Some(MknodTarget::CharacterDevice(opener)),
             &Identity::get_kernel(),
         )
     }
 }
 
-pub fn get_tty(index: usize) -> Option<Arc<Tty>> {
+pub fn get_tty(index: u32) -> Option<Arc<Tty>> {
     TTYS.lock().get(&index).cloned()
 }
 
@@ -666,7 +672,11 @@ pub fn CTTY_STAGE() {
         root,
         b"tty",
         Mode::from_bits_truncate(0o660),
-        Some(Device::CharacterDevice(Arc::new(CttyFileOps))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(CttyFileOps),
+            5,
+            0,
+        ))),
         &Identity::get_kernel(),
     )
     .expect("Unable to register ctty device");

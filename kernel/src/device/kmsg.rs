@@ -1,4 +1,5 @@
 use crate::{
+    device,
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::{Identity, PROCESS_STAGE},
@@ -7,7 +8,7 @@ use crate::{
         self, File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::sync::Arc;
@@ -55,7 +56,11 @@ fn KMSG_STAGE() {
         root.clone(),
         b"kmsg",
         Mode::from_bits_truncate(0o666),
-        Some(Device::CharacterDevice(Arc::new(Console))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(Console),
+            1,
+            11,
+        ))),
         &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/kmsg");

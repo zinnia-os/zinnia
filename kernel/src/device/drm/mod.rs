@@ -20,7 +20,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 pub mod modes;
@@ -121,17 +121,15 @@ pub trait Device: Send + Sync {
     }
 }
 
-/// Represents a user-facing DRM card in form of a file.
-/// Note: this object is currently shared by all opens of the same device node,
-/// so dynamic state is reset when the last open handle is released.
+/// Represents a user-facing DRM card in form of a per-open file.
 pub struct DrmFile {
     device: Arc<dyn Device>,
     buffers: SpinMutex<Vec<Arc<dyn BufferObject>>>,
+    framebuffers: SpinMutex<Vec<Arc<Framebuffer>>>,
     active_fb: SpinMutex<Option<(u32, Arc<Framebuffer>)>>,
     events: SpinMutex<Vec<PageFlipEvent>>,
     rd_event: Event,
     flip_sequence: AtomicU32,
-    open_count: AtomicUsize,
 }
 
 #[repr(C)]
@@ -150,11 +148,11 @@ impl DrmFile {
         Arc::new(Self {
             device,
             buffers: SpinMutex::new(Vec::new()),
+            framebuffers: SpinMutex::new(Vec::new()),
             active_fb: SpinMutex::new(None),
             events: SpinMutex::new(Vec::new()),
             rd_event: Event::new(),
             flip_sequence: AtomicU32::new(0),
-            open_count: AtomicUsize::new(0),
         })
     }
 
@@ -170,27 +168,59 @@ impl DrmFile {
             self.device.commit(&state);
         }
     }
+
+    fn framebuffer_by_id(&self, id: u32) -> EResult<Arc<Framebuffer>> {
+        self.framebuffers
+            .lock()
+            .iter()
+            .find(|x| x.id == id)
+            .cloned()
+            .ok_or(Errno::EINVAL)
+    }
 }
 
-impl FileOps for DrmFile {
-    fn acquire(&self, _file: &File, _flags: OpenFlags) -> EResult<()> {
-        self.open_count.fetch_add(1, Ordering::AcqRel);
-        Ok(())
-    }
-
-    fn release(&self, _file: &File) -> EResult<()> {
-        if self.open_count.fetch_sub(1, Ordering::AcqRel) != 1 {
-            return Ok(());
-        }
-
+impl Drop for DrmFile {
+    fn drop(&mut self) {
         self.device.set_cursor(0, None, 0, 0, 0, 0).ok();
         self.events.lock().clear();
         self.active_fb.lock().take();
         self.buffers.lock().clear();
-        self.device.state().framebuffers.lock().clear();
-        Ok(())
+
+        let owned_ids = {
+            let mut framebuffers = self.framebuffers.lock();
+            let ids = framebuffers.iter().map(|x| x.id).collect::<Vec<_>>();
+            framebuffers.clear();
+            ids
+        };
+
+        self.device
+            .state()
+            .framebuffers
+            .lock()
+            .retain(|x| !owned_ids.contains(&x.id));
+    }
+}
+
+struct DrmDeviceNode {
+    device: Arc<dyn Device>,
+    minor: u32,
+}
+
+impl crate::device::Device for DrmDeviceNode {
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
+        Ok(DrmFile::new(self.device.clone()))
     }
 
+    fn major(&self) -> u32 {
+        226
+    }
+
+    fn minor(&self) -> u32 {
+        self.minor
+    }
+}
+
+impl FileOps for DrmFile {
     fn read(&self, _file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
         let guard = self.rd_event.guard();
 
@@ -562,6 +592,7 @@ impl FileOps for DrmFile {
                 val.fb_id = framebuffer.id();
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
+                self.framebuffers.lock().push(framebuffer.clone());
                 self.device.state().framebuffers.lock().push(framebuffer);
             }
             drm::DRM_IOCTL_MODE_ADDFB2 => {
@@ -600,19 +631,26 @@ impl FileOps for DrmFile {
                 val.fb_id = framebuffer.id();
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
+                self.framebuffers.lock().push(framebuffer.clone());
                 self.device.state().framebuffers.lock().push(framebuffer);
             }
             drm::DRM_IOCTL_MODE_RMFB => {
                 let ptr = UserPtr::<u32>::new(arg);
                 let fb_id = ptr.read().ok_or(Errno::EFAULT)?;
 
-                let state = self.device.state();
-                let mut framebuffers = state.framebuffers.lock();
-                let index = framebuffers
+                let mut owned_framebuffers = self.framebuffers.lock();
+                let index = owned_framebuffers
                     .iter()
                     .position(|x| x.id == fb_id)
                     .ok_or(Errno::ENOENT)?;
-                framebuffers.remove(index);
+                owned_framebuffers.remove(index);
+                drop(owned_framebuffers);
+
+                let state = self.device.state();
+                let mut framebuffers = state.framebuffers.lock();
+                if let Some(index) = framebuffers.iter().position(|x| x.id == fb_id) {
+                    framebuffers.remove(index);
+                }
 
                 // If this was the active framebuffer, clear it
                 let mut active = self.active_fb.lock();
@@ -680,14 +718,7 @@ impl FileOps for DrmFile {
                 }
 
                 // Validate framebuffer exists
-                let fb = {
-                    let framebuffers = state.framebuffers.lock();
-                    framebuffers
-                        .iter()
-                        .find(|x| x.id == val.fb_id)
-                        .ok_or(Errno::EINVAL)?
-                        .clone()
-                };
+                let fb = self.framebuffer_by_id(val.fb_id)?;
 
                 // Store active framebuffer for auto-flush
                 *self.active_fb.lock() = Some((val.crtc_id, fb.clone()));
@@ -905,14 +936,9 @@ impl FileOps for DrmFile {
                 let ptr = UserPtr::<drm::drm_mode_fb_dirty_cmd>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                let state = self.device.state();
-                let framebuffers = state.framebuffers.lock();
-                let fb = framebuffers
-                    .iter()
-                    .find(|x| x.id == val.fb_id)
-                    .ok_or(Errno::ENOENT)?
-                    .clone();
-                drop(framebuffers);
+                let fb = self
+                    .framebuffer_by_id(val.fb_id)
+                    .map_err(|_| Errno::ENOENT)?;
 
                 // Find which CRTC is displaying this FB and flush it
                 if let Some((crtc_id, _)) = self.active_fb.lock().as_ref() {
@@ -924,16 +950,9 @@ impl FileOps for DrmFile {
             drm::DRM_IOCTL_MODE_PAGE_FLIP => {
                 let ptr = UserPtr::<drm::drm_mode_crtc_page_flip>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
-                let state = self.device.state();
-
-                // Find the framebuffer
-                let framebuffers = state.framebuffers.lock();
-                let fb = framebuffers
-                    .iter()
-                    .find(|x| x.id == val.fb_id)
-                    .ok_or(Errno::ENOENT)?
-                    .clone();
-                drop(framebuffers);
+                let fb = self
+                    .framebuffer_by_id(val.fb_id)
+                    .map_err(|_| Errno::ENOENT)?;
 
                 *self.active_fb.lock() = Some((val.crtc_id, fb.clone()));
 
@@ -963,13 +982,15 @@ impl FileOps for DrmFile {
                 }
             }
             drm::DRM_IOCTL_WAIT_VBLANK => {
-                warn!("DRM_IOCTL_WAIT_VBLANK is not supported");
+                // TODO
                 return Err(Errno::ENOTTY);
             }
             drm::DRM_IOCTL_CRTC_GET_SEQUENCE => {
+                // TODO
                 return Err(Errno::ENOTTY);
             }
             drm::DRM_IOCTL_CRTC_QUEUE_SEQUENCE => {
+                // TODO
                 return Err(Errno::ENOTTY);
             }
             drm::DRM_IOCTL_MODE_CURSOR => {
@@ -1100,19 +1121,22 @@ impl FileOps for DrmFile {
     }
 }
 
-static CARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static CARD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-pub fn register(card: Arc<DrmFile>) -> EResult<()> {
+pub fn register(device: Arc<dyn Device>) -> EResult<()> {
     log!("Registering new DRM card");
 
     let root = devtmpfs::get_root();
+    let minor = CARD_COUNTER.fetch_add(1, Ordering::SeqCst);
 
     vfs::mknod(
         root.clone(),
         root.clone(),
-        format!("drm/card{}", CARD_COUNTER.fetch_add(1, Ordering::SeqCst)).as_bytes(),
+        format!("drm/card{}", minor).as_bytes(),
         Mode::from_bits_truncate(0o660),
-        Some(crate::vfs::inode::Device::CharacterDevice(card)),
+        Some(crate::vfs::inode::MknodTarget::CharacterDevice(Arc::new(
+            DrmDeviceNode { device, minor },
+        ))),
         &Identity::get_kernel(),
     )
 }

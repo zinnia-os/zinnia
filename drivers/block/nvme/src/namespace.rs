@@ -5,8 +5,13 @@ use zinnia::{
     log,
     memory::{PhysAddr, VirtAddr},
     posix::errno::{EResult, Errno},
-    vfs::File,
+    vfs::{
+        File,
+        file::{FileOps, OpenFlags},
+    },
 };
+
+use zinnia::device::Device;
 
 pub struct Namespace {
     controller: Arc<Controller>,
@@ -104,5 +109,19 @@ impl BlockDevice for Namespace {
     fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         let _ = (file, request, arg);
         Err(Errno::EINVAL)
+    }
+}
+
+impl Device for Namespace {
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
+        Ok(self.clone())
+    }
+
+    fn major(&self) -> u32 {
+        159
+    }
+
+    fn minor(&self) -> u32 {
+        self.nsid
     }
 }

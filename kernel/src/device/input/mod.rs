@@ -1,5 +1,6 @@
 use crate::{
     clock,
+    device::Device as CharacterDevice,
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::Identity,
@@ -14,7 +15,7 @@ use crate::{
         self, File,
         file::{FileOps, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::{
@@ -22,10 +23,10 @@ use alloc::{
     sync::Arc,
     vec,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
-static EVENT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static EVENT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub trait EventDeviceOps: Send + Sync {
     /// Human-readable device name.
@@ -50,10 +51,16 @@ pub trait EventDeviceOps: Send + Sync {
 
 /// An evdev-compatible input device.
 pub struct EventDevice {
-    index: usize,
+    index: u32,
     ops: Arc<dyn EventDeviceOps>,
-    readers: SpinMutex<BTreeMap<usize, VecDeque<InputEvent>>>,
+    readers: SpinMutex<BTreeMap<u32, Arc<SpinMutex<VecDeque<InputEvent>>>>>,
     rd_event: Event,
+}
+
+struct EventDeviceFile {
+    device: Arc<EventDevice>,
+    reader_id: u32,
+    events: Arc<SpinMutex<VecDeque<InputEvent>>>,
 }
 
 impl EventDevice {
@@ -83,8 +90,9 @@ impl EventDevice {
             value,
         };
 
-        let mut readers = self.readers.lock();
-        for buf in readers.values_mut() {
+        let readers = self.readers.lock();
+        for buf in readers.values() {
+            let mut buf = buf.lock();
             if buf.len() >= EVENT_QUEUE_CAPACITY {
                 buf.pop_front();
             }
@@ -105,7 +113,7 @@ impl EventDevice {
             root,
             name.as_bytes(),
             Mode::from_bits_truncate(0o666),
-            Some(Device::CharacterDevice(self.clone())),
+            Some(MknodTarget::CharacterDevice(self.clone())),
             &Identity::get_kernel(),
         )
     }
@@ -119,52 +127,32 @@ impl EventDevice {
     }
 }
 
-impl FileOps for EventDevice {
-    fn acquire(&self, file: &File, _flags: OpenFlags) -> EResult<()> {
-        self.readers.lock().insert(
-            Self::reader_key(file),
-            VecDeque::with_capacity(EVENT_QUEUE_CAPACITY),
-        );
-        Ok(())
+impl CharacterDevice for EventDevice {
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
+        let reader_id = EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let events = Arc::try_new(SpinMutex::new(VecDeque::with_capacity(
+            EVENT_QUEUE_CAPACITY,
+        )))?;
+
+        self.readers.lock().insert(reader_id, events.clone());
+
+        Ok(Arc::try_new(EventDeviceFile {
+            device: self,
+            reader_id,
+            events,
+        })?)
     }
 
-    fn release(&self, file: &File) -> EResult<()> {
-        self.readers.lock().remove(&Self::reader_key(file));
-        Ok(())
+    fn major(&self) -> u32 {
+        13
     }
 
-    fn read(&self, file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let ev_size = size_of::<InputEvent>();
-        if buffer.len() < ev_size {
-            return Err(Errno::EINVAL);
-        }
-
-        if file.flags.lock().contains(OpenFlags::NonBlocking) {
-            let mut readers = self.readers.lock();
-            let buf = readers.get_mut(&Self::reader_key(file)).ok_or(Errno::EIO)?;
-            if buf.is_empty() {
-                return Err(Errno::EAGAIN);
-            }
-            return Self::drain_events(buf, buffer, ev_size);
-        }
-
-        // Wait for events if we can block.
-        loop {
-            let guard = self.rd_event.guard();
-            {
-                let mut readers = self.readers.lock();
-                let buf = readers.get_mut(&Self::reader_key(file)).ok_or(Errno::EIO)?;
-                if !buf.is_empty() {
-                    return Self::drain_events(buf, buffer, ev_size);
-                }
-            }
-            guard.wait();
-            if Scheduler::get_current().has_pending_signals() {
-                return Err(Errno::EINTR);
-            }
-        }
+    fn minor(&self) -> u32 {
+        64 + self.index
     }
+}
 
+impl EventDevice {
     fn ioctl(&self, _file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         let cmd = request as u32;
 
@@ -191,78 +179,71 @@ impl FileOps for EventDevice {
             }
             // EVIOCGNAME(len)
             0x06 => {
-                let name = self.ops.name();
-                let copy_len = core::cmp::min(name.len(), size);
-                let mut ptr: UserPtr<u8> = UserPtr::new(arg);
-                ptr.write_slice(&name.as_bytes()[..copy_len])
-                    .ok_or(Errno::EFAULT)?;
-                // NUL-terminate if space.
-                if copy_len < size {
-                    let mut nul_ptr: UserPtr<u8> = UserPtr::new(arg + copy_len);
-                    nul_ptr.write(0).ok_or(Errno::EFAULT)?;
+                let name = self.ops.name().as_bytes();
+                let copy_len = core::cmp::min(size.saturating_sub(1), name.len());
+                let ptr = UserPtr::<u8>::new(arg);
+                for (i, b) in name[..copy_len].iter().enumerate() {
+                    ptr.offset(i).write(*b).ok_or(Errno::EFAULT)?;
                 }
-                Ok(copy_len)
+                if size > 0 {
+                    ptr.offset(copy_len).write(0).ok_or(Errno::EFAULT)?;
+                }
+                Ok(copy_len + 1)
             }
             // EVIOCGPHYS(len) / EVIOCGUNIQ(len)
             0x07 | 0x08 => {
                 if size > 0 {
                     let mut ptr: UserPtr<u8> = UserPtr::new(arg);
-                    ptr.write(0u8).ok_or(Errno::EFAULT)?;
+                    ptr.write(0).ok_or(Errno::EFAULT)?;
                 }
                 Ok(0)
             }
             // EVIOCGPROP(len)
             0x09 => {
-                let zeros = vec![0u8; size];
-                if size > 0 {
-                    let mut ptr: UserPtr<u8> = UserPtr::new(arg);
-                    ptr.write_slice(&zeros).ok_or(Errno::EFAULT)?;
+                let ptr = UserPtr::<u8>::new(arg);
+                for i in 0..size {
+                    ptr.offset(i).write(0).ok_or(Errno::EFAULT)?;
                 }
                 Ok(size)
             }
             // EVIOCGKEY | EVIOCGLED | EVIOCGSND | EVIOCGSW
             0x18..=0x1b => {
-                let zeros = vec![0u8; size];
-                if size > 0 {
-                    let mut ptr: UserPtr<u8> = UserPtr::new(arg);
-                    ptr.write_slice(&zeros).ok_or(Errno::EFAULT)?;
+                let ptr = UserPtr::<u8>::new(arg);
+                for i in 0..size {
+                    ptr.offset(i).write(0).ok_or(Errno::EFAULT)?;
                 }
                 Ok(size)
             }
             // EVIOCGBIT(ev, len)
-            nr if nr >= 0x20 && nr < 0x40 => {
-                let ev_type = nr - 0x20;
-                let mut out = vec![0u8; size];
-
-                match ev_type {
-                    // Bitmap of supported event types.
+            0x20..=0x7f => {
+                let ev = nr - 0x20;
+                let mut data = vec![0u8; size];
+                match ev {
                     0 => {
                         let supported = self.ops.supported_events();
-                        for i in 0..32 {
-                            if supported & (1 << i) != 0 {
-                                Self::set_bit(&mut out, i);
+                        for bit in 0..32u16 {
+                            if supported & (1u32 << bit) != 0 {
+                                Self::set_bit(&mut data, bit);
                             }
                         }
                     }
-                    // EV_KEY bitmap.
-                    1 => {
-                        let keys = self.ops.supported_keys();
-                        let copy_len = core::cmp::min(keys.len(), size);
-                        out[..copy_len].copy_from_slice(&keys[..copy_len]);
+                    x if x == input::EV_KEY as u8 => {
+                        let src = self.ops.supported_keys();
+                        let n = core::cmp::min(src.len(), data.len());
+                        data[..n].copy_from_slice(&src[..n]);
                     }
-                    // EV_REL bitmap.
-                    2 => {
-                        let rel = self.ops.supported_rel();
-                        let copy_len = core::cmp::min(rel.len(), size);
-                        out[..copy_len].copy_from_slice(&rel[..copy_len]);
+                    x if x == input::EV_REL as u8 => {
+                        let src = self.ops.supported_rel();
+                        let n = core::cmp::min(src.len(), data.len());
+                        data[..n].copy_from_slice(&src[..n]);
                     }
-                    _ => {} // Unsupported event type.
+                    _ => {}
                 }
-
-                let mut ptr: UserPtr<u8> = UserPtr::new(arg);
-                let copy_len = core::cmp::min(out.len(), size);
-                ptr.write_slice(&out[..copy_len]).ok_or(Errno::EFAULT)?;
-                Ok(copy_len)
+                let ptr = UserPtr::<u8>::new(arg);
+                for (i, b) in data.iter().enumerate() {
+                    ptr.offset(i).write(*b).ok_or(Errno::EFAULT)?;
+                }
+                Ok(size)
             }
             // EVIOCGRAB / EVIOCREVOKE
             0x90 | 0x91 => Ok(0),
@@ -274,24 +255,60 @@ impl FileOps for EventDevice {
             }
         }
     }
+}
 
-    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
-        let mut revents = PollFlags::empty();
-        if mask.contains(PollFlags::In) {
-            let readers = self.readers.lock();
-            if readers
-                .get(&Self::reader_key(file))
-                .is_some_and(|buf| !buf.is_empty())
-            {
-                revents |= PollFlags::In;
+impl Drop for EventDeviceFile {
+    fn drop(&mut self) {
+        self.device.readers.lock().remove(&self.reader_id);
+    }
+}
+
+impl FileOps for EventDeviceFile {
+    fn read(&self, file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
+        let ev_size = size_of::<InputEvent>();
+        if buffer.len() < ev_size {
+            return Err(Errno::EINVAL);
+        }
+
+        if file.flags.lock().contains(OpenFlags::NonBlocking) {
+            let mut buf = self.events.lock();
+            if buf.is_empty() {
+                return Err(Errno::EAGAIN);
             }
+            return EventDevice::drain_events(&mut buf, buffer, ev_size);
+        }
+
+        // Wait for events if we can block.
+        loop {
+            let guard = self.device.rd_event.guard();
+            {
+                let mut buf = self.events.lock();
+                if !buf.is_empty() {
+                    return EventDevice::drain_events(&mut buf, buffer, ev_size);
+                }
+            }
+            guard.wait();
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
+            }
+        }
+    }
+
+    fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
+        self.device.ioctl(file, request, arg)
+    }
+
+    fn poll(&self, _file: &File, mask: PollFlags) -> EResult<PollFlags> {
+        let mut revents = PollFlags::empty();
+        if mask.contains(PollFlags::In) && !self.events.lock().is_empty() {
+            revents |= PollFlags::In;
         }
         Ok(revents)
     }
 
     fn poll_events(&self, _file: &File, mask: PollFlags) -> PollEventSet<'_> {
         if mask.intersects(PollFlags::Read) {
-            PollEventSet::one(&self.rd_event)
+            PollEventSet::one(&self.device.rd_event)
         } else {
             PollEventSet::new()
         }
@@ -299,10 +316,6 @@ impl FileOps for EventDevice {
 }
 
 impl EventDevice {
-    fn reader_key(file: &File) -> usize {
-        file as *const File as usize
-    }
-
     /// Drain as many events as fit into the user buffer (in multiples of event size). Returns bytes copied.
     fn drain_events(
         buf: &mut VecDeque<InputEvent>,

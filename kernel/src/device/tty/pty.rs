@@ -1,4 +1,5 @@
 use crate::{
+    device::Device as CharacterDevice,
     device::tty::{Tty, TtyDriver, TtyFileOps},
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
@@ -10,7 +11,7 @@ use crate::{
         self, File,
         file::{FileOps, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::{
@@ -19,20 +20,20 @@ use alloc::{
     sync::{Arc, Weak},
     vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 /// Next PTY index to allocate.
-static PTY_INDEX: AtomicUsize = AtomicUsize::new(0);
+static PTY_INDEX: AtomicU32 = AtomicU32::new(0);
 
 /// Global table of live PTY pairs (index -> pair). Entries are removed when
 /// the master is closed.
-static PTY_TABLE: SpinMutex<BTreeMap<usize, Arc<PtyPair>>> = SpinMutex::new(BTreeMap::new());
+static PTY_TABLE: SpinMutex<BTreeMap<u32, Arc<PtyPair>>> = SpinMutex::new(BTreeMap::new());
 
 const MASTER_BUF_SIZE: usize = 0x1000;
 
 pub struct PtyPair {
     /// Slave index N (for `/dev/pts/N`).
-    pub index: usize,
+    pub index: u32,
     /// The TTY object associated with the slave side.
     pub tty: Arc<Tty>,
     /// Slave -> master buffer (program output that the master reads).
@@ -137,13 +138,14 @@ pub fn alloc_pty() -> EResult<Arc<PtyPair>> {
 
     PTY_TABLE.lock().insert(index, pair.clone());
 
-    let slave_ops: Arc<dyn FileOps> = Arc::new(PtySlaveFileOps {
+    let slave_ops: Arc<dyn CharacterDevice> = Arc::new(PtySlaveFileOps {
         tty_ops: TtyFileOps {
             tty: pair.tty.clone(),
         },
         pair: Arc::downgrade(&pair),
+        index,
     });
-    pair.tty.clone().register_device_with_ops(slave_ops)?;
+    pair.tty.clone().register_device_with_opener(slave_ops)?;
 
     Ok(pair)
 }
@@ -151,28 +153,47 @@ pub fn alloc_pty() -> EResult<Arc<PtyPair>> {
 pub struct PtySlaveFileOps {
     tty_ops: TtyFileOps,
     pair: Weak<PtyPair>,
+    index: u32,
 }
 
-impl FileOps for PtySlaveFileOps {
-    fn acquire(&self, file: &File, flags: OpenFlags) -> EResult<()> {
+impl CharacterDevice for PtySlaveFileOps {
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
         let pair = self.pair.upgrade().ok_or(Errno::EIO)?;
         if !pair.unlocked.load(Ordering::Acquire) {
             return Err(Errno::EIO);
         }
-        self.tty_ops.acquire(file, flags)?;
         pair.slave_count.fetch_add(1, Ordering::AcqRel);
-        Ok(())
+
+        Ok(Arc::new(PtySlaveFile {
+            tty_ops: TtyFileOps {
+                tty: self.tty_ops.tty.clone(),
+            },
+            pair,
+        }))
     }
 
-    fn release(&self, file: &File) -> EResult<()> {
-        if let Some(pair) = self.pair.upgrade() {
-            pair.slave_count.fetch_sub(1, Ordering::AcqRel);
-            // Wake any master reader so it can re-check for hangup/EOF.
-            pair.master_rd_event.wake_all();
-        }
-        self.tty_ops.release(file)
+    fn major(&self) -> u32 {
+        136
     }
 
+    fn minor(&self) -> u32 {
+        self.index
+    }
+}
+
+pub struct PtySlaveFile {
+    tty_ops: TtyFileOps,
+    pair: Arc<PtyPair>,
+}
+
+impl Drop for PtySlaveFile {
+    fn drop(&mut self) {
+        self.pair.slave_count.fetch_sub(1, Ordering::AcqRel);
+        self.pair.master_rd_event.wake_all();
+    }
+}
+
+impl FileOps for PtySlaveFile {
     fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         self.tty_ops.read(file, buffer, offset)
     }
@@ -374,9 +395,10 @@ impl FileOps for PtyMaster {
             PollEventSet::new()
         }
     }
+}
 
-    fn release(&self, _file: &File) -> EResult<()> {
-        // Master is going away.
+impl Drop for PtyMaster {
+    fn drop(&mut self) {
         self.pair.tty.hangup();
         self.pair.master_rd_event.wake_all();
         self.pair.master_wr_event.wake_all();
@@ -395,73 +417,23 @@ impl FileOps for PtyMaster {
             slave_name.as_bytes(),
             Identity::get_kernel(),
         );
-
-        Ok(())
     }
 }
 
-pub struct PtmxDevice {
-    opens: SpinMutex<BTreeMap<usize, Arc<PtyMaster>>>,
-}
+pub struct PtmxDevice;
 
-impl PtmxDevice {
-    fn key(file: &File) -> usize {
-        file as *const File as usize
-    }
-
-    fn get(&self, file: &File) -> EResult<Arc<PtyMaster>> {
-        self.opens
-            .lock()
-            .get(&Self::key(file))
-            .cloned()
-            .ok_or(Errno::EBADF)
-    }
-}
-
-impl FileOps for PtmxDevice {
-    fn acquire(&self, file: &File, _flags: OpenFlags) -> EResult<()> {
+impl CharacterDevice for PtmxDevice {
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
         let pair = alloc_pty()?;
-        let master = Arc::new(PtyMaster { pair });
-        self.opens.lock().insert(Self::key(file), master);
-        Ok(())
+        Ok(Arc::new(PtyMaster { pair }))
     }
 
-    fn release(&self, file: &File) -> EResult<()> {
-        let master = self.opens.lock().remove(&Self::key(file));
-        if let Some(master) = master {
-            master.release(file)?;
-        }
-        Ok(())
+    fn major(&self) -> u32 {
+        5
     }
 
-    fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        self.get(file)?.read(file, buffer, offset)
-    }
-
-    fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        self.get(file)?.write(file, buffer, offset)
-    }
-
-    fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
-        self.get(file)?.ioctl(file, request, arg)
-    }
-
-    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
-        self.get(file)?.poll(file, mask)
-    }
-
-    fn poll_events(&self, file: &File, mask: PollFlags) -> PollEventSet<'_> {
-        if !mask.intersects(PollFlags::Read) {
-            return PollEventSet::new();
-        }
-        let masters = self.opens.lock();
-        let Some(master) = masters.get(&Self::key(file)) else {
-            return PollEventSet::new();
-        };
-
-        let event: &Event = &master.pair.master_rd_event;
-        let event: &Event = unsafe { core::mem::transmute::<&Event, &Event>(event) };
-        PollEventSet::one(event)
+    fn minor(&self) -> u32 {
+        2
     }
 }
 
@@ -486,9 +458,7 @@ pub fn PTMX_STAGE() {
         root,
         b"ptmx",
         Mode::from_bits_truncate(0o666),
-        Some(Device::CharacterDevice(Arc::new(PtmxDevice {
-            opens: SpinMutex::new(BTreeMap::new()),
-        }))),
+        Some(MknodTarget::CharacterDevice(Arc::new(PtmxDevice))),
         Identity::get_kernel(),
     )
     .expect("Unable to create PTMX device");

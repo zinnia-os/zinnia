@@ -1,5 +1,6 @@
 use crate::{
     boot::BootInfo,
+    device,
     memory::IovecIter,
     posix::errno::{EResult, Errno},
     process::{Identity, PROCESS_STAGE},
@@ -7,7 +8,7 @@ use crate::{
         self, File,
         file::FileOps,
         fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::{Device, Mode},
+        inode::{MknodTarget, Mode},
     },
 };
 use alloc::sync::Arc;
@@ -36,7 +37,11 @@ fn CMDLINE_STAGE() {
         root.clone(),
         b"cmdline",
         Mode::from_bits_truncate(0o666),
-        Some(Device::CharacterDevice(Arc::new(CmdlineFile))),
+        Some(MknodTarget::CharacterDevice(device::make_shared(
+            Arc::new(CmdlineFile),
+            1,
+            12,
+        ))),
         &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/cmdline");

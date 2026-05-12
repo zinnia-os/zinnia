@@ -393,8 +393,10 @@ impl SocketOps for UdpSocket {
         }
         events
     }
+}
 
-    fn release(&self) -> EResult<()> {
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
         let port = {
             let mut inner = self.inner.lock();
             inner.recv_queue.clear();
@@ -408,7 +410,6 @@ impl SocketOps for UdpSocket {
         if let Some(port) = port {
             UDP_PORTS.lock().remove(&port);
         }
-        Ok(())
     }
 }
 

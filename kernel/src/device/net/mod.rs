@@ -125,11 +125,6 @@ pub trait SocketOps: Send + Sync + Any {
 
     /// Get the events relevant to the requested poll mask.
     fn poll_events(&self, mask: PollFlags) -> PollEventSet<'_>;
-
-    /// Called when last file reference is dropped.
-    fn release(&self) -> EResult<()> {
-        Ok(())
-    }
 }
 
 impl FileOps for Socket {
@@ -149,10 +144,6 @@ impl FileOps for Socket {
 
     fn poll_events(&self, _file: &File, mask: PollFlags) -> PollEventSet<'_> {
         self.ops.poll_events(mask)
-    }
-
-    fn release(&self, _file: &File) -> EResult<()> {
-        self.ops.release()
     }
 
     fn ioctl(&self, _file: &File, request: usize, argp: VirtAddr) -> EResult<usize> {

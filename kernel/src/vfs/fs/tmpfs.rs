@@ -13,13 +13,13 @@ use crate::{
         cache::{Entry, EntryState},
         file::{File, FileOps, FilePosition, MmapFlags, OpenFlags},
         fs::{FileSystem, Mount},
-        inode::{Device, DirectoryOps, INode, Mode, NodeOps, RegularOps, SymlinkOps},
+        inode::{DirectoryOps, INode, MknodTarget, Mode, NodeOps, RegularOps, SymlinkOps},
     },
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[derive(Debug)]
@@ -105,7 +105,6 @@ impl DirectoryOps for TmpDir {
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
             position: FilePosition::AtomicPosition(Mutex::new(0)),
-            released: AtomicBool::new(false),
         };
         return Ok(Arc::try_new(file)?);
     }
@@ -202,16 +201,16 @@ impl DirectoryOps for TmpDir {
         &self,
         self_node: &Arc<INode>,
         mode: Mode,
-        dev: Option<Device>,
+        dev: Option<MknodTarget>,
         _identity: &Identity,
     ) -> EResult<Arc<INode>> {
         let new_node = dev.ok_or(Errno::ENODEV)?;
         let sb: Arc<TmpSuper> = Arc::downcast(self_node.sb.clone().unwrap()).unwrap();
         sb.create_inode(
             match new_node {
-                Device::BlockDevice(x) => NodeOps::BlockDevice(x),
-                Device::CharacterDevice(x) => NodeOps::CharacterDevice(x),
-                Device::Socket(x) => NodeOps::Socket(x),
+                MknodTarget::BlockDevice(x) => NodeOps::BlockDevice(x),
+                MknodTarget::CharacterDevice(x) => NodeOps::CharacterDevice(x),
+                MknodTarget::Socket(x) => NodeOps::Socket(x),
             },
             mode,
         )

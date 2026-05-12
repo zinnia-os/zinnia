@@ -8,6 +8,7 @@ use crate::{
     sched::Scheduler,
     uapi::{
         access::{R_OK, W_OK, X_OK},
+        dev_t,
         dirent::dirent,
         epoll::{
             EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLEXCLUSIVE, EPOLLMSG,
@@ -31,7 +32,7 @@ use crate::{
         file::{FileDescription, FileOps, OpenFlags, PollFlags, SeekAnchor},
         fs,
         inode::{INode, Mode, NodeOps},
-        pipe::PipeBuffer,
+        pipe::PipeFile,
         signalfd::SignalfdFile,
         timerfd::{self, TimerfdFile},
     },
@@ -257,6 +258,10 @@ pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
 }
 
 fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
+    fn makedev(major: u32, minor: u32) -> dev_t {
+        ((major as dev_t) << 8) | (minor as dev_t)
+    }
+
     statbuf
         .write(stat {
             st_dev: 0,
@@ -277,7 +282,8 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
             // Use the inode number as a unique devid for char/block devices,
             // so that userspace can distinguish between distinct device nodes.
             st_rdev: match inode.node_ops {
-                NodeOps::CharacterDevice(_) | NodeOps::BlockDevice(_) => inode.id,
+                NodeOps::CharacterDevice(ref device) => makedev(device.major(), device.minor()),
+                NodeOps::BlockDevice(_) => inode.id,
                 _ => 0,
             },
             st_size: *inode.size.lock() as _,
@@ -302,7 +308,7 @@ pub fn fstat(fd: i32, statbuf: VirtAddr) -> EResult<()> {
     } else {
         // Files without INodes need a fake stat.
         let ops_any = file.ops.as_ref() as &dyn core::any::Any;
-        let mode = if ops_any.is::<PipeBuffer>() {
+        let mode = if ops_any.is::<PipeFile>() {
             S_IFIFO
         } else if ops_any.is::<Socket>() {
             S_IFSOCK

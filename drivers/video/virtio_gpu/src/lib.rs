@@ -4,10 +4,7 @@ use crate::device::VirtioGpuDevice;
 use virtio::VirtioDevice;
 use zinnia::{
     alloc::sync::Arc,
-    device::{
-        drm::DrmFile,
-        pci::{DeviceView, Driver, PciVariant},
-    },
+    device::pci::{DeviceView, Driver, PciVariant},
     error, log,
     posix::errno::{EResult, Errno},
     util::mutex::spin::SpinMutex,
@@ -52,13 +49,10 @@ fn probe(_: &PciVariant, view: DeviceView<'static>) -> EResult<()> {
         SpinMutex::new(cursor_queue),
     )?);
 
-    // Create DRM file handle
-    let drm_file = DrmFile::new(gpu_device.clone());
-
     // Initialize DRM objects (CRTCs, encoders, connectors)
-    gpu_device.initialize_drm_objects(&drm_file)?;
+    gpu_device.initialize_drm_objects()?;
 
-    zinnia::device::drm::register(drm_file)?;
+    zinnia::device::drm::register(gpu_device)?;
 
     Ok(())
 }

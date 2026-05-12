@@ -1,6 +1,6 @@
 use super::fs::SuperBlock;
 use crate::{
-    device::{block::BlockDevice, net::Socket},
+    device::{Device, block::BlockDevice, net::Socket},
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, dirent::dirent, off_t, stat::*, time::timespec},
@@ -110,7 +110,9 @@ impl INode {
             NodeOps::SymbolicLink(x) => x.clone(),
             NodeOps::FIFO(x) => x.clone(),
             NodeOps::BlockDevice(x) => x.clone(),
-            NodeOps::CharacterDevice(x) => x.clone(),
+            NodeOps::CharacterDevice(_) => {
+                panic!("character devices must be opened through device::Device")
+            }
             NodeOps::Socket(s) => s.clone(),
         }
     }
@@ -128,13 +130,13 @@ pub enum NodeOps {
     SymbolicLink(Arc<dyn SymlinkOps>),
     FIFO(Arc<dyn FileOps>),
     BlockDevice(Arc<dyn BlockDevice>),
-    CharacterDevice(Arc<dyn FileOps>),
+    CharacterDevice(Arc<dyn Device>),
     Socket(Arc<Socket>),
 }
 
-pub enum Device {
+pub enum MknodTarget {
     BlockDevice(Arc<dyn BlockDevice>),
-    CharacterDevice(Arc<dyn FileOps>),
+    CharacterDevice(Arc<dyn Device>),
     Socket(Arc<Socket>),
 }
 
@@ -218,7 +220,7 @@ pub trait DirectoryOps: FileOps + Any {
         &self,
         self_node: &Arc<INode>,
         mode: Mode,
-        dev: Option<Device>,
+        dev: Option<MknodTarget>,
         identity: &Identity,
     ) -> EResult<Arc<INode>> {
         let _ = (self_node, mode, dev, identity);

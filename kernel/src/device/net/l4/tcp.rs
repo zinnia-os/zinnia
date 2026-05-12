@@ -806,8 +806,10 @@ impl SocketOps for TcpSocket {
         }
         events
     }
+}
 
-    fn release(&self) -> EResult<()> {
+impl Drop for TcpSocket {
+    fn drop(&mut self) {
         let (local, peer, remove_port, send_fin, close_ref) = {
             let mut inner = self.inner.lock();
             let remove_port = inner.port_registered.then_some(inner.local.port);
@@ -845,7 +847,6 @@ impl SocketOps for TcpSocket {
         self.rd_event.wake_all();
         self.wr_event.wake_all();
         self.accept_event.wake_all();
-        Ok(())
     }
 }
 

@@ -416,7 +416,7 @@ impl VirtioGpuDevice {
         Ok(())
     }
 
-    pub fn initialize_drm_objects(&self, _file: &DrmFile) -> EResult<()> {
+    pub fn initialize_drm_objects(&self) -> EResult<()> {
         let scanouts = self.scanouts.lock();
 
         // Create one CRTC per scanout

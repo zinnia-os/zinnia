@@ -32,7 +32,7 @@ use crate::{
         cache::LookupFlags,
         file::{FilePosition, MmapFlags, OpenFlags},
         fs::devtmpfs,
-        inode::{Device, Mode, NodeOps},
+        inode::{MknodTarget, Mode, NodeOps},
     },
 };
 use alloc::sync::Arc;
@@ -120,7 +120,7 @@ pub fn mknod(
     cwd: PathNode,
     path: &[u8],
     mode: Mode,
-    device: Option<Device>,
+    device: Option<MknodTarget>,
     identity: &Identity,
 ) -> EResult<()> {
     let path = PathNode::lookup(root.clone(), cwd, path, identity, LookupFlags::MustNotExist)?;
@@ -166,8 +166,10 @@ pub fn mmap(
 pub fn pipe(flags: OpenFlags) -> EResult<(Arc<File>, Arc<File>)> {
     let pipe = Arc::try_new(pipe::PipeBuffer::new())?;
     let status_flags = flags & OpenFlags::NonBlocking;
-    let endpoint1 = File::open_disconnected(pipe.clone(), OpenFlags::Read | status_flags)?;
-    let endpoint2 = File::open_disconnected(pipe, OpenFlags::Write | status_flags)?;
+    let endpoint1_ops = pipe.open_endpoint(OpenFlags::Read | status_flags)?;
+    let endpoint2_ops = pipe.open_endpoint(OpenFlags::Write | status_flags)?;
+    let endpoint1 = File::open_disconnected(endpoint1_ops, OpenFlags::Read | status_flags)?;
+    let endpoint2 = File::open_disconnected(endpoint2_ops, OpenFlags::Write | status_flags)?;
 
     Ok((endpoint1, endpoint2))
 }
