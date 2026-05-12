@@ -121,6 +121,8 @@ impl DirectoryOps for TmpDir {
     }
 
     fn unlink(&self, _node: &Arc<INode>, entry: &PathNode, _identity: &Identity) -> EResult<()> {
+        let parent = entry.lookup_parent()?;
+        parent.entry.children.lock().remove(&entry.entry.name);
         *entry.entry.inode.lock() = EntryState::NotPresent;
         Ok(())
     }

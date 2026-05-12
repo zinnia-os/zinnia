@@ -191,6 +191,7 @@ pub fn get_dir_entries(
         FilePosition::Position(offset) | FilePosition::AtomicPosition(offset) => offset.lock(),
     };
     let mut num_read = 0;
+    let start_offset = *offset;
 
     // Read `.` and `..` entries.
     if *offset == 0 {
@@ -205,7 +206,7 @@ pub fn get_dir_entries(
         num_read += 1;
     }
 
-    if *offset == 1 || num_read == 1 {
+    if (*offset == 1 || num_read == 1) && num_read < buffer.len() {
         buffer[num_read] = dirent {
             d_ino: inode.id,
             d_off: 1,
@@ -219,21 +220,23 @@ pub fn get_dir_entries(
     }
 
     // Read normal dir entries.
-    num_read += match &inode.node_ops {
-        NodeOps::Directory(x) => x.get_dir_entries(
-            &inode,
-            path.entry,
-            (*offset).saturating_sub(2) as off_t,
-            &mut buffer[num_read..],
-            identity,
-        )?,
-        _ => return Err(Errno::ENOTDIR),
-    };
+    if num_read < buffer.len() {
+        num_read += match &inode.node_ops {
+            NodeOps::Directory(x) => x.get_dir_entries(
+                &inode,
+                path.entry,
+                (*offset).saturating_sub(2) as off_t,
+                &mut buffer[num_read..],
+                identity,
+            )?,
+            _ => return Err(Errno::ENOTDIR),
+        };
+    }
 
     *offset += num_read as u64;
 
-    for (i, entry) in buffer.iter_mut().enumerate() {
-        entry.d_off = i as _;
+    for (i, entry) in buffer[..num_read].iter_mut().enumerate() {
+        entry.d_off = (start_offset + i as u64 + 1) as _;
     }
 
     Ok(num_read)
