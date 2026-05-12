@@ -39,59 +39,56 @@ pub fn handler(info: &PageFaultInfo) -> bool {
             .find(|x| faulty_page >= x.start_page && faulty_page < x.end_page)
             .cloned()
     } {
-        // Do copy on write.
         let mut map_flags = mapped.get_flags();
         let wants_cow = map_flags.contains(VmFlags::CopyOnWrite);
-        let mut mapped_obj = mapped.object.clone();
+        let access_allowed = if info.caused_by_write {
+            map_flags.contains(VmFlags::Write)
+        } else if info.caused_by_fetch {
+            map_flags.contains(VmFlags::Exec)
+        } else {
+            map_flags.intersects(VmFlags::Read | VmFlags::Write)
+        };
+
+        if !access_allowed {
+            return signal_or_panic(info);
+        }
+
+        let object_page = (faulty_page - mapped.start_page) + mapped.offset_page;
+        let mapped_obj: Arc<dyn MemoryObject>;
+        let mapped_obj_page;
 
         if wants_cow && info.caused_by_write {
             map_flags &= !VmFlags::CopyOnWrite;
 
-            let num_pages = mapped.end_page - mapped.start_page;
-            let region_len = NonZeroUsize::new(num_pages * page_size).unwrap();
-            let region_addr = (mapped.start_page * page_size).into();
-            let region_offset = (mapped.offset_page * page_size) as _;
+            let new_obj: Arc<dyn MemoryObject> = Arc::new(PagedMemoryObject::new_phys());
+            new_obj.copy(
+                0,
+                mapped.object.as_ref(),
+                object_page * page_size,
+                page_size,
+            );
 
-            if Arc::strong_count(&mapped.object) == 1 {
-                space
-                    .map_object(
-                        mapped.object.clone(),
-                        region_addr,
-                        region_len,
-                        map_flags,
-                        region_offset,
-                    )
-                    .unwrap();
-                mapped_obj = mapped.object.clone();
-            } else {
-                let new_obj: Arc<dyn MemoryObject> = Arc::new(PagedMemoryObject::new_phys());
-
-                // Copy the data from the old mapping into the new private object.
-                new_obj.copy(
-                    mapped.offset_page * page_size,
-                    mapped.object.as_ref(),
-                    mapped.offset_page * page_size,
-                    page_size * num_pages,
-                );
-
-                space
-                    .map_object(
-                        new_obj.clone(),
-                        region_addr,
-                        region_len,
-                        map_flags,
-                        region_offset,
-                    )
-                    .unwrap();
-                mapped_obj = new_obj;
-            }
+            space
+                .map_object(
+                    new_obj.clone(),
+                    (faulty_page * page_size).into(),
+                    NonZeroUsize::new(page_size).unwrap(),
+                    map_flags,
+                    0,
+                )
+                .unwrap();
+            mapped_obj = new_obj;
+            mapped_obj_page = 0;
         } else if wants_cow {
             map_flags &= !VmFlags::Write;
+            mapped_obj = mapped.object.clone();
+            mapped_obj_page = object_page;
+        } else {
+            mapped_obj = mapped.object.clone();
+            mapped_obj_page = object_page;
         }
 
-        if let Some(phys) =
-            mapped_obj.try_get_page((faulty_page - mapped.start_page) + mapped.offset_page)
-        {
+        if let Some(phys) = mapped_obj.try_get_page(mapped_obj_page) {
             // If we get here, the accessed address is valid. Map it in the actual page table and return.
             space
                 .table
@@ -100,6 +97,12 @@ pub fn handler(info: &PageFaultInfo) -> bool {
             return true;
         }
     }
+
+    signal_or_panic(info)
+}
+
+fn signal_or_panic(info: &PageFaultInfo) -> bool {
+    let task = Scheduler::get_current();
 
     // If there is no resolvable mapping here, but we were trying to copy from/to user memory,
     // fault gracefully via the user access region fixup.

@@ -230,7 +230,18 @@ impl PageTable {
     ) -> Result<(), PageTableError> {
         let pte = self.get_pte::<P>(virt, false)?;
 
-        unsafe { *pte = PageTableEntry::new((*pte).address(), flags.as_pte(), 0) };
+        unsafe {
+            *pte = PageTableEntry::new(
+                (*pte).address(),
+                flags.as_pte()
+                    | if self.is_user {
+                        PteFlags::User
+                    } else {
+                        PteFlags::empty()
+                    },
+                0,
+            )
+        };
         crate::arch::virt::flush_tlb(virt);
 
         return Ok(());

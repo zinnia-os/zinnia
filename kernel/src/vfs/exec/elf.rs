@@ -377,6 +377,10 @@ impl ElfFormat {
 
             match phdr.p_type {
                 PT_LOAD => {
+                    if phdr.p_memsz < phdr.p_filesz {
+                        return Err(Errno::ENOEXEC);
+                    }
+
                     let mut prot = VmFlags::empty();
                     if phdr.p_flags & PF_READ != 0 {
                         prot |= VmFlags::Read;
@@ -395,21 +399,42 @@ impl ElfFormat {
                         (phdr.p_filesz as usize + misalign + page_size - 1) & !(page_size - 1);
                     let total_map_size =
                         (phdr.p_memsz as usize + misalign + page_size - 1) & !(page_size - 1);
+                    let full_file_map_size =
+                        align_down(phdr.p_filesz as usize + misalign, page_size);
+                    let partial_file_size = phdr.p_filesz as usize + misalign - full_file_map_size;
+                    if (phdr.p_offset as usize) < misalign {
+                        return Err(Errno::ENOEXEC);
+                    }
+                    let file_map_offset = phdr.p_offset as isize - misalign as isize;
 
-                    // Copy the file data into its own mapping.
-                    file.mmap(
-                        &mut info.space,
-                        (base + phdr.p_vaddr as usize).into(),
-                        NonZeroUsize::new(phdr.p_filesz as usize).unwrap(),
-                        prot,
-                        MmapFlags::Private,
-                        (phdr.p_offset) as _,
-                    )?;
-                    //info.space.map_object(
-                    //    backed.clone(),
-                    //    prot,
-                    //    (phdr.p_offset as usize - misalign) as _,
-                    //)?;
+                    if full_file_map_size > 0 {
+                        file.mmap(
+                            &mut info.space,
+                            map_address.into(),
+                            NonZeroUsize::new(full_file_map_size).unwrap(),
+                            prot,
+                            MmapFlags::Private,
+                            file_map_offset,
+                        )?;
+                    }
+
+                    if partial_file_size > 0 {
+                        let partial_map = Arc::new(PagedMemoryObject::new_phys());
+                        let mut partial_data = vec![0u8; partial_file_size];
+                        file.pread_kernel(
+                            &mut partial_data,
+                            (file_map_offset as u64) + full_file_map_size as u64,
+                        )?;
+                        (partial_map.as_ref() as &dyn MemoryObject).write(&partial_data, 0);
+
+                        info.space.map_object(
+                            partial_map,
+                            (map_address + full_file_map_size).into(),
+                            NonZeroUsize::new(page_size).unwrap(),
+                            prot,
+                            0,
+                        )?;
+                    }
 
                     if total_map_size > backed_map_size {
                         let private_map = Arc::new(PagedMemoryObject::new_phys());

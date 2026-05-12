@@ -297,11 +297,11 @@ impl FileOps for TmpRegular {
         flags: MmapFlags,
         offset: uapi::off_t,
     ) -> EResult<VirtAddr> {
-        let object = if flags.contains(MmapFlags::Private) {
-            self.cache.make_private(len, offset as usize)?
-        } else {
-            self.cache.clone()
-        };
+        let mut map_prot = prot;
+        if flags.contains(MmapFlags::Private) {
+            map_prot |= VmFlags::CopyOnWrite;
+        }
+        let object: Arc<dyn MemoryObject> = self.cache.clone();
 
         let page_size = arch::virt::get_page_size();
         let misalign = addr.value() & (page_size - 1);
@@ -312,7 +312,7 @@ impl FileOps for TmpRegular {
             object,
             map_address,
             NonZeroUsize::new(backed_map_size).unwrap(),
-            prot,
+            map_prot,
             offset - misalign as isize,
         )?;
         Ok(addr)

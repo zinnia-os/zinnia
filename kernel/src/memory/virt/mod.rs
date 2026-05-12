@@ -230,6 +230,7 @@ impl AddressSpace {
                     _ = self.table.unmap_single::<KernelAlloc>(page_addr);
                 }
 
+                let overlap_end = end_page.min(mapping.end_page);
                 let head_pages = start_page.saturating_sub(mapping.start_page);
 
                 let tail_pages = mapping.end_page.saturating_sub(end_page);
@@ -250,7 +251,7 @@ impl AddressSpace {
                     self.mappings.insert(MappedObject {
                         start_page: mapping.end_page - tail_pages,
                         end_page: mapping.end_page,
-                        offset_page: mapping.offset_page + head_pages + (end_page - start_page),
+                        offset_page: mapping.offset_page + (overlap_end - mapping.start_page),
                         object: mapping.object.clone(),
                         flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
                     });
@@ -292,20 +293,26 @@ impl AddressSpace {
 
         // Split any mappings that got shadowed.
         for mapping in overlapping {
+            let new_flags = prot | (mapping.get_flags() & (VmFlags::Shared | VmFlags::CopyOnWrite));
+            let pte_flags = if new_flags.contains(VmFlags::CopyOnWrite) {
+                new_flags & !VmFlags::Write
+            } else {
+                new_flags
+            };
             // If new mapping completely shadows the old mapping.
             if start_page <= mapping.start_page && end_page >= mapping.end_page {
                 self.mappings.remove(&mapping);
+                for p in mapping.start_page..mapping.end_page {
+                    if self.table.is_mapped((p * page_size).into()) {
+                        self.table
+                            .remap_single::<KernelAlloc>((p * page_size).into(), pte_flags)
+                            .map_err(|_| Errno::ENOMEM)?;
+                    }
+                }
                 self.mappings.insert(MappedObject {
-                    flags: AtomicU8::new(prot.bits()),
+                    flags: AtomicU8::new(new_flags.bits()),
                     ..mapping
                 });
-                self.table
-                    .remap_range::<KernelAlloc>(
-                        (mapping.start_page * page_size).into(),
-                        prot,
-                        (mapping.end_page - mapping.start_page) * page_size,
-                    )
-                    .map_err(|_| Errno::ENOMEM)?;
             }
             // If new mapping partially shadows the old mapping.
             else {
@@ -313,13 +320,13 @@ impl AddressSpace {
 
                 let overlap_start = start_page.max(mapping.start_page);
                 let overlap_end = end_page.min(mapping.end_page);
-                self.table
-                    .remap_range::<KernelAlloc>(
-                        (overlap_start * page_size).into(),
-                        prot,
-                        (overlap_end - overlap_start) * page_size,
-                    )
-                    .map_err(|_| Errno::ENOMEM)?;
+                for p in overlap_start..overlap_end {
+                    if self.table.is_mapped((p * page_size).into()) {
+                        self.table
+                            .remap_single::<KernelAlloc>((p * page_size).into(), pte_flags)
+                            .map_err(|_| Errno::ENOMEM)?;
+                    }
+                }
 
                 let head_pages = start_page.saturating_sub(mapping.start_page);
 
@@ -341,7 +348,7 @@ impl AddressSpace {
                     self.mappings.insert(MappedObject {
                         start_page: mapping.end_page - tail_pages,
                         end_page: mapping.end_page,
-                        offset_page: mapping.offset_page + head_pages + (end_page - start_page),
+                        offset_page: mapping.offset_page + (overlap_end - mapping.start_page),
                         object: mapping.object.clone(),
                         flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
                     });
@@ -353,7 +360,7 @@ impl AddressSpace {
                     end_page: overlap_end,
                     offset_page: mapping.offset_page + (overlap_start - mapping.start_page),
                     object: mapping.object.clone(),
-                    flags: AtomicU8::new(prot.bits()),
+                    flags: AtomicU8::new(new_flags.bits()),
                 });
             }
         }
@@ -463,16 +470,23 @@ impl AddressSpace {
             if obj.get_flags().contains(VmFlags::Shared) {
                 result.mappings.insert(obj.clone());
             } else {
-                obj.set_flags(obj.get_flags() | VmFlags::CopyOnWrite);
+                let old_flags = obj.get_flags();
+                let cow_flags = old_flags | VmFlags::CopyOnWrite;
+                obj.set_flags(cow_flags);
 
                 result.mappings.insert(obj.clone());
 
                 // Map the object as read only in order to handle CoW.
-                for p in obj.start_page..obj.end_page {
-                    if self.table.is_mapped((p * page_size).into()) {
-                        self.table
-                            .remap_single::<KernelAlloc>((p * page_size).into(), VmFlags::Read)
-                            .unwrap();
+                if old_flags.contains(VmFlags::Write) {
+                    for p in obj.start_page..obj.end_page {
+                        if self.table.is_mapped((p * page_size).into()) {
+                            self.table
+                                .remap_single::<KernelAlloc>(
+                                    (p * page_size).into(),
+                                    cow_flags & !VmFlags::Write,
+                                )
+                                .unwrap();
+                        }
                     }
                 }
             }
