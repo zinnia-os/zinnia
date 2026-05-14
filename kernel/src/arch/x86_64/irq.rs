@@ -269,14 +269,19 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
         consts::IDT_IPI_PANIC => {
             halt();
         }
-        consts::IDT_IPI_RESCHED => {
-            clock::handle_tick();
-            unsafe { crate::arch::sched::preempt_disable() };
-            let should_reschedule = unsafe { crate::arch::sched::preempt_enable() };
+        consts::IDT_TIMER => {
+            if CpuData::get().id == 0 {
+                clock::handle_tick();
+            }
+            let should_reschedule = CpuData::get().scheduler.tick();
             LAPIC.get().eoi();
             if should_reschedule {
-                CpuData::get().scheduler.reschedule();
+                CpuData::get().scheduler.request_reschedule();
             }
+        }
+        consts::IDT_IPI_RESCHED => {
+            LAPIC.get().eoi();
+            CpuData::get().scheduler.handle_remote_reschedule(from_user);
         }
         // Any other ISR is an IRQ with a dynamic handler.
         _ => {

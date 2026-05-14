@@ -1,8 +1,8 @@
 //! Early memory setup and allocator.
 
 use super::{
-    PhysAddr,
     pmm::{AllocFlags, PageAllocator},
+    PhysAddr,
 };
 use crate::arch::{self};
 use alloc::alloc::AllocError;
@@ -25,7 +25,7 @@ impl PageAllocator for BumpAllocator {
             let mem = PhysAddr(BUMP_CURRENT.fetch_add(bytes, Ordering::Relaxed));
 
             if !flags.contains(AllocFlags::NoZero) {
-                unsafe { (mem.as_hhdm() as *mut u8).write_bytes(0, bytes) };
+                mem.zero_hhdm(bytes);
             }
             return Ok(mem);
         }
@@ -36,6 +36,12 @@ impl PageAllocator for BumpAllocator {
     unsafe fn dealloc(_addr: PhysAddr, _pages: usize) {
         unimplemented!(
             "The bump allocator is not supposed to free anything. Remove this .dealloc()"
+        )
+    }
+
+    unsafe fn dealloc_bytes(_addr: PhysAddr, _bytes: usize) {
+        unimplemented!(
+            "The bump allocator is not supposed to free anything. Remove this .dealloc_bytes()"
         )
     }
 }

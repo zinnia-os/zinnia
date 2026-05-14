@@ -10,7 +10,7 @@ use crate::{
 };
 use core::{
     alloc::{GlobalAlloc, Layout},
-    hint::{likely, unlikely},
+    hint::unlikely,
     mem::size_of,
     ptr::null_mut,
 };
@@ -43,8 +43,10 @@ impl Slab {
         }
     }
 
-    /// Initializes a slab.
-    fn init(&self) {
+    /// Adds one page worth of entries to an empty free list.
+    fn refill(&self, head_slot: &mut VirtAddr) {
+        debug_assert!(head_slot.is_null());
+
         unsafe {
             // Calculate the amount of bytes we need to skip in order to be able to store a reference to the slab.
             let offset = align_up(size_of::<SlabHeader>(), self.ent_size);
@@ -62,27 +64,28 @@ impl Slab {
             // Now save that start to the slab.
             head = (head).byte_add(offset);
 
-            let arr = head;
-            let max = available_size / self.ent_size - 1;
+            let slots = available_size / self.ent_size;
+            debug_assert!(slots > 0);
             let fact = self.ent_size / size_of::<*mut ()>();
 
-            for i in 0..max {
+            let arr = head;
+            for i in 0..slots - 1 {
                 *arr.add(i * fact) = arr.add((i + 1) * fact) as *mut ();
             }
-            *arr.add(max * fact) = null_mut();
+            *arr.add((slots - 1) * fact) = null_mut();
 
-            *self.head.lock() = head.into();
+            *head_slot = head.into();
         }
     }
 
     fn alloc(&self) -> *mut u8 {
-        // Initialize the slab if not done already.
-        if likely(*self.head.lock() == VirtAddr::null()) {
-            self.init();
+        let mut head = self.head.lock();
+        if unlikely(*head == VirtAddr::null()) {
+            self.refill(&mut head);
         }
 
-        let mut head = self.head.lock();
         let old_free = head.value() as *mut *mut ();
+        debug_assert!(!old_free.is_null());
 
         unsafe {
             *head = (*old_free).into();

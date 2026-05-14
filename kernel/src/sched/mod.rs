@@ -20,6 +20,7 @@ const NO_BUCKET: usize = usize::MAX;
 const BASE_SLICE_TICKS: usize = 10;
 const MIN_SLICE_TICKS: usize = 1;
 const AFFINITY_TICKS: usize = 4;
+const WAKE_AFFINE_LOAD_MARGIN: usize = 1;
 const STEAL_THRESHOLD: usize = 2;
 const SLEEP_RUN_MAX: usize = 512;
 
@@ -62,6 +63,7 @@ enum QueueClass {
     Kernel,
     Interactive(usize),
     Timeshare(usize),
+    #[allow(dead_code)]
     Idle,
 }
 
@@ -330,6 +332,13 @@ impl Scheduler {
                 if last_cpu.online.load(Ordering::Acquire)
                     && now.saturating_sub(last_run) <= AFFINITY_TICKS
                 {
+                    if current_cpu.online.load(Ordering::Acquire) && current_cpu.id != last_cpu.id {
+                        let current_load = current_cpu.scheduler.load.load(Ordering::Acquire);
+                        let last_load = last_cpu.scheduler.load.load(Ordering::Acquire);
+                        if current_load <= last_load.saturating_add(WAKE_AFFINE_LOAD_MARGIN) {
+                            return current_cpu;
+                        }
+                    }
                     return last_cpu;
                 }
             }
@@ -527,6 +536,7 @@ impl Scheduler {
                     }
                 } else {
                     *state = State::Waiting;
+                    current.migration_enabled.store(false, Ordering::Release);
                     current
                         .sleep_started_tick
                         .store(SCHED_TICKS.load(Ordering::Acquire), Ordering::Release);
@@ -541,7 +551,12 @@ impl Scheduler {
 
     /// Handles a scheduler timer tick. Returns true if the current CPU should reschedule.
     pub fn tick(&self) -> bool {
-        let tick = SCHED_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
+        let cpu = self.owner_cpu();
+        let tick = if cpu.id == 0 {
+            SCHED_TICKS.fetch_add(1, Ordering::AcqRel) + 1
+        } else {
+            SCHED_TICKS.load(Ordering::Acquire)
+        };
         let pending_reschedule = self.reschedule_pending.load(Ordering::Acquire);
 
         {
@@ -564,6 +579,7 @@ impl Scheduler {
         if slice >= self.slice_ticks() {
             current.sched_slice.store(0, Ordering::Release);
             current.last_run_tick.store(tick, Ordering::Release);
+            self.reschedule_pending.store(true, Ordering::Release);
             return true;
         }
 

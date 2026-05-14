@@ -8,13 +8,7 @@ use crate::{
 };
 use alloc::alloc::AllocError;
 use bitflags::bitflags;
-use core::{
-    hint::unlikely,
-    panic::Location,
-    ptr::{NonNull, null_mut, write_bytes},
-    slice,
-    sync::atomic::{AtomicPtr, Ordering},
-};
+use core::{hint::unlikely, panic::Location};
 
 bitflags! {
     #[derive(Debug)]
@@ -47,10 +41,7 @@ pub trait PageAllocator {
     /// # Safety
     /// To be completely safe, only use this function together with [`PageAllocator::alloc_bytes`].
     /// Safety notes from [`PageAllocator::dealloc`] also apply here.
-    unsafe fn dealloc_bytes(addr: PhysAddr, bytes: usize) {
-        let pages = divide_up(bytes, arch::virt::get_page_size());
-        return unsafe { Self::dealloc(addr, pages) };
-    }
+    unsafe fn dealloc_bytes(addr: PhysAddr, bytes: usize);
 }
 
 // WARNING: Keep this structure as small as possible, every single physical page has one!
@@ -58,29 +49,47 @@ pub trait PageAllocator {
 #[derive(Debug)]
 #[repr(C)]
 pub struct Page {
-    pub next: Option<NonNull<Page>>,
+    pub next: usize,
     pub count: usize,
 }
-
-unsafe impl Send for Page {}
-unsafe impl Sync for Page {}
 
 // If this assert fails, the PFNDB can't properly allocate data.
 static_assert!(0x1000 % size_of::<Page>() == 0);
 
-pub static PAGE_DB: SpinMutex<&'static mut [Page]> = SpinMutex::new(&mut []);
-pub static PAGE_DB_START: AtomicPtr<()> = AtomicPtr::new(null_mut());
+const NO_PAGE: usize = usize::MAX;
 
 struct Pmm {
-    head: Option<NonNull<Page>>,
+    head: usize,
+    pages: &'static mut [Page],
 }
 
-unsafe impl Send for Pmm {}
-unsafe impl Sync for Pmm {}
-
-static PMM: SpinMutex<Pmm> = SpinMutex::new(Pmm { head: None });
+static PMM: SpinMutex<Pmm> = SpinMutex::new(Pmm {
+    head: NO_PAGE,
+    pages: &mut [],
+});
 
 pub struct KernelAlloc;
+impl KernelAlloc {
+    fn dealloc_inner(addr: PhysAddr, pages: usize) {
+        // If we have an empty allocation, there's nothing to free.
+        if pages == 0 {
+            return;
+        }
+
+        let mut head = PMM.lock();
+        let idx = Page::idx_from_addr(addr);
+        let old_head = head.head;
+        let page = head.pages.get_mut(idx).unwrap();
+
+        debug_assert!(page.count == 0);
+        debug_assert!(page.next == NO_PAGE);
+
+        page.count = pages;
+        page.next = old_head;
+        head.head = idx;
+    }
+}
+
 impl PageAllocator for KernelAlloc {
     #[track_caller]
     fn alloc(pages: usize, flags: AllocFlags) -> Result<PhysAddr, AllocError> {
@@ -97,35 +106,37 @@ impl PageAllocator for KernelAlloc {
 
         let mut addr = None;
         let mut it = head.head;
-        let mut prev_it: Option<NonNull<Page>> = None;
-        while let Some(mut x) = it {
-            let page = unsafe { x.as_mut() };
+        let mut prev_it = None;
+        while it != NO_PAGE {
+            let idx = it;
+            let page_addr = Page::addr_from_idx(idx);
+            let page_count = head.pages[idx].count;
+            let next = head.pages[idx].next;
 
-            if page.get_address() + bytes >= limit {
-                prev_it = it;
-                it = page.next;
+            if page_addr + bytes >= limit {
+                prev_it = Some(idx);
+                it = next;
                 continue;
             }
 
-            if unlikely(page.count < pages) {
-                prev_it = it;
-                it = page.next;
+            if unlikely(page_count < pages) {
+                prev_it = Some(idx);
+                it = next;
                 continue;
             }
 
-            if unlikely(page.count == pages) {
-                addr = Some(page.get_address());
-                if let Some(mut prev) = prev_it {
-                    let prev_page = unsafe { prev.as_mut() };
-                    prev_page.next = page.next;
+            if unlikely(page_count == pages) {
+                addr = Some(page_addr);
+                if let Some(prev) = prev_it {
+                    head.pages[prev].next = next;
                 } else {
-                    head.head = page.next;
+                    head.head = next;
                 }
-                page.next = None;
-                page.count = 0;
+                head.pages[idx].next = NO_PAGE;
+                head.pages[idx].count = 0;
             } else {
-                page.count -= pages;
-                addr = Some(page.get_address() + page.count * arch::virt::get_page_size());
+                head.pages[idx].count -= pages;
+                addr = Some(page_addr + head.pages[idx].count * arch::virt::get_page_size());
             }
             break;
         }
@@ -136,7 +147,7 @@ impl PageAllocator for KernelAlloc {
         match addr {
             Some(x) => {
                 if !flags.contains(AllocFlags::NoZero) {
-                    unsafe { write_bytes(addr.unwrap().as_hhdm() as *mut u8, 0, bytes) };
+                    x.zero_hhdm(bytes);
                 }
                 Ok(x)
             }
@@ -149,21 +160,13 @@ impl PageAllocator for KernelAlloc {
 
     #[track_caller]
     unsafe fn dealloc(addr: PhysAddr, pages: usize) {
-        // If we have an empty allocation, there's nothing to free.
-        if pages == 0 {
-            return;
-        }
+        Self::dealloc_inner(addr, pages);
+    }
 
-        let mut head = PMM.lock();
-        let mut page_db = PAGE_DB.lock();
-        let page = page_db.get_mut(Page::idx_from_addr(addr)).unwrap();
-
-        debug_assert!(page.count == 0);
-        debug_assert!(page.next.is_none());
-
-        page.count = pages;
-        page.next = head.head;
-        head.head = NonNull::new(page);
+    #[track_caller]
+    unsafe fn dealloc_bytes(addr: PhysAddr, bytes: usize) {
+        let pages = divide_up(bytes, arch::virt::get_page_size());
+        Self::dealloc_inner(addr, pages);
     }
 }
 
@@ -173,27 +176,23 @@ impl Page {
         address.0 / arch::virt::get_page_size()
     }
 
-    /// Returns the page number of this page.
-    fn get_pn(&self) -> usize {
-        let page: *const Page = self;
-        let page = page as usize;
-        let db = PAGE_DB_START.load(Ordering::Relaxed) as usize;
-        debug_assert!(page >= db, "{page:#018x} >= {db:#018x}");
-        return (page - db) / size_of::<Page>();
-    }
-
     #[inline]
-    fn get_address(&self) -> PhysAddr {
-        (self.get_pn() << arch::virt::get_page_bits()).into()
+    fn addr_from_idx(idx: usize) -> PhysAddr {
+        (idx << arch::virt::get_page_bits()).into()
     }
 }
 
 /// Initializes the phyiscal memory manager.
-pub fn init(memory_map: &[PhysMemory], pages: (*mut Page, usize)) {
-    PAGE_DB_START.store(pages.0 as _, Ordering::Release);
-    *PAGE_DB.lock() = unsafe { slice::from_raw_parts_mut(pages.0, pages.1) };
-
+pub fn init(memory_map: &[PhysMemory], pages: &'static mut [Page]) {
     let mut total_memory = 0;
+    let mut pmm = PMM.lock();
+    pmm.pages = pages;
+    pmm.head = NO_PAGE;
+
+    for page in pmm.pages.iter_mut() {
+        page.next = NO_PAGE;
+        page.count = 0;
+    }
 
     // Register free regions.
     for entry in memory_map.iter() {
@@ -201,12 +200,12 @@ pub fn init(memory_map: &[PhysMemory], pages: (*mut Page, usize)) {
             continue;
         }
 
-        let mut pmm = PMM.lock();
-        let mut page_db = PAGE_DB.lock();
-        let page = page_db.get_mut(Page::idx_from_addr(entry.address)).unwrap();
+        let idx = Page::idx_from_addr(entry.address);
+        let old_head = pmm.head;
+        let page = pmm.pages.get_mut(idx).unwrap();
         page.count = entry.length / arch::virt::get_page_size();
-        page.next = pmm.head;
-        pmm.head = NonNull::new(page);
+        page.next = old_head;
+        pmm.head = idx;
 
         total_memory += entry.length;
     }

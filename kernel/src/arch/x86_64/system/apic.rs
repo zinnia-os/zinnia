@@ -1,7 +1,7 @@
 use crate::{
     arch::x86_64::{
         asm,
-        consts::{self, IDT_IPI_RESCHED},
+        consts::{self, IDT_TIMER},
         irq::IRQ_LINES,
     },
     clock,
@@ -151,7 +151,7 @@ impl LocalApic {
         );
 
         // Finally, run the periodic timer interrupt.
-        lapic.write_reg(lapic_regs::LVT_TR, IDT_IPI_RESCHED as u64 | 0x20000);
+        lapic.write_reg(lapic_regs::LVT_TR, IDT_TIMER as u64 | 0x20000);
         lapic.write_reg(lapic_regs::DCR, 3);
         lapic.write_reg(
             lapic_regs::ICR_TIMER,

@@ -282,3 +282,4 @@ pub const IDT_SX: u8 = 0x1E;
 pub const IDT_IPI_PANIC: u8 = 0xFF;
 pub const IDT_IPI_RESCHED: u8 = 0xFE;
 pub const IDT_IPI_SHOOTDOWN: u8 = 0xFD;
+pub const IDT_TIMER: u8 = 0xFC;

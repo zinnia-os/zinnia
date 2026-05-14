@@ -1,10 +1,11 @@
-use alloc::{sync::Weak, vec::Vec};
+use alloc::sync::Weak;
 
 use crate::{
     posix::errno::{EResult, Errno},
     process::{PROCESS_TABLE, signal},
     uapi,
 };
+use core::ops::Bound;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IntervalTimerState {
@@ -44,54 +45,67 @@ impl IntervalTimerState {
 }
 
 pub fn poll_interval_timers(now: usize) {
-    let processes: Vec<_> = {
-        let table = PROCESS_TABLE.lock();
-        table.values().filter_map(Weak::upgrade).collect()
+    let mut last_pid = None;
+
+    loop {
+        let Some((pid, proc)) = ({
+            let table = PROCESS_TABLE.lock();
+            let mut iter = match last_pid {
+                Some(pid) => table.range((Bound::Excluded(pid), Bound::Unbounded)),
+                None => table.range(..),
+            };
+
+            iter.find_map(|(&pid, proc)| Weak::upgrade(proc).map(|proc| (pid, proc)))
+        }) else {
+            break;
+        };
+        last_pid = Some(pid);
+
+        poll_process_timer(now, &proc);
+    }
+}
+
+fn poll_process_timer(now: usize, proc: &alloc::sync::Arc<crate::process::Process>) {
+    let should_signal = {
+        let mut timer = proc.real_timer.lock();
+        match timer.next_deadline_ns {
+            Some(deadline) if deadline <= now => {
+                if timer.interval_ns == 0 {
+                    timer.next_deadline_ns = None;
+                } else {
+                    let mut next_deadline = deadline;
+                    loop {
+                        let Some(candidate) = next_deadline.checked_add(timer.interval_ns) else {
+                            timer.next_deadline_ns = None;
+                            break;
+                        };
+
+                        if candidate > now {
+                            timer.next_deadline_ns = Some(candidate);
+                            break;
+                        }
+
+                        next_deadline = candidate;
+                    }
+                }
+
+                true
+            }
+            Some(_) | None => false,
+        }
     };
 
-    for proc in processes {
-        let should_signal = {
-            let mut timer = proc.real_timer.lock();
-            match timer.next_deadline_ns {
-                Some(deadline) if deadline <= now => {
-                    if timer.interval_ns == 0 {
-                        timer.next_deadline_ns = None;
-                    } else {
-                        let mut next_deadline = deadline;
-                        loop {
-                            let Some(candidate) = next_deadline.checked_add(timer.interval_ns)
-                            else {
-                                timer.next_deadline_ns = None;
-                                break;
-                            };
+    if !should_signal {
+        return;
+    }
 
-                            if candidate > now {
-                                timer.next_deadline_ns = Some(candidate);
-                                break;
-                            }
+    let thread = {
+        let threads = proc.threads.lock();
+        threads.first().cloned()
+    };
 
-                            next_deadline = candidate;
-                        }
-                    }
-
-                    true
-                }
-                Some(_) | None => false,
-            }
-        };
-
-        if !should_signal {
-            continue;
-        }
-
-        let thread = {
-            let threads = proc.threads.lock();
-            threads.first().cloned()
-        };
-
-        if let Some(thread) = thread {
-            signal::send_signal_to_thread(&thread, signal::Signal::SigAlrm);
-        }
+    if let Some(thread) = thread {
+        signal::send_signal_to_thread(&thread, signal::Signal::SigAlrm);
     }
 }
 

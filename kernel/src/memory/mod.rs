@@ -21,7 +21,7 @@ use crate::{
     arch::{self, virt::get_page_size},
     boot::{BootInfo, PhysMemoryUsage},
     memory::virt::{allocator::VirtualAllocator, mmu::PageTable},
-    util::{align_down, align_up, mutex::spin::SpinMutex},
+    util::{align_down, align_up, divide_up, mutex::spin::SpinMutex},
 };
 use alloc::sync::Arc;
 use bump::BumpAllocator;
@@ -43,6 +43,10 @@ pub struct PhysAddr(usize);
 impl PhysAddr {
     pub fn as_hhdm<T>(self) -> *mut T {
         VirtAddr(self.0 + HHDM_START.get().0).as_ptr()
+    }
+
+    pub(crate) fn zero_hhdm(self, len: usize) {
+        unsafe { ptr::write_bytes(self.as_hhdm::<u8>(), 0, len) };
     }
 }
 
@@ -325,36 +329,28 @@ pub fn MEMORY_STAGE() {
         arch::virt::get_hhdm_base().value()
     );
 
-    // We record metadata for every single page of available memory in a large array.
-    // This array is contiguous in virtual memory, but is sparsely populated.
-    // Only those array entries which represent usable memory are mapped.
+    // We record metadata for every single physical page in a large array.
+    // This array is contiguous in virtual memory so it can be represented as
+    // an ordinary Rust slice by the physical allocator.
 
     // The offset where we start mapping the page array.
     log!("Highest physical address is {:#018x}", highest_phys.0);
     let page_base = arch::virt::get_pfndb_base();
-    let page_length = highest_phys.0 / size_of::<Page>();
     let page_size = get_page_size();
+    let page_length = divide_up(highest_phys.0, page_size);
+    let page_array_len = align_up(page_length * size_of::<Page>(), page_size);
 
-    memory_map
-        .iter()
-        .filter(|x| x.length != 0)
-        .for_each(|entry| {
-            let length = align_up((entry.length / page_size) * size_of::<Page>(), page_size);
-            let virt = align_down(
-                (page_base + entry.address.0 / page_size * size_of::<Page>()).value(),
-                page_size,
-            );
-
-            for page in (0..=length).step_by(page_size) {
-                table
-                    .map_single::<BumpAllocator>(
-                        (virt + page).into(),
-                        BumpAllocator::alloc(1, AllocFlags::empty()).unwrap(),
-                        VmFlags::Read | VmFlags::Write,
-                    )
-                    .unwrap();
-            }
-        });
+    // The physical allocator keeps the PFN database as a Rust slice, which
+    // requires the whole range to be mapped and backed by memory.
+    for page in (0..page_array_len).step_by(page_size) {
+        table
+            .map_single::<BumpAllocator>(
+                (page_base.value() + page).into(),
+                BumpAllocator::alloc(1, AllocFlags::empty()).unwrap(),
+                VmFlags::Read | VmFlags::Write,
+            )
+            .unwrap();
+    }
 
     log!(
         "Initalized page array region at {:#018x}",
@@ -386,7 +382,8 @@ pub fn MEMORY_STAGE() {
     // ----------------------------------------
 
     // Initialize the physical memory allocator.
-    pmm::init(&memory_map, (page_base.as_ptr(), page_length));
+    let page_db = unsafe { core::slice::from_raw_parts_mut(page_base.as_ptr(), page_length) };
+    pmm::init(&memory_map, page_db);
 
     // Save the page table.
     unsafe { virt::KERNEL_PAGE_TABLE.init(Arc::new(table)) };

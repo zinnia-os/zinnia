@@ -322,7 +322,6 @@ fn start_ap(temp_cr3: u32, id: u32) {
 
     unsafe {
         KernelAlloc::dealloc(mem, 1);
-        KernelAlloc::dealloc_bytes(stack_mem, KERNEL_STACK_SIZE);
     }
 }
 

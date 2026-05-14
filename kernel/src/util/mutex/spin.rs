@@ -40,7 +40,7 @@ impl<T: ?Sized> SpinMutex<T> {
     #[track_caller]
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
         let irq_guard = IrqLock::lock();
-        let inner = unsafe { &mut *self.inner.get() };
+        let inner = unsafe { &*self.inner.get() };
         inner.spin.lock();
         SpinMutexGuard {
             parent: self,
@@ -55,16 +55,15 @@ impl<T: ?Sized> SpinMutex<T> {
     /// # Safety
     /// The caller must ensure that the contained data isn't accessed by a different caller.
     pub unsafe fn raw_inner(&self) -> *mut T {
-        let inner = unsafe { &mut *self.inner.get() };
-        &mut inner.data
+        unsafe { &raw mut (*self.inner.get()).data }
     }
 }
 
 impl<T> SpinMutex<T> {
     #[track_caller]
-    pub fn into_inner(self) -> T {
+    pub fn into_inner(mut self) -> T {
         let _irq = IrqLock::lock();
-        let inner = unsafe { &mut *self.inner.get() };
+        let inner = self.inner.get_mut();
         inner.spin.lock();
         self.inner.into_inner().data
     }
@@ -115,7 +114,7 @@ impl<T: ?Sized + Debug> Debug for SpinMutexGuard<'_, T> {
 impl<T: ?Sized> Drop for SpinMutexGuard<'_, T> {
     fn drop(&mut self) {
         unsafe {
-            (*self.parent.inner.get()).spin.unlock();
+            (&*self.parent.inner.get()).spin.unlock();
         }
     }
 }
