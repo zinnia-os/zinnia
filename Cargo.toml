@@ -28,6 +28,6 @@ strip = false
 [profile.release]
 panic = "abort"
 opt-level = 3
-debug = false
+debug = true
 overflow-checks = false
-strip = true
+strip = false
