@@ -4,17 +4,17 @@
 
 use crate::{
     arch, clock,
-    device::pci::{ACCESS, Access, Address},
+    device::pci::{Access, Address, ACCESS},
     memory::{
         free, malloc,
         pmm::KernelAlloc,
-        virt::{VmFlags, mmu::PageTable},
+        virt::{mmu::PageTable, VmFlags},
     },
     util::{self, spin::SpinLock},
 };
 use alloc::{alloc::GlobalAlloc, boxed::Box};
 use core::{
-    ffi::{CStr, c_void},
+    ffi::{c_void, CStr},
     mem::forget,
     ptr::null_mut,
 };
@@ -303,7 +303,7 @@ extern "C" fn uacpi_kernel_uninstall_interrupt_handler(
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_create_spinlock() -> uacpi_handle {
-    let mut b = Box::new(SpinLock::new());
+    let b = Box::new(SpinLock::new());
     return Box::into_raw(b) as uacpi_handle;
 }
 
@@ -315,14 +315,14 @@ extern "C" fn uacpi_kernel_free_spinlock(arg1: uacpi_handle) {
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_lock_spinlock(arg1: uacpi_handle) -> uacpi_cpu_flags {
-    let spin = unsafe { (arg1 as *mut SpinLock).as_mut().unwrap() };
+    let spin = unsafe { (arg1 as *const SpinLock).as_ref().unwrap() };
     spin.lock();
     return 0;
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_unlock_spinlock(arg1: uacpi_handle, arg2: uacpi_cpu_flags) {
-    let spin = unsafe { (arg1 as *mut SpinLock).as_mut().unwrap() };
+    let spin = unsafe { (arg1 as *const SpinLock).as_ref().unwrap() };
     spin.unlock();
 }
 
