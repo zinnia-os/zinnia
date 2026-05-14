@@ -54,8 +54,13 @@ impl Queue {
         let cq_view = unsafe { MmioView::new(cq_addr, cq_size as _) };
 
         // Allocate memory for the submission queue.
-        let sq_addr = KernelAlloc::alloc_bytes(sq_size as _, AllocFlags::empty())
-            .map_err(|_| NvmeError::AllocationFailed)?;
+        let sq_addr = match KernelAlloc::alloc_bytes(sq_size as _, AllocFlags::empty()) {
+            Ok(addr) => addr,
+            Err(_) => {
+                unsafe { KernelAlloc::dealloc_bytes(cq_addr, cq_size) };
+                return Err(NvmeError::AllocationFailed);
+            }
+        };
         let sq_view = unsafe { MmioView::new(sq_addr, sq_size as _) };
 
         // Calculate the offset of the doorbell registers. The stride is already precomputed here.
