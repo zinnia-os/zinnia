@@ -1,8 +1,8 @@
 //! Early memory setup and allocator.
 
 use super::{
-    pmm::{AllocFlags, PageAllocator},
     PhysAddr,
+    pmm::{AllocFlags, PageAllocator},
 };
 use crate::arch::{self};
 use alloc::alloc::AllocError;

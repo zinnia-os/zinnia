@@ -4,17 +4,17 @@
 
 use crate::{
     arch, clock,
-    device::pci::{Access, Address, ACCESS},
+    device::pci::{ACCESS, Access, Address},
     memory::{
         free, malloc,
         pmm::KernelAlloc,
-        virt::{mmu::PageTable, VmFlags},
+        virt::{VmFlags, mmu::PageTable},
     },
     util::{self, spin::SpinLock},
 };
 use alloc::{alloc::GlobalAlloc, boxed::Box};
 use core::{
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     mem::forget,
     ptr::null_mut,
 };
