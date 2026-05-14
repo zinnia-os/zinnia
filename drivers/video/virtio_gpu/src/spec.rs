@@ -123,7 +123,7 @@ pub struct VirtioGpuResourceCreate2d {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct _VirtioGpuResourceUnref {
+pub struct VirtioGpuResourceUnref {
     pub hdr: VirtioGpuCtrlHdr,
     pub resource_id: u32,
     pub padding: u32,

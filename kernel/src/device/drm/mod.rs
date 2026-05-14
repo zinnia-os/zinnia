@@ -7,7 +7,9 @@ use crate::{
     process::Identity,
     uapi::{
         self,
-        drm::{self, DRM_FORMAT_XRGB8888, drm_mode_modeinfo},
+        drm::{
+            self, DRM_FORMAT_XRGB8888, DRM_MODE_CURSOR_BO, DRM_MODE_CURSOR_MOVE, drm_mode_modeinfo,
+        },
     },
     util::{event::Event, mutex::spin::SpinMutex},
     vfs::{
@@ -71,7 +73,7 @@ pub trait Device: Send + Sync {
     fn driver_version(&self) -> (i32, i32, i32);
 
     /// Returns a tuple of (name, description, date).
-    fn driver_info(&self) -> (&[u8], &[u8], &[u8]);
+    fn driver_info(&self) -> (&str, &str, &str);
 
     /// Creates a dumb framebuffer. Also returns the pitch in bytes.
     fn create_dumb(
@@ -82,7 +84,11 @@ pub trait Device: Send + Sync {
         bpp: u32,
     ) -> EResult<(Arc<dyn BufferObject>, u32)> {
         let _ = (file, width, height, bpp);
-        Err(Errno::ENOSYS)
+        warn!(
+            "drm::Device::create_dumb is not implemented for {}!",
+            self.driver_info().0
+        );
+        Err(Errno::ENOTTY)
     }
 
     fn create_fb(
@@ -95,7 +101,11 @@ pub trait Device: Send + Sync {
         pitch: u32,
     ) -> EResult<Arc<Framebuffer>> {
         let _ = (file, buffer, width, height, format, pitch);
-        Err(Errno::ENOSYS)
+        warn!(
+            "drm::Device::create_fb is not implemented for {}!",
+            self.driver_info().0
+        );
+        Err(Errno::ENOTTY)
     }
 
     fn commit(&self, state: &AtomicState);
@@ -105,19 +115,29 @@ pub trait Device: Send + Sync {
     /// `hot_x` and `hot_y` are the hotspot offsets (pixels from top-left of cursor image).
     fn set_cursor(
         &self,
-        _crtc_id: u32,
-        _buffer: Option<Arc<dyn BufferObject>>,
-        _width: u32,
-        _height: u32,
-        _hot_x: i32,
-        _hot_y: i32,
+        crtc_id: u32,
+        buffer: Option<Arc<dyn BufferObject>>,
+        width: u32,
+        height: u32,
+        hot_x: i32,
+        hot_y: i32,
     ) -> EResult<()> {
-        Err(Errno::ENOSYS)
+        let _ = (buffer, crtc_id, width, height, hot_x, hot_y);
+        warn!(
+            "drm::Device::set_cursor is not implemented for {}!",
+            self.driver_info().0
+        );
+        Err(Errno::ENOTTY)
     }
 
     /// Move the cursor to a new position on the given CRTC.
-    fn move_cursor(&self, _crtc_id: u32, _x: i32, _y: i32) -> EResult<()> {
-        Err(Errno::ENOSYS)
+    fn move_cursor(&self, crtc_id: u32, x: i32, y: i32) -> EResult<()> {
+        let _ = (crtc_id, x, y);
+        warn!(
+            "drm::Device::move_cursor is not implemented for {}!",
+            self.driver_info().0
+        );
+        Err(Errno::ENOTTY)
     }
 }
 
@@ -289,19 +309,25 @@ impl FileOps for DrmFile {
 
                 if !val.name.is_null() && val.name_len > 0 {
                     let len = name.len().min(val.name_len);
-                    val.name.write_slice(&name[..len]).ok_or(Errno::EFAULT)?;
+                    val.name
+                        .write_slice(&name.as_bytes()[..len])
+                        .ok_or(Errno::EFAULT)?;
                 }
                 val.name_len = name.len();
 
                 if !val.date.is_null() && val.date_len > 0 {
                     let len = date.len().min(val.date_len);
-                    val.date.write_slice(&date[..len]).ok_or(Errno::EFAULT)?;
+                    val.date
+                        .write_slice(&date.as_bytes()[..len])
+                        .ok_or(Errno::EFAULT)?;
                 }
                 val.date_len = date.len();
 
                 if !val.desc.is_null() && val.desc_len > 0 {
                     let len = desc.len().min(val.desc_len);
-                    val.desc.write_slice(&desc[..len]).ok_or(Errno::EFAULT)?;
+                    val.desc
+                        .write_slice(&desc.as_bytes()[..len])
+                        .ok_or(Errno::EFAULT)?;
                 }
                 val.desc_len = desc.len();
 
@@ -997,22 +1023,20 @@ impl FileOps for DrmFile {
                 let ptr = UserPtr::<drm::drm_mode_cursor>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                const DRM_MODE_CURSOR_BO: u32 = 0x01;
-                const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
-
                 if val.flags & DRM_MODE_CURSOR_BO != 0 {
                     if val.handle == 0 {
                         // Hide cursor
                         self.device.set_cursor(val.crtc_id, None, 0, 0, 0, 0)?;
                     } else {
                         // Set cursor image
-                        let buffers = self.buffers.lock();
-                        let buffer = buffers
-                            .iter()
-                            .find(|b| b.id() == val.handle)
-                            .ok_or(Errno::EINVAL)?
-                            .clone();
-                        drop(buffers);
+                        let buffer = {
+                            let buffers = self.buffers.lock();
+                            buffers
+                                .iter()
+                                .find(|b| b.id() == val.handle)
+                                .ok_or(Errno::EINVAL)?
+                                .clone()
+                        };
                         self.device.set_cursor(
                             val.crtc_id,
                             Some(buffer),
@@ -1031,22 +1055,20 @@ impl FileOps for DrmFile {
                 let ptr = UserPtr::<drm::drm_mode_cursor2>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                const DRM_MODE_CURSOR_BO: u32 = 0x01;
-                const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
-
                 if val.flags & DRM_MODE_CURSOR_BO != 0 {
                     if val.handle == 0 {
                         // Hide cursor
                         self.device.set_cursor(val.crtc_id, None, 0, 0, 0, 0)?;
                     } else {
                         // Set cursor image with hotspot
-                        let buffers = self.buffers.lock();
-                        let buffer = buffers
-                            .iter()
-                            .find(|b| b.id() == val.handle)
-                            .ok_or(Errno::EINVAL)?
-                            .clone();
-                        drop(buffers);
+                        let buffer = {
+                            let buffers = self.buffers.lock();
+                            buffers
+                                .iter()
+                                .find(|b| b.id() == val.handle)
+                                .ok_or(Errno::EINVAL)?
+                                .clone()
+                        };
                         self.device.set_cursor(
                             val.crtc_id,
                             Some(buffer),
@@ -1082,7 +1104,7 @@ impl FileOps for DrmFile {
             }
             x => {
                 error!("Unknown ioctl {x:x}");
-                return Err(Errno::ENOSYS);
+                return Err(Errno::ENOTTY);
             }
         }
         Ok(0)

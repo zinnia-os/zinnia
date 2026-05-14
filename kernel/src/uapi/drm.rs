@@ -418,6 +418,9 @@ pub struct drm_mode_cursor {
     pub handle: u32,
 }
 
+pub const DRM_MODE_CURSOR_BO: u32 = 0x01;
+pub const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct drm_mode_cursor2 {
@@ -433,6 +436,15 @@ pub struct drm_mode_cursor2 {
 }
 
 pub const DRM_PROP_NAME_LEN: usize = 32;
+pub const DRM_MODE_PROP_PENDING: u32 = 1 << 0;
+pub const DRM_MODE_PROP_RANGE: u32 = 1 << 1;
+pub const DRM_MODE_PROP_IMMUTABLE: u32 = 1 << 2;
+pub const DRM_MODE_PROP_ENUM: u32 = 1 << 3;
+pub const DRM_MODE_PROP_BLOB: u32 = 1 << 4;
+pub const DRM_MODE_PROP_BITMASK: u32 = 1 << 5;
+pub const DRM_MODE_PROP_OBJECT: u32 = 1 << 6;
+pub const DRM_MODE_PROP_SIGNED_RANGE: u32 = 1 << 7;
+pub const DRM_MODE_PROP_ATOMIC: u32 = 1 << 31;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

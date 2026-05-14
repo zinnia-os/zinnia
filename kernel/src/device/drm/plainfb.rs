@@ -19,20 +19,9 @@ use crate::{
         DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, DRM_PLANE_TYPE_PRIMARY,
         drm_mode_connector_state, drm_mode_connector_type,
     },
-    util::mutex::spin::SpinMutex,
 };
 use alloc::{sync::Arc, vec};
 use core::any::Any;
-
-struct CursorState {
-    buffer: Option<Arc<dyn BufferObject>>,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    hot_x: i32,
-    hot_y: i32,
-}
 
 struct PlainDevice {
     state: DeviceState,
@@ -42,51 +31,6 @@ struct PlainDevice {
     stride: u32,
     addr: MmioView, // Shared DRM object storage (device-global)
     obj_counter: IdAllocator,
-    cursor: SpinMutex<CursorState>,
-}
-
-impl PlainDevice {
-    /// Alpha-blend cursor pixels onto the MMIO framebuffer.
-    fn composite_cursor(&self, cursor: &CursorState, cbuf: &PlainDumbBuffer) {
-        let fb_w = self.width as i32;
-        let fb_h = self.height as i32;
-        let stride = self.stride as usize;
-        let cw = cursor.width as i32;
-        let ch = cursor.height as i32;
-
-        let dst_base = self.addr.base() as *mut u8;
-        let src_base = cbuf.addr.as_hhdm::<u8>();
-
-        for cy in 0..ch {
-            let py = cursor.y + cy;
-            if py < 0 || py >= fb_h {
-                continue;
-            }
-            for cx in 0..cw {
-                let px = cursor.x + cx;
-                if px < 0 || px >= fb_w {
-                    continue;
-                }
-
-                let src_off = (cy as usize * cursor.width as usize + cx as usize) * 4;
-                let dst_off = py as usize * stride + px as usize * 4;
-
-                unsafe {
-                    let sa = *src_base.add(src_off + 3) as u32;
-                    if sa == 0 {
-                        continue;
-                    }
-                    let inv_a = 255 - sa;
-
-                    for c in 0..3 {
-                        let s = *src_base.add(src_off + c) as u32;
-                        let d = *dst_base.add(dst_off + c) as u32;
-                        *dst_base.add(dst_off + c) = ((s * sa + d * inv_a) / 255) as u8;
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl Device for PlainDevice {
@@ -98,8 +42,8 @@ impl Device for PlainDevice {
         (0, 1, 0)
     }
 
-    fn driver_info(&self) -> (&[u8], &[u8], &[u8]) {
-        (b"plainfb", b"Plain Framebuffer", b"0")
+    fn driver_info(&self) -> (&str, &str, &str) {
+        ("plainfb", "Plain Framebuffer", "0")
     }
 
     fn create_dumb(
@@ -186,42 +130,8 @@ impl Device for PlainDevice {
                         );
                     }
                 }
-
-                // Composite cursor on top if active
-                let cursor = self.cursor.lock();
-                if let Some(ref cursor_buf) = cursor.buffer {
-                    let cursor_data = cursor_buf.as_ref() as &dyn Any;
-                    if let Some(cbuf) = cursor_data.downcast_ref::<PlainDumbBuffer>() {
-                        self.composite_cursor(&cursor, cbuf);
-                    }
-                }
             }
         }
-    }
-
-    fn set_cursor(
-        &self,
-        _crtc_id: u32,
-        buffer: Option<Arc<dyn BufferObject>>,
-        width: u32,
-        height: u32,
-        hot_x: i32,
-        hot_y: i32,
-    ) -> EResult<()> {
-        let mut cursor = self.cursor.lock();
-        cursor.buffer = buffer;
-        cursor.width = width;
-        cursor.height = height;
-        cursor.hot_x = hot_x;
-        cursor.hot_y = hot_y;
-        Ok(())
-    }
-
-    fn move_cursor(&self, _crtc_id: u32, x: i32, y: i32) -> EResult<()> {
-        let mut cursor = self.cursor.lock();
-        cursor.x = x;
-        cursor.y = y;
-        Ok(())
     }
 }
 
@@ -299,15 +209,6 @@ fn PLAINFB_STAGE() {
         stride: fb.pitch as _,
         addr: unsafe { MmioView::new(fb.base, fb.pitch * fb.height) },
         obj_counter: IdAllocator::new(),
-        cursor: SpinMutex::new(CursorState {
-            buffer: None,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            hot_x: 0,
-            hot_y: 0,
-        }),
     });
 
     // Initialize DRM objects and store them in the device

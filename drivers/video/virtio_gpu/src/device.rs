@@ -241,7 +241,7 @@ impl VirtioGpuDevice {
         ctrl_queue: &SpinMutex<VirtQueue>,
         resource_id: u32,
     ) -> EResult<()> {
-        let cmd = _VirtioGpuResourceUnref {
+        let cmd = VirtioGpuResourceUnref {
             hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_UNREF),
             resource_id,
             padding: 0,
@@ -532,8 +532,8 @@ impl Device for VirtioGpuDevice {
         (1, 0, 0)
     }
 
-    fn driver_info(&self) -> (&[u8], &[u8], &[u8]) {
-        (b"virtio-gpu", b"VirtIO GPU Driver", b"2026")
+    fn driver_info(&self) -> (&str, &str, &str) {
+        ("virtio-gpu", "VirtIO GPU Driver", "2026")
     }
 
     fn create_dumb(
