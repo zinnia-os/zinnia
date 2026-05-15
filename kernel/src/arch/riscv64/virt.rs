@@ -86,6 +86,10 @@ impl PageTableEntry {
         PageFlags::from_bits_truncate(self.inner).contains(PageFlags::Dirty)
     }
 
+    pub fn clear_dirty(&mut self) {
+        self.inner &= !PageFlags::Dirty.bits();
+    }
+
     pub fn address(&self) -> PhysAddr {
         ((self.inner & PPN_MASK) << 2).into()
     }

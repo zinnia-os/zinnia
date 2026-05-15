@@ -92,7 +92,18 @@ pub fn munmap(addr: VirtAddr, size: usize) -> EResult<usize> {
 }
 
 #[wrap_syscall]
-pub fn msync(_addr: VirtAddr, _size: usize, _flags: i32) -> EResult<usize> {
-    // TODO
+pub fn msync(addr: VirtAddr, size: usize, flags: i32) -> EResult<usize> {
+    if flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MS_ASYNC != 0 && flags & MS_SYNC != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = Scheduler::get_current();
+    task.address_space
+        .lock()
+        .sync_dirty_range(addr, NonZeroUsize::new(size).ok_or(Errno::EINVAL)?)?;
+
     Ok(0)
 }

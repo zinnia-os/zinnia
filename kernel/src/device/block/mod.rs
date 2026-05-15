@@ -1,9 +1,10 @@
 pub mod gpt;
+pub mod io;
 pub mod partition;
 
 use crate::device::Device;
 use crate::{
-    memory::{AllocFlags, IovecIter, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
+    memory::{IovecIter, VirtAddr},
     posix::errno::{EResult, Errno},
     process::Identity,
     vfs::{
@@ -14,24 +15,137 @@ use crate::{
     },
 };
 use alloc::{format, sync::Arc};
-use core::slice;
 
-pub trait BlockDevice: FileOps + Device {
+pub use io::{BlockBuffer, BlockCompletion, BlockIo, BlockIter, BlockOp, BlockSegment};
+
+pub trait BlockDevice: Device {
     /// Gets the size of a sector in bytes.
     fn get_lba_size(&self) -> usize;
 
     /// Returns the total number of LBAs on this device.
-    fn lba_count(&self) -> u64 {
-        0
+    fn lba_count(&self) -> u64;
+
+    /// Submits a synchronous block I/O request.
+    fn submit_io(&self, io: &mut BlockIo) -> EResult<BlockCompletion>;
+
+    fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
+        let _ = (file, request, arg);
+        Err(Errno::ENOTTY)
+    }
+}
+
+pub fn read_into(
+    dev: &dyn BlockDevice,
+    buffer: &mut BlockBuffer,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<usize> {
+    let mut io = BlockIo::read(buffer, lba, num_lba, dev.get_lba_size())?;
+    dev.submit_io(&mut io).map(|completion| completion.lbas)
+}
+
+pub fn read_into_at(
+    dev: &dyn BlockDevice,
+    buffer: &mut BlockBuffer,
+    offset: usize,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<usize> {
+    let mut io = BlockIo::read_at(buffer, offset, lba, num_lba, dev.get_lba_size())?;
+    dev.submit_io(&mut io).map(|completion| completion.lbas)
+}
+
+pub fn read_exact_into_at(
+    dev: &dyn BlockDevice,
+    buffer: &mut BlockBuffer,
+    offset: usize,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<()> {
+    let lba_size = dev.get_lba_size();
+    let mut done = 0;
+
+    while done < num_lba {
+        let read = read_into_at(
+            dev,
+            buffer,
+            offset + done * lba_size,
+            num_lba - done,
+            lba + done as u64,
+        )?;
+        if read == 0 {
+            return Err(Errno::EIO);
+        }
+        done += read;
     }
 
-    /// Reads a logical block from from `lba` into the buffer.
-    fn read_lba(&self, buffer: PhysAddr, num_lba: usize, lba: u64) -> EResult<usize>;
+    Ok(())
+}
 
-    /// Writes the buffer to the device starting at `sector_start`.
-    fn write_lba(&self, buffer: PhysAddr, lba: u64) -> EResult<()>;
+pub fn read_exact_into(
+    dev: &dyn BlockDevice,
+    buffer: &mut BlockBuffer,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<()> {
+    read_exact_into_at(dev, buffer, 0, num_lba, lba)
+}
 
-    fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize>;
+pub fn write_from(
+    dev: &dyn BlockDevice,
+    buffer: &BlockBuffer,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<usize> {
+    let mut io = BlockIo::write(buffer, lba, num_lba, dev.get_lba_size())?;
+    dev.submit_io(&mut io).map(|completion| completion.lbas)
+}
+
+pub fn write_from_at(
+    dev: &dyn BlockDevice,
+    buffer: &BlockBuffer,
+    offset: usize,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<usize> {
+    let mut io = BlockIo::write_at(buffer, offset, lba, num_lba, dev.get_lba_size())?;
+    dev.submit_io(&mut io).map(|completion| completion.lbas)
+}
+
+pub fn write_all_from_at(
+    dev: &dyn BlockDevice,
+    buffer: &BlockBuffer,
+    offset: usize,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<()> {
+    let lba_size = dev.get_lba_size();
+    let mut done = 0;
+
+    while done < num_lba {
+        let written = write_from_at(
+            dev,
+            buffer,
+            offset + done * lba_size,
+            num_lba - done,
+            lba + done as u64,
+        )?;
+        if written == 0 {
+            return Err(Errno::EIO);
+        }
+        done += written;
+    }
+
+    Ok(())
+}
+
+pub fn write_all_from(
+    dev: &dyn BlockDevice,
+    buffer: &BlockBuffer,
+    num_lba: usize,
+    lba: u64,
+) -> EResult<()> {
+    write_all_from_at(dev, buffer, 0, num_lba, lba)
 }
 
 #[initgraph::task(
@@ -150,7 +264,7 @@ impl<T: BlockDevice> FileOps for T {
             .ok_or(Errno::ENOMEM)?;
         let tmp_bytes = usize::try_from(tmp_bytes_u64).map_err(|_| Errno::ENOMEM)?;
 
-        let tmp_phys = KernelAlloc::alloc_bytes(tmp_bytes, AllocFlags::empty())?;
+        let mut tmp = BlockBuffer::new(tmp_bytes)?;
         let mut progress = 0;
 
         let result = 'a: loop {
@@ -164,16 +278,15 @@ impl<T: BlockDevice> FileOps for T {
             let mut chunk_lbas = (misalign + remaining).div_ceil(lba_size_u64).max(1);
             chunk_lbas = chunk_lbas.min(max_lbas_per_iter);
 
-            let read_lbas = match self.read_lba(tmp_phys, chunk_lbas as usize, page_index) {
+            let read_lbas = match read_into(self, &mut tmp, chunk_lbas as usize, page_index) {
                 Ok(0) => break 'a Ok(progress as isize),
                 Ok(n) => n as u64,
-                Err(e) if progress == 0 => return Err(e),
+                Err(e) if progress == 0 => break 'a Err(e),
                 Err(_) => break 'a Ok(progress as isize),
             };
 
             let chunk_bytes = read_lbas * lba_size_u64;
-            let chunk_slice =
-                unsafe { slice::from_raw_parts(tmp_phys.as_hhdm(), chunk_bytes as usize) };
+            let chunk_slice = &tmp.as_slice()[..chunk_bytes as usize];
 
             let start = misalign as usize;
             if start >= chunk_slice.len() {
@@ -187,11 +300,11 @@ impl<T: BlockDevice> FileOps for T {
             }
 
             buffer.set_offset(progress as _);
-            buffer.copy_from_slice(&chunk_slice[start..][..copy_len])?;
+            if let Err(err) = buffer.copy_from_slice(&chunk_slice[start..][..copy_len]) {
+                break 'a Err(err);
+            }
             progress += copy_len as u64;
         };
-
-        unsafe { KernelAlloc::dealloc_bytes(tmp_phys, tmp_bytes) };
 
         result
     }
@@ -206,7 +319,7 @@ impl<T: BlockDevice> FileOps for T {
             return Err(Errno::EINVAL);
         }
 
-        let tmp_phys = KernelAlloc::alloc_bytes(sector_size as _, AllocFlags::empty())?;
+        let mut tmp = BlockBuffer::new(sector_size as _)?;
         let mut progress = 0;
 
         let result = 'a: loop {
@@ -218,25 +331,28 @@ impl<T: BlockDevice> FileOps for T {
             let copy_size = (sector_size - misalign).min(buffer.len() as u64 - progress);
 
             // Read the current LBA data.
-            if let Err(e) = self.read_lba(tmp_phys, 1, page_index) {
+            if let Err(e) = read_into(self, &mut tmp, 1, page_index) {
                 if progress == 0 {
-                    return Err(e);
+                    break 'a Err(e);
                 } else {
                     break 'a Ok(progress as isize);
                 }
             }
 
             {
-                let page_slice: &mut [u8] =
-                    unsafe { slice::from_raw_parts_mut(tmp_phys.as_hhdm(), sector_size as _) };
+                let page_slice = tmp.as_mut_slice();
                 buffer.set_offset(progress as _);
-                buffer.copy_to_slice(&mut page_slice[misalign as usize..][..copy_size as usize])?;
+                if let Err(err) =
+                    buffer.copy_to_slice(&mut page_slice[misalign as usize..][..copy_size as usize])
+                {
+                    break 'a Err(err);
+                }
             }
 
             // Write the new LBA data.
-            if let Err(e) = self.write_lba(tmp_phys, page_index) {
+            if let Err(e) = write_from(self, &tmp, 1, page_index) {
                 if progress == 0 {
-                    return Err(e);
+                    break 'a Err(e);
                 } else {
                     break 'a Ok(progress as isize);
                 }
@@ -244,8 +360,6 @@ impl<T: BlockDevice> FileOps for T {
 
             progress += copy_size;
         };
-
-        unsafe { KernelAlloc::dealloc_bytes(tmp_phys, sector_size as usize) };
 
         result
     }

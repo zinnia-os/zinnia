@@ -243,6 +243,11 @@ pub trait FileOps: Sync + Send + Any {
         let _ = (file, space, addr, len, prot, flags, offset);
         Err(Errno::ENODEV)
     }
+
+    fn sync(&self, file: &File, data_only: bool) -> EResult<()> {
+        let _ = (file, data_only);
+        Ok(())
+    }
 }
 
 impl File {
@@ -259,6 +264,21 @@ impl File {
         if amount > 0 {
             *offset = offset.checked_add(amount as u64).ok_or(Errno::EOVERFLOW)?;
         }
+        Ok(())
+    }
+
+    fn sync_after_write(&self, written: isize) -> EResult<()> {
+        if written <= 0 {
+            return Ok(());
+        }
+
+        let flags = *self.flags.lock();
+        if flags.contains(OpenFlags::Sync) {
+            self.sync(false)?;
+        } else if flags.contains(OpenFlags::SyncData) {
+            self.sync(true)?;
+        }
+
         Ok(())
     }
 
@@ -358,6 +378,13 @@ impl File {
         inode.try_access(identity, flags, false)?;
         let file = match &inode.node_ops {
             NodeOps::Regular(x) => {
+                if flags.contains(OpenFlags::Truncate) {
+                    if !flags.contains(OpenFlags::Write) {
+                        return Err(Errno::EINVAL);
+                    }
+                    x.truncate(inode, 0)?;
+                }
+
                 let result = File {
                     path: Some(file_path),
                     ops: x.clone(),
@@ -371,7 +398,7 @@ impl File {
             NodeOps::BlockDevice(x) => {
                 let result = File {
                     path: Some(file_path),
-                    ops: x.clone(),
+                    ops: x.clone().open(flags)?,
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
@@ -448,7 +475,7 @@ impl File {
             return Ok(0);
         }
 
-        match &self.position {
+        let written = match &self.position {
             FilePosition::Stream => self.ops.write(self, buf, 0),
             FilePosition::AtomicPosition(offset) => {
                 let mut offset = offset.lock();
@@ -463,7 +490,10 @@ impl File {
                 *offset.lock() = pos;
                 Ok(written)
             }
-        }
+        }?;
+
+        self.sync_after_write(written)?;
+        Ok(written)
     }
 
     /// Writes a buffer to a file at a specified offset.
@@ -476,7 +506,9 @@ impl File {
             return Err(Errno::ESPIPE);
         }
 
-        self.ops.write(self, buf, offset)
+        let written = self.ops.write(self, buf, offset)?;
+        self.sync_after_write(written)?;
+        Ok(written)
     }
 
     pub fn pwrite_kernel(&self, buf: &[u8], offset: u64) -> EResult<isize> {
@@ -487,6 +519,10 @@ impl File {
 
     pub fn poll(&self, mask: PollFlags) -> EResult<PollFlags> {
         self.ops.poll(self, mask)
+    }
+
+    pub fn sync(&self, data_only: bool) -> EResult<()> {
+        self.ops.sync(self, data_only)
     }
 
     pub fn seek(&self, offset: SeekAnchor) -> EResult<u64> {

@@ -72,7 +72,7 @@ pub struct BlockIo<'a> {
     bytes: usize,
     segments: [BlockSegment; 1],
     iter: BlockIter,
-    _lifetime: PhantomData<&'a ()>,
+    _p: PhantomData<&'a ()>,
 }
 
 impl<'a> BlockIo<'a> {
@@ -179,7 +179,7 @@ impl<'a> BlockIo<'a> {
                 segment_idx: 0,
                 segment_done: 0,
             },
-            _lifetime: PhantomData,
+            _p: PhantomData,
         })
     }
 

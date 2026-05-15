@@ -1,12 +1,8 @@
-use super::BlockDevice;
-use crate::{
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr},
-    posix::errno::{EResult, Errno},
-};
+use super::{BlockBuffer, BlockDevice};
+use crate::posix::errno::{EResult, Errno};
 use alloc::{fmt, string::String, sync::Arc, vec::Vec};
-use core::slice;
 
-const GPT_SIGNATURE: u64 = 0x5452415020494645; // "EFI PART"
+const GPT_SIGNATURE: [u8; 8] = *b"EFI PART";
 
 /// A 128-bit GUID, stored in mixed-endian format as per GPT spec.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,7 +64,7 @@ impl fmt::Debug for Guid {
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 struct GptHeader {
-    signature: u64,
+    signature: [u8; 8],
     revision: u32,
     header_size: u32,
     header_crc32: u32,
@@ -116,14 +112,14 @@ pub fn scan_gpt(device: Arc<dyn BlockDevice>) -> EResult<Vec<GptPartition>> {
 
     // Allocate a buffer large enough for at least one LBA.
     let buf_size = lba_size.max(512);
-    let buf_phys = KernelAlloc::alloc_bytes(buf_size, AllocFlags::empty())?;
+    let mut buf = BlockBuffer::new(buf_size)?;
 
     // Read LBA 1 (GPT header).
-    let result = {
-        device.read_lba(buf_phys, 1, 1)?;
+    {
+        super::read_exact_into(device.as_ref(), &mut buf, 1, 1)?;
 
         let header: GptHeader = unsafe {
-            let ptr = buf_phys.as_hhdm::<u8>();
+            let ptr = buf.as_slice().as_ptr();
             core::ptr::read_unaligned(ptr as *const GptHeader)
         };
 
@@ -145,20 +141,24 @@ pub fn scan_gpt(device: Arc<dyn BlockDevice>) -> EResult<Vec<GptPartition>> {
 
         // Allocate a big enough buffer for all entries.
         let entry_buf_size = total_lbas * lba_size;
-        let entry_buf = KernelAlloc::alloc_bytes(entry_buf_size, AllocFlags::empty())?;
+        let mut entry_buf = BlockBuffer::new(entry_buf_size)?;
 
-        let read_result = {
+        {
             // Read entries in chunks.
             let mut lbas_read = 0;
             while lbas_read < total_lbas {
                 let chunk = (total_lbas - lbas_read).min(64);
-                let offset = PhysAddr::new(entry_buf.value() + lbas_read * lba_size);
-                device.read_lba(offset, chunk, entry_lba + lbas_read as u64)?;
+                super::read_exact_into_at(
+                    device.as_ref(),
+                    &mut entry_buf,
+                    lbas_read * lba_size,
+                    chunk,
+                    entry_lba + lbas_read as u64,
+                )?;
                 lbas_read += chunk;
             }
 
-            let entry_bytes: &[u8] =
-                unsafe { slice::from_raw_parts(entry_buf.as_hhdm(), entry_buf_size) };
+            let entry_bytes = entry_buf.as_slice();
 
             let mut partitions = Vec::new();
 
@@ -188,12 +188,6 @@ pub fn scan_gpt(device: Arc<dyn BlockDevice>) -> EResult<Vec<GptPartition>> {
             }
 
             Ok(partitions)
-        };
-
-        unsafe { KernelAlloc::dealloc_bytes(entry_buf, entry_buf_size) };
-        read_result
-    };
-
-    unsafe { KernelAlloc::dealloc_bytes(buf_phys, buf_size) };
-    result
+        }
+    }
 }

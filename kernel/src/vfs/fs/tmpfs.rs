@@ -252,6 +252,9 @@ impl TmpRegular {
 
 impl RegularOps for TmpRegular {
     fn truncate(&self, node: &INode, length: u64) -> EResult<()> {
+        if length as usize <= node.len() {
+            self.cache.truncate(length as usize);
+        }
         *node.size.lock() = length as usize;
         Ok(())
     }

@@ -189,6 +189,28 @@ pub fn close(fd: i32) -> EResult<usize> {
 }
 
 #[wrap_syscall]
+pub fn fsync(fd: i32) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    let proc_inner = proc.open_files.lock();
+    let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    drop(proc_inner);
+
+    file.sync(false)?;
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn fdatasync(fd: i32) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    let proc_inner = proc.open_files.lock();
+    let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    drop(proc_inner);
+
+    file.sync(true)?;
+    Ok(0)
+}
+
+#[wrap_syscall]
 pub fn ioctl(fd: i32, request: usize, arg: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let proc_inner = proc.open_files.lock();
@@ -1572,6 +1594,10 @@ pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event_ptr: VirtAddr) -> EResult<()
         let open_files = proc.open_files.lock();
         open_files.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
+
+    if Arc::ptr_eq(&epfile, &target) {
+        return Err(Errno::EINVAL);
+    }
 
     match op {
         EPOLL_CTL_ADD => {

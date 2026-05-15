@@ -206,16 +206,9 @@ impl AddressSpace {
         self.allocator.release(addr, len)?;
         self.allocator.reserve(addr, len)?;
 
-        let overlapping = self
-            .mappings
-            .iter()
-            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
-            .cloned()
-            .collect::<Vec<_>>();
-
         // Split any mappings that got shadowed.
-        for mapping in overlapping.iter() {
-            self.mappings.remove(mapping);
+        while let Some(mapping) = self.find_overlapping(start_page, end_page) {
+            self.mappings.remove(&mapping);
             // If new mapping completely shadows the old mapping.
             if start_page <= mapping.start_page && end_page >= mapping.end_page {
                 for p in mapping.start_page..mapping.end_page {
@@ -284,15 +277,9 @@ impl AddressSpace {
         let start_page = addr.value() / page_size;
         let end_page = start_page + divide_up(len.into(), page_size);
 
-        let overlapping = self
-            .mappings
-            .iter()
-            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
-            .cloned()
-            .collect::<Vec<_>>();
-
         // Split any mappings that got shadowed.
-        for mapping in overlapping {
+        let mut cursor = start_page;
+        while let Some(mapping) = self.find_overlapping(cursor, end_page) {
             let new_flags = prot | (mapping.get_flags() & (VmFlags::Shared | VmFlags::CopyOnWrite));
             let pte_flags = if new_flags.contains(VmFlags::CopyOnWrite) {
                 new_flags & !VmFlags::Write
@@ -302,6 +289,7 @@ impl AddressSpace {
             // If new mapping completely shadows the old mapping.
             if start_page <= mapping.start_page && end_page >= mapping.end_page {
                 self.mappings.remove(&mapping);
+                let mapping_end = mapping.end_page;
                 for p in mapping.start_page..mapping.end_page {
                     if self.table.is_mapped((p * page_size).into()) {
                         self.table
@@ -313,6 +301,7 @@ impl AddressSpace {
                     flags: AtomicU8::new(new_flags.bits()),
                     ..mapping
                 });
+                cursor = mapping_end;
             }
             // If new mapping partially shadows the old mapping.
             else {
@@ -320,6 +309,7 @@ impl AddressSpace {
 
                 let overlap_start = start_page.max(mapping.start_page);
                 let overlap_end = end_page.min(mapping.end_page);
+                cursor = overlap_end;
                 for p in overlap_start..overlap_end {
                     if self.table.is_mapped((p * page_size).into()) {
                         self.table
@@ -378,17 +368,12 @@ impl AddressSpace {
             return Err(Errno::EINVAL);
         }
 
+        self.harvest_dirty_range(addr, len)?;
+
         let start_page = addr.value() / page_size;
         let end_page = start_page + divide_up(len.into(), page_size);
 
-        let overlapping = self
-            .mappings
-            .iter()
-            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for mapping in overlapping {
+        while let Some(mapping) = self.find_overlapping(start_page, end_page) {
             self.mappings.remove(&mapping);
 
             let overlap_start = start_page.max(mapping.start_page);
@@ -421,6 +406,98 @@ impl AddressSpace {
         }
 
         self.allocator.release(addr, len)?;
+
+        Ok(())
+    }
+
+    fn find_overlapping(&self, start_page: usize, end_page: usize) -> Option<MappedObject> {
+        self.mappings
+            .iter()
+            .find(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
+            .cloned()
+    }
+
+    pub fn harvest_dirty_range(&self, addr: VirtAddr, len: NonZeroUsize) -> EResult<()> {
+        let end_addr = addr.value().checked_add(len.get()).ok_or(Errno::ENOMEM)?;
+        let page_size = arch::virt::get_page_size();
+        let start_page = addr.value() / page_size;
+        let end_page = divide_up(end_addr, page_size);
+
+        for mapping in self
+            .mappings
+            .iter()
+            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
+        {
+            if !mapping.get_flags().contains(VmFlags::Shared) {
+                continue;
+            }
+
+            let overlap_start = start_page.max(mapping.start_page);
+            let overlap_end = end_page.min(mapping.end_page);
+
+            for page in overlap_start..overlap_end {
+                let page_addr = (page * page_size).into();
+                if self.table.take_dirty(page_addr) {
+                    let object_page = mapping.offset_page + (page - mapping.start_page);
+                    mapping.object.mark_dirty_page(object_page);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn sync_dirty_range(&self, addr: VirtAddr, len: NonZeroUsize) -> EResult<()> {
+        self.harvest_dirty_range(addr, len)?;
+
+        let end_addr = addr.value().checked_add(len.get()).ok_or(Errno::ENOMEM)?;
+        let page_size = arch::virt::get_page_size();
+        let start_page = addr.value() / page_size;
+        let end_page = divide_up(end_addr, page_size);
+        let mut objects = Vec::<Arc<dyn MemoryObject>>::new();
+
+        for mapping in self
+            .mappings
+            .iter()
+            .filter(|mapping| start_page < mapping.end_page && mapping.start_page < end_page)
+        {
+            if !mapping.get_flags().contains(VmFlags::Shared) {
+                continue;
+            }
+
+            if !objects
+                .iter()
+                .any(|object| Arc::ptr_eq(object, &mapping.object))
+            {
+                objects.push(mapping.object.clone());
+            }
+        }
+
+        for object in objects {
+            object.sync()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn harvest_dirty_object(&self, target: &Arc<dyn MemoryObject>) -> EResult<()> {
+        let page_size = arch::virt::get_page_size();
+
+        for mapping in self.mappings.iter() {
+            if !mapping.get_flags().contains(VmFlags::Shared)
+                || !Arc::ptr_eq(&mapping.object, target)
+            {
+                continue;
+            }
+
+            for page in mapping.start_page..mapping.end_page {
+                let page_addr = (page * page_size).into();
+                if self.table.take_dirty(page_addr) {
+                    let object_page = mapping.offset_page + (page - mapping.start_page);
+                    mapping.object.mark_dirty_page(object_page);
+                }
+            }
+        }
 
         Ok(())
     }

@@ -9,9 +9,9 @@ use structs::*;
 use zinnia::{
     alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec},
     core::slice,
-    device::block::BlockDevice,
+    device::block::{self, BlockBuffer, BlockDevice},
     error, log,
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr, UserCStr, UserPtr},
+    memory::{UserCStr, UserPtr},
     posix::errno::{EResult, Errno},
     sched::Scheduler,
     uapi::{limits::PATH_MAX, statvfs::statvfs, time::timespec},
@@ -104,11 +104,11 @@ impl Ext2Super {
         let read_lbas = read_size.div_ceil(lba_size);
         let buf_size = read_lbas * lba_size;
 
-        let buf = KernelAlloc::alloc_bytes(buf_size, AllocFlags::empty())?;
-        let result = (|| -> EResult<Self> {
-            device.read_lba(buf, read_lbas, 0)?;
+        let mut buf = BlockBuffer::new(buf_size)?;
+        {
+            block::read_exact_into(device.as_ref(), &mut buf, read_lbas, 0)?;
 
-            let bytes: &[u8] = unsafe { slice::from_raw_parts(buf.as_hhdm(), buf_size) };
+            let bytes = buf.as_slice();
 
             if bytes.len() < 1024 + size_of::<Ext2SuperBlock>() {
                 return Err(Errno::EINVAL);
@@ -163,12 +163,16 @@ impl Ext2Super {
             let bgdt_lba_count = bgdt_bytes.div_ceil(lba_size);
             let bgdt_buf_size = bgdt_lba_count * lba_size;
 
-            let bgdt_buf = KernelAlloc::alloc_bytes(bgdt_buf_size, AllocFlags::empty())?;
-            let bgdt_result = (|| -> EResult<Vec<Ext2BlockGroupDesc>> {
-                device.read_lba(bgdt_buf, bgdt_lba_count, bgdt_lba_start)?;
+            let mut bgdt_buf = BlockBuffer::new(bgdt_buf_size)?;
+            let bgdt = {
+                block::read_exact_into(
+                    device.as_ref(),
+                    &mut bgdt_buf,
+                    bgdt_lba_count,
+                    bgdt_lba_start,
+                )?;
 
-                let bgdt_bytes: &[u8] =
-                    unsafe { slice::from_raw_parts(bgdt_buf.as_hhdm(), bgdt_buf_size) };
+                let bgdt_bytes = bgdt_buf.as_slice();
 
                 let mut groups = Vec::new();
                 for i in 0..group_count as usize {
@@ -180,11 +184,8 @@ impl Ext2Super {
                     };
                     groups.push(desc);
                 }
-                Ok(groups)
-            })();
-
-            unsafe { KernelAlloc::dealloc_bytes(bgdt_buf, bgdt_buf_size) };
-            let bgdt = bgdt_result?;
+                groups
+            };
 
             Ok(Self {
                 device,
@@ -197,10 +198,7 @@ impl Ext2Super {
                 inode_cache: SpinMutex::new(BTreeMap::new()),
                 raw: SpinMutex::new(raw),
             })
-        })();
-
-        unsafe { KernelAlloc::dealloc_bytes(buf, buf_size) };
-        result
+        }
     }
 
     /// Get or create a cached VFS inode.
@@ -244,18 +242,15 @@ impl Ext2Super {
         let num_lbas = read_bytes.div_ceil(lba_size);
         let buf_size = num_lbas * lba_size;
 
-        let buf = KernelAlloc::alloc_bytes(buf_size, AllocFlags::empty())?;
-        let result = (|| -> EResult<Ext2Inode> {
-            self.device.read_lba(buf, num_lbas, lba)?;
-            let bytes: &[u8] = unsafe { slice::from_raw_parts(buf.as_hhdm(), buf_size) };
+        let mut buf = BlockBuffer::new(buf_size)?;
+        {
+            block::read_exact_into(self.device.as_ref(), &mut buf, num_lbas, lba)?;
+            let bytes = buf.as_slice();
             let raw: Ext2Inode = unsafe {
                 core::ptr::read_unaligned(bytes.as_ptr().add(lba_offset) as *const Ext2Inode)
             };
             Ok(raw)
-        })();
-
-        unsafe { KernelAlloc::dealloc_bytes(buf, buf_size) };
-        result
+        }
     }
 
     /// Write a raw ext2 inode back to disk.
@@ -285,26 +280,19 @@ impl Ext2Super {
         let num_lbas = read_bytes.div_ceil(lba_size);
         let buf_size = num_lbas * lba_size;
 
-        let buf = KernelAlloc::alloc_bytes(buf_size, AllocFlags::empty())?;
-        let result = (|| -> EResult<()> {
-            self.device.read_lba(buf, num_lbas, lba)?;
-            let bytes: &mut [u8] = unsafe { slice::from_raw_parts_mut(buf.as_hhdm(), buf_size) };
+        let mut buf = BlockBuffer::new(buf_size)?;
+        {
+            block::read_exact_into(self.device.as_ref(), &mut buf, num_lbas, lba)?;
+            let bytes = buf.as_mut_slice();
 
             let inode_bytes = unsafe {
                 slice::from_raw_parts(raw as *const Ext2Inode as *const u8, size_of::<Ext2Inode>())
             };
             bytes[lba_offset..lba_offset + size_of::<Ext2Inode>()].copy_from_slice(inode_bytes);
 
-            // Write back all affected LBAs.
-            for i in 0..num_lbas {
-                let write_buf = PhysAddr::new(buf.value() + i * lba_size);
-                self.device.write_lba(write_buf, lba + i as u64)?;
-            }
+            block::write_all_from(self.device.as_ref(), &buf, num_lbas, lba)?;
             Ok(())
-        })();
-
-        unsafe { KernelAlloc::dealloc_bytes(buf, buf_size) };
-        result
+        }
     }
 
     /// Read a block from the filesystem into a caller-provided buffer.
@@ -314,17 +302,14 @@ impl Ext2Super {
         let start_lba = byte_offset / lba_size as u64;
         let num_lbas = self.block_size.div_ceil(lba_size);
 
-        let phys = KernelAlloc::alloc_bytes(num_lbas * lba_size, AllocFlags::empty())?;
-        let result = (|| -> EResult<()> {
-            self.device.read_lba(phys, num_lbas, start_lba)?;
-            let data: &[u8] = unsafe { slice::from_raw_parts(phys.as_hhdm(), num_lbas * lba_size) };
+        let mut block_buf = BlockBuffer::new(num_lbas * lba_size)?;
+        {
+            block::read_exact_into(self.device.as_ref(), &mut block_buf, num_lbas, start_lba)?;
+            let data = block_buf.as_slice();
             let copy_len = buf.len().min(self.block_size);
             buf[..copy_len].copy_from_slice(&data[..copy_len]);
             Ok(())
-        })();
-
-        unsafe { KernelAlloc::dealloc_bytes(phys, num_lbas * lba_size) };
-        result
+        }
     }
 
     /// Write a block to the filesystem from a caller-provided buffer.
@@ -334,24 +319,17 @@ impl Ext2Super {
         let start_lba = byte_offset / lba_size as u64;
         let num_lbas = self.block_size.div_ceil(lba_size);
 
-        let phys = KernelAlloc::alloc_bytes(num_lbas * lba_size, AllocFlags::empty())?;
-        let result = (|| -> EResult<()> {
-            let data: &mut [u8] =
-                unsafe { slice::from_raw_parts_mut(phys.as_hhdm(), num_lbas * lba_size) };
+        let mut block_buf = BlockBuffer::new(num_lbas * lba_size)?;
+        {
+            let data = block_buf.as_mut_slice();
             let copy_len = buf.len().min(self.block_size);
             // Zero the buffer first in case block_size < lba_size * num_lbas.
             data.fill(0);
             data[..copy_len].copy_from_slice(&buf[..copy_len]);
 
-            for i in 0..num_lbas {
-                let write_buf = PhysAddr::new(phys.value() + i * lba_size);
-                self.device.write_lba(write_buf, start_lba + i as u64)?;
-            }
+            block::write_all_from(self.device.as_ref(), &block_buf, num_lbas, start_lba)?;
             Ok(())
-        })();
-
-        unsafe { KernelAlloc::dealloc_bytes(phys, num_lbas * lba_size) };
-        result
+        }
     }
 
     /// Resolve a logical file block number to a physical disk block number.
@@ -683,23 +661,17 @@ impl Ext2Super {
 
         // Read the first 2 LBAs, patch superblock at offset 1024, write back.
         let buf_size = 2048usize.max(lba_size).div_ceil(lba_size) * lba_size;
-        let buf = KernelAlloc::alloc_bytes(buf_size, AllocFlags::empty())?;
-        let result = (|| -> EResult<()> {
+        let mut buf = BlockBuffer::new(buf_size)?;
+        let result = {
             let num_lbas = buf_size / lba_size;
-            self.device.read_lba(buf, num_lbas, 0)?;
+            block::read_exact_into(self.device.as_ref(), &mut buf, num_lbas, 0)?;
 
-            let data: &mut [u8] = unsafe { slice::from_raw_parts_mut(buf.as_hhdm(), buf_size) };
+            let data = buf.as_mut_slice();
             let copy_len = sb_bytes.len().min(data.len() - 1024);
             data[1024..1024 + copy_len].copy_from_slice(&sb_bytes[..copy_len]);
 
-            for i in 0..num_lbas {
-                let w = PhysAddr::new(buf.value() + i * lba_size);
-                self.device.write_lba(w, i as u64)?;
-            }
-            Ok(())
-        })();
-
-        unsafe { KernelAlloc::dealloc_bytes(buf, buf_size) };
+            block::write_all_from(self.device.as_ref(), &buf, num_lbas, 0)
+        };
         drop(raw);
         result?;
 

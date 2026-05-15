@@ -10,6 +10,7 @@ use zinnia::{
     },
     posix::errno::{EResult, Errno},
     process::Identity,
+    sched::Scheduler,
     uapi::{self, dirent::dirent, off_t},
     util::mutex::{Mutex, spin::SpinMutex},
     vfs::{
@@ -115,12 +116,23 @@ impl Pager for Ext2FilePager {
             .sb
             .read_inode(self.ino)
             .map_err(|_| PagerError::IoError)?;
+        let file_size = raw_inode.size() as usize;
+        let file_offset = page_index * page_size;
+        if file_offset >= file_size {
+            return Ok(());
+        }
+
+        let writable = (file_size - file_offset).min(page_size);
         let block_size = self.sb.block_size;
         let blocks_per_page = page_size / block_size;
         let first_logical_block = (page_index * page_size / block_size) as u64;
 
         let mut page_offset = 0;
         for b in 0..blocks_per_page.max(1) {
+            if page_offset >= writable {
+                break;
+            }
+
             let logical_block = first_logical_block + b as u64;
             let disk_block = self
                 .sb
@@ -132,7 +144,7 @@ impl Pager for Ext2FilePager {
                 continue;
             }
 
-            let copy_end = (page_offset + block_size).min(page_size);
+            let copy_end = (page_offset + block_size).min(page_size).min(writable);
             let copy_len = copy_end - page_offset;
 
             if copy_len > 0 {
@@ -185,6 +197,7 @@ impl RegularOps for Ext2Regular {
             raw.i_dir_acl = (new_length >> 32) as u32;
         }
 
+        self.cache.truncate(new_length as usize);
         self.sb.write_inode(self.ino, &raw)?;
         *node.size.lock() = new_length as usize;
         Ok(())
@@ -248,10 +261,17 @@ impl FileOps for Ext2Regular {
         }
         self.sb.write_inode(self.ino, &raw)?;
 
-        // Sync dirty pages to disk.
-        self.cache.sync()?;
-
         Ok(actual as _)
+    }
+
+    fn sync(&self, _file: &File, _data_only: bool) -> EResult<()> {
+        let object: Arc<dyn MemoryObject> = self.cache.clone();
+        Scheduler::get_current()
+            .address_space
+            .lock()
+            .harvest_dirty_object(&object)?;
+        self.cache.sync()?;
+        self.sb.sync_metadata()
     }
 
     fn mmap(

@@ -109,9 +109,8 @@ impl INode {
             NodeOps::Directory(x) => x.clone(),
             NodeOps::SymbolicLink(x) => x.clone(),
             NodeOps::FIFO(x) => x.clone(),
-            NodeOps::BlockDevice(x) => x.clone(),
-            NodeOps::CharacterDevice(_) => {
-                panic!("character devices must be opened through device::Device")
+            NodeOps::BlockDevice(_) | NodeOps::CharacterDevice(_) => {
+                unreachable!("Devices must be opened through device::Device")
             }
             NodeOps::Socket(s) => s.clone(),
         }

@@ -170,6 +170,10 @@ mod api {
         pte.is_dirty()
     }
 
+    fn pte_clear_dirty(pte: &mut PageTableEntry) {
+        pte.clear_dirty();
+    }
+
     /// Returns the contained address pointed to by the PTE.
     fn pte_address(pte: &PageTableEntry) -> PhysAddr {
         pte.address()

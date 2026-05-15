@@ -129,9 +129,16 @@ impl PageTable {
         allocate: bool,
     ) -> Result<*mut PageTableEntry, PageTableError> {
         let head = self.head.lock();
+        self.get_pte_locked::<P>(*head, virt, allocate)
+    }
+
+    fn get_pte_locked<P: PageAllocator>(
+        &self,
+        head: PhysAddr,
+        virt: VirtAddr,
+        allocate: bool,
+    ) -> Result<*mut PageTableEntry, PageTableError> {
         let mut current_head: *mut PageTableEntry = head.as_hhdm();
-        let mut index = 0;
-        let mut do_break = false;
 
         // Traverse the page table (from highest to lowest level).
         for level in (0..self.root_level).rev() {
@@ -142,33 +149,31 @@ impl PageTable {
             let addr_shift = arch::virt::get_page_bits() + (arch::virt::get_level_bits() * level);
 
             // Get the index for this level by masking the relevant address part.
-            index = (virt.0 >> addr_shift) & addr_bits;
+            let index = (virt.0 >> addr_shift) & addr_bits;
+            let pte = unsafe { current_head.add(index) };
 
             // The last level is used to access the actual PTE, so break the loop then.
-            if level == 0 || do_break {
-                break;
+            if level == 0 {
+                return Ok(pte);
             }
 
             unsafe {
-                let pte = current_head.add(index);
-
-                let mut pte_flags = PteFlags::Directory
+                let pte_flags = PteFlags::Directory
                     | if self.is_user {
                         PteFlags::User
                     } else {
                         PteFlags::empty()
                     };
 
-                if (*pte).is_present() {
+                let entry = pte.read_volatile();
+                if entry.is_present() {
                     // If this PTE is a large page, it already contains the final address. Don't continue.
-                    if !(*pte).is_directory(level) {
-                        pte_flags |= PteFlags::Large;
-                        do_break = true;
-                    } else {
-                        // If the PTE is not large, go one level deeper.
-                        current_head = (*pte).address().as_hhdm();
+                    if !entry.is_directory(level) {
+                        return Ok(pte);
                     }
-                    *pte = PageTableEntry::new((*pte).address(), pte_flags, level);
+
+                    // If the PTE is not large, go one level deeper.
+                    current_head = entry.address().as_hhdm();
                 } else {
                     // PTE isn't present, but we have to allocate a new level now.
                     if !allocate {
@@ -193,7 +198,18 @@ impl PageTable {
             }
         }
 
-        Ok(unsafe { current_head.add(index) })
+        unreachable!()
+    }
+
+    fn with_pte<P: PageAllocator, T>(
+        &self,
+        virt: VirtAddr,
+        allocate: bool,
+        f: impl FnOnce(&mut PageTableEntry) -> T,
+    ) -> Result<T, PageTableError> {
+        let head = self.head.lock();
+        let pte = self.get_pte_locked::<P>(*head, virt, allocate)?;
+        Ok(f(unsafe { &mut *pte }))
     }
 
     /// Establishes a new mapping in this page table.
@@ -204,9 +220,7 @@ impl PageTable {
         phys: PhysAddr,
         flags: VmFlags,
     ) -> Result<(), PageTableError> {
-        let pte = self.get_pte::<P>(virt, true)?;
-
-        unsafe {
+        self.with_pte::<P, _>(virt, true, |pte| {
             *pte = PageTableEntry::new(
                 phys,
                 flags.as_pte()
@@ -217,7 +231,7 @@ impl PageTable {
                     },
                 0,
             )
-        };
+        })?;
 
         return Ok(());
     }
@@ -228,11 +242,9 @@ impl PageTable {
         virt: VirtAddr,
         flags: VmFlags,
     ) -> Result<(), PageTableError> {
-        let pte = self.get_pte::<P>(virt, false)?;
-
-        unsafe {
+        self.with_pte::<P, _>(virt, false, |pte| {
             *pte = PageTableEntry::new(
-                (*pte).address(),
+                pte.address(),
                 flags.as_pte()
                     | if self.is_user {
                         PteFlags::User
@@ -241,7 +253,7 @@ impl PageTable {
                     },
                 0,
             )
-        };
+        })?;
         crate::arch::virt::flush_tlb(virt);
 
         return Ok(());
@@ -284,11 +296,37 @@ impl PageTable {
 
     /// Un-maps a page from this page table.
     pub fn unmap_single<P: PageAllocator>(&self, virt: VirtAddr) -> Result<(), PageTableError> {
-        let pte = self.get_pte::<P>(virt, false)?;
+        let head = self.head.lock();
+        let mut current_head: *mut PageTableEntry = head.as_hhdm();
+
+        let mut pte = current_head;
+        for level in (0..self.root_level).rev() {
+            let addr_bits = usize::MAX >> (usize::BITS as usize - arch::virt::get_level_bits());
+            let addr_shift = arch::virt::get_page_bits() + (arch::virt::get_level_bits() * level);
+            let index = (virt.0 >> addr_shift) & addr_bits;
+
+            pte = unsafe { current_head.add(index) };
+            if level == 0 {
+                break;
+            }
+
+            let entry = unsafe { pte.read_volatile() };
+            if !entry.is_present() {
+                return Err(PageTableError::NeedAllocation);
+            }
+
+            if !entry.is_directory(level) {
+                break;
+            }
+
+            current_head = entry.address().as_hhdm();
+        }
+
         unsafe {
             pte.write_volatile(PageTableEntry::empty());
         };
         crate::arch::virt::flush_tlb(virt);
+
         Ok(())
     }
 
@@ -309,12 +347,25 @@ impl PageTable {
 
     /// Checks if the address (may be unaligned) is mapped in this page table.
     pub fn is_mapped(&self, virt: VirtAddr) -> bool {
-        self.get_pte::<KernelAlloc>(virt, false)
-            .map(|x| {
-                let pte = unsafe { x.read_volatile() };
-                pte.is_present()
-            })
+        self.with_pte::<KernelAlloc, _>(virt, false, |pte| pte.is_present())
             .unwrap_or(false)
+    }
+
+    pub fn get_mapping(&self, virt: VirtAddr) -> Result<Option<PhysAddr>, PageTableError> {
+        self.with_pte::<KernelAlloc, _>(virt, false, |pte| pte.is_present().then(|| pte.address()))
+    }
+
+    pub fn take_dirty(&self, virt: VirtAddr) -> bool {
+        self.with_pte::<KernelAlloc, _>(virt, false, |pte| {
+            if !pte.is_present() || !pte.is_dirty() {
+                return false;
+            }
+
+            pte.clear_dirty();
+            crate::arch::virt::flush_tlb(virt);
+            true
+        })
+        .unwrap_or(false)
     }
 }
 
