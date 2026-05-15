@@ -1,4 +1,4 @@
-use super::{BlockCompletion, BlockIo, BlockOp, BlockDevice};
+use super::{BlockCompletion, BlockDevice, BlockIo, BlockOp};
 use crate::{
     device::Device,
     memory::VirtAddr,
