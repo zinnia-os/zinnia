@@ -14,7 +14,7 @@ use zinnia::{
         object::{AtomicState, BufferObject, Connector, Crtc, Encoder, Framebuffer, Plane},
     },
     error, log,
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr, VirtAddr},
+    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr},
     posix::errno::{EResult, Errno},
     uapi::drm::{
         DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, drm_mode_connector_state,
@@ -118,15 +118,21 @@ impl VirtioGpuDevice {
         ctrl_queue: &SpinMutex<VirtQueue>,
         cmd: &T,
     ) -> EResult<R> {
-        let cmd_ptr = cmd as *const T as *const u8;
-        let cmd_phys = VirtAddr::from(cmd_ptr).as_hhdm().ok_or(Errno::EFAULT)?;
+        let page_size = arch::virt::get_page_size();
+        let cmd_size = core::mem::size_of::<T>();
+        let cmd_pages = cmd_size.div_ceil(page_size);
+        let cmd_buffer = PhysPageAllocation::new(cmd_pages)?;
+        let cmd_ptr = cmd_buffer.as_hhdm::<T>();
+        unsafe {
+            core::ptr::write_volatile(cmd_ptr, *cmd);
+        }
 
         // Allocate response buffer
         let resp = PhysPageAllocation::new(1)?;
         let resp_ptr = resp.as_hhdm::<R>();
 
         let buffers = vec![
-            (cmd_phys, core::mem::size_of::<T>(), false),
+            (cmd_buffer.phys(), cmd_size, false),
             (resp.phys(), core::mem::size_of::<R>(), true),
         ];
 
@@ -164,7 +170,7 @@ impl VirtioGpuDevice {
         let resp: VirtioGpuRespDisplayInfo = self.send_command(&cmd)?;
 
         if resp.hdr.type_ != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
-            error!("Failed to get display info");
+            error!("Failed to get display info: {:?}", resp.hdr);
             return Err(Errno::EIO);
         }
 
@@ -493,11 +499,14 @@ impl VirtioGpuDevice {
     }
 
     fn send_cursor_command(&self, cmd: &VirtioGpuUpdateCursor) -> EResult<()> {
-        let cmd_ptr = cmd as *const VirtioGpuUpdateCursor as *const u8;
-        let cmd_phys = VirtAddr::from(cmd_ptr).as_hhdm().ok_or(Errno::EFAULT)?;
+        let cmd_buffer = PhysPageAllocation::new(1)?;
+        let cmd_ptr = cmd_buffer.as_hhdm::<VirtioGpuUpdateCursor>();
+        unsafe {
+            core::ptr::write_volatile(cmd_ptr, *cmd);
+        }
 
         let buffers = vec![(
-            cmd_phys,
+            cmd_buffer.phys(),
             core::mem::size_of::<VirtioGpuUpdateCursor>(),
             false,
         )];

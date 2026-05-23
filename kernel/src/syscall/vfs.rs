@@ -708,7 +708,7 @@ pub fn ppoll(
     // Register as a waiter on every fd that provides a poll event before the
     // first poll pass so we don't miss a wake-up that happens between the poll
     // check and going to sleep.
-    let _guards: Vec<_> = if is_nonblocking {
+    let guards: Vec<_> = if is_nonblocking {
         Vec::new()
     } else {
         let mut guards = Vec::new();
@@ -770,17 +770,13 @@ pub fn ppoll(
             return Ok(ready_count);
         }
 
-        // Nothing ready — block until a file signals readiness.
-        // The EventGuards we already hold ensure we'll be woken up.
-        // If no guards were collected (none of the fds have a poll_event),
-        // return immediately to avoid hanging forever.
-        if _guards.is_empty() {
+        if guards.is_empty() {
             let mut fds_out = UserPtr::<pollfd>::new(fds_ptr.addr());
             fds_out.write_slice(&fds).ok_or(Errno::EFAULT)?;
             return Ok(0);
         }
 
-        _guards[0].wait();
+        guards[0].wait();
         if Scheduler::get_current().has_pending_signals() {
             return Err(Errno::EINTR);
         }

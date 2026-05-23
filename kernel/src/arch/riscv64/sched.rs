@@ -1,6 +1,6 @@
 use crate::{
-    memory::{VirtAddr, virt::KERNEL_STACK_SIZE},
-    posix::errno::{EResult, Errno},
+    memory::{VirtAddr, stack::KernelStack},
+    posix::errno::EResult,
     process::{signal::SignalSet, task::Task},
 };
 use core::{arch::naked_asm, mem::offset_of};
@@ -197,16 +197,28 @@ pub fn init_task(
     entry: extern "C" fn(usize, usize),
     arg1: usize,
     arg2: usize,
-    stack_start: VirtAddr,
+    stack: &KernelStack,
     is_user: bool,
 ) -> EResult<()> {
     // Prepare a dummy stack with an entry point function to return to.
     unsafe {
-        let frame = ((stack_start.value() + KERNEL_STACK_SIZE) as *mut TaskFrame).sub(1);
-        (*frame).s0 = entry as u64;
-        (*frame).s1 = arg1 as u64;
-        (*frame).s2 = arg2 as u64;
-        (*frame).ra = task_entry_thunk as *const () as u64;
+        let frame = stack.top().as_ptr::<TaskFrame>().sub(1);
+        frame.write(TaskFrame {
+            ra: task_entry_thunk as *const () as u64,
+            gp: 0,
+            s0: entry as u64,
+            s1: arg1 as u64,
+            s2: arg2 as u64,
+            s3: 0,
+            s4: 0,
+            s5: 0,
+            s6: 0,
+            s7: 0,
+            s8: 0,
+            s9: 0,
+            s10: 0,
+            s11: 0,
+        });
         task.sp = frame as u64;
 
         if is_user {}
@@ -243,8 +255,8 @@ pub fn setup_signal_frame(
     todo!("riscv64 signal frame setup not yet implemented")
 }
 
-pub fn restore_signal_frame(_context: &mut Context) -> EResult<()> {
-    Err(Errno::ENOSYS)
+pub fn restore_signal_frame(_context: &mut Context) {
+    todo!("riscv64 signal frame restore not yet implemented")
 }
 
 pub unsafe fn jump_to_context(context: *mut Context) {

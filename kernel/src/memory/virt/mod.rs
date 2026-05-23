@@ -19,8 +19,6 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-// TODO: Kernel stacks should be mapped, not just on the HHDM. Otherwise we can't check for overflows.
-pub const KERNEL_STACK_SIZE: usize = 0x8000;
 const USER_MMAP_BASE: usize = 0x1_0000_0000;
 
 bitflags! {

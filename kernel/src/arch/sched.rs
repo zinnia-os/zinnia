@@ -1,6 +1,6 @@
 use super::internal;
 use crate::{
-    memory::VirtAddr,
+    memory::{VirtAddr, stack::KernelStack},
     posix::errno::EResult,
     process::{signal::SignalSet, task::Task},
 };
@@ -54,10 +54,10 @@ pub fn init_task(
     entry: extern "C" fn(usize, usize),
     arg1: usize,
     arg2: usize,
-    stack_start: VirtAddr,
+    stack: &KernelStack,
     is_user: bool,
 ) -> EResult<()> {
-    internal::sched::init_task(task, entry, arg1, arg2, stack_start, is_user)
+    internal::sched::init_task(task, entry, arg1, arg2, stack, is_user)
 }
 
 /// Transitions to user mode at a specified IP and SP.

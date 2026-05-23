@@ -241,7 +241,7 @@ impl crate::device::Device for DrmDeviceNode {
 }
 
 impl FileOps for DrmFile {
-    fn read(&self, _file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
+    fn read(&self, file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
         let guard = self.rd_event.guard();
 
         loop {
@@ -267,7 +267,7 @@ impl FileOps for DrmFile {
                 return Ok(copy_len as isize);
             }
 
-            if _file.flags.lock().contains(OpenFlags::NonBlocking) {
+            if file.flags.lock().contains(OpenFlags::NonBlocking) {
                 return Err(Errno::EAGAIN);
             }
 

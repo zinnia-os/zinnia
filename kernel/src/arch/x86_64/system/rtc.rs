@@ -155,13 +155,13 @@ fn RTC_STAGE() {
     match read_unix_ns() {
         Some(ns) => {
             log!(
-                "RTC: wall-clock time captured at {} seconds since the Unix epoch",
+                "Wall-clock time captured at {} seconds since the Unix epoch",
                 ns / 1_000_000_000
             );
             clock::set_realtime_ns(ns);
         }
         None => {
-            log!("RTC: failed to read a sensible time, CLOCK_REALTIME will return 0");
+            log!("Failed to read a sensible time, CLOCK_REALTIME will return 0");
         }
     }
 }

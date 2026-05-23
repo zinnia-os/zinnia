@@ -76,17 +76,17 @@ impl KernelAlloc {
             return;
         }
 
-        let mut head = PMM.lock();
+        let mut pmm = PMM.lock();
         let idx = Page::idx_from_addr(addr);
-        let old_head = head.head;
-        let page = head.pages.get_mut(idx).unwrap();
+        let old_head = pmm.head;
+        let page = pmm.pages.get_mut(idx).unwrap();
 
         debug_assert!(page.count == 0);
         debug_assert!(page.next == NO_PAGE);
 
         page.count = pages;
         page.next = old_head;
-        head.head = idx;
+        pmm.head = idx;
     }
 }
 

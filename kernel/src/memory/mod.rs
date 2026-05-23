@@ -4,6 +4,7 @@ pub mod cache;
 pub mod iovec;
 pub mod pmm;
 pub mod slab;
+pub mod stack;
 pub mod user;
 pub mod view;
 pub mod virt;

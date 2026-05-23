@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     irq::lock::IrqLock,
-    memory::{UserPtr, VirtAddr, virt::KERNEL_STACK_SIZE},
+    memory::{UserPtr, VirtAddr, stack::KernelStack},
     percpu::CpuData,
     posix::errno::EResult,
     process::{
@@ -23,7 +23,6 @@ use core::{
     arch::{asm, naked_asm},
     fmt::Write,
     mem::offset_of,
-    sync::atomic::Ordering,
 };
 
 #[repr(C)]
@@ -157,7 +156,7 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task) -> *mut
         let to_context = to.task_context.lock();
 
         let cpu = ARCH_DATA.get();
-        TSS.get().lock().rsp0 = to.kernel_entry_stack.load(Ordering::Relaxed) as _;
+        TSS.get().lock().rsp0 = to.kernel_stack.top().into();
 
         if from.is_user() {
             cpu.fpu_save.get()(from_context.fpu_region.as_mut_ptr());
@@ -234,17 +233,22 @@ pub(in crate::arch) fn init_task(
     entry: extern "C" fn(usize, usize),
     arg1: usize,
     arg2: usize,
-    stack_start: VirtAddr,
+    stack: &KernelStack,
     is_user: bool,
 ) -> EResult<()> {
     let cpu = ARCH_DATA.get();
     // Prepare a dummy stack with an entry point function to return to.
     unsafe {
-        let frame = ((stack_start.value() + KERNEL_STACK_SIZE) as *mut TaskFrame).sub(1);
-        (*frame).rbx = entry as *const () as u64;
-        (*frame).r12 = arg1 as u64;
-        (*frame).r13 = arg2 as u64;
-        (*frame).rip = task_entry_thunk as *const () as u64;
+        let frame = stack.top().as_ptr::<TaskFrame>().sub(1);
+        frame.write(TaskFrame {
+            rbx: entry as *const () as u64,
+            rbp: 0,
+            r12: arg1 as u64,
+            r13: arg2 as u64,
+            r14: 0,
+            r15: 0,
+            rip: task_entry_thunk as *const () as u64,
+        });
         context.rsp = frame as u64;
 
         if is_user {

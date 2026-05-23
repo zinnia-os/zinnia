@@ -18,7 +18,7 @@ use crate::{
     memory::{
         PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
-        virt::{KERNEL_STACK_SIZE, PteFlags, mmu::PageTable},
+        virt::{PteFlags, mmu::PageTable},
     },
     percpu::{self, CpuData},
     process::{Process, task::Task},
@@ -171,6 +171,7 @@ const TEMP_STACK_OFFSET: usize = offset_of!(InfoData, temp_stack);
 const TEMP_CR3_OFFSET: usize = offset_of!(InfoData, temp_cr3);
 const ENTRY_OFFSET: usize = offset_of!(InfoData, entry);
 const HHDM_OFFSET: usize = offset_of!(InfoData, hhdm_offset);
+const AP_BOOT_STACK_SIZE: usize = 0x8000;
 
 const KERNEL32_DS: usize = offset_of!(Gdt, kernel32_data);
 const KERNEL64_CS: usize = offset_of!(Gdt, kernel64_code);
@@ -251,12 +252,12 @@ fn start_ap(temp_cr3: u32, id: u32) {
         return;
     };
 
-    let Ok(stack_mem) = KernelAlloc::alloc_bytes(KERNEL_STACK_SIZE, AllocFlags::Kernel32) else {
+    let Ok(stack_mem) = KernelAlloc::alloc_bytes(AP_BOOT_STACK_SIZE, AllocFlags::Kernel32) else {
         error!("Failed to allocate a stack for the AP trampoline!");
         return;
     };
 
-    let temp_stack = stack_mem.value() + KERNEL_STACK_SIZE;
+    let temp_stack = stack_mem.value() + AP_BOOT_STACK_SIZE;
 
     // Prepare the AP trampoline.
     let buffer: &mut [u8] =

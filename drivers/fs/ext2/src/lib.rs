@@ -15,7 +15,7 @@ use zinnia::{
     posix::errno::{EResult, Errno},
     sched::Scheduler,
     uapi::{limits::PATH_MAX, statvfs::statvfs, time::timespec},
-    util::mutex::spin::SpinMutex,
+    util::mutex::{Mutex, spin::SpinMutex},
     vfs::{
         cache::{Entry, LookupFlags, PathNode},
         fs::{FileSystem, Mount, MountFlags, SuperBlock},
@@ -70,15 +70,15 @@ impl FileSystem for Ext2Fs {
 /// The in-memory ext2 superblock.
 pub struct Ext2Super {
     pub device: Arc<dyn BlockDevice>,
-    pub raw: SpinMutex<Ext2SuperBlock>,
+    pub raw: Mutex<Ext2SuperBlock>,
     pub block_size: usize,
     pub inodes_per_group: u32,
     pub blocks_per_group: u32,
     pub inode_size: usize,
     pub group_count: u32,
-    pub bgdt: SpinMutex<Vec<Ext2BlockGroupDesc>>,
+    pub bgdt: Mutex<Vec<Ext2BlockGroupDesc>>,
     /// Cache of loaded VFS inodes, keyed by inode number.
-    pub inode_cache: SpinMutex<BTreeMap<u32, Arc<INode>>>,
+    pub inode_cache: Mutex<BTreeMap<u32, Arc<INode>>>,
 }
 
 impl core::fmt::Debug for Ext2Super {
@@ -194,9 +194,9 @@ impl Ext2Super {
                 blocks_per_group: raw.s_blocks_per_group,
                 inode_size,
                 group_count,
-                bgdt: SpinMutex::new(bgdt),
-                inode_cache: SpinMutex::new(BTreeMap::new()),
-                raw: SpinMutex::new(raw),
+                bgdt: Mutex::new(bgdt),
+                inode_cache: Mutex::new(BTreeMap::new()),
+                raw: Mutex::new(raw),
             })
         }
     }
@@ -224,12 +224,14 @@ impl Ext2Super {
         let group = ((ino - 1) / self.inodes_per_group) as usize;
         let index = ((ino - 1) % self.inodes_per_group) as usize;
 
-        let bgdt = self.bgdt.lock();
-        if group >= bgdt.len() {
-            return Err(Errno::EINVAL);
-        }
+        let inode_table_block = {
+            let bgdt = self.bgdt.lock();
+            if group >= bgdt.len() {
+                return Err(Errno::EINVAL);
+            }
+            bgdt[group].bg_inode_table as u64
+        };
 
-        let inode_table_block = bgdt[group].bg_inode_table as u64;
         let byte_offset =
             inode_table_block * self.block_size as u64 + (index * self.inode_size) as u64;
 
@@ -262,12 +264,14 @@ impl Ext2Super {
         let group = ((ino - 1) / self.inodes_per_group) as usize;
         let index = ((ino - 1) % self.inodes_per_group) as usize;
 
-        let bgdt = self.bgdt.lock();
-        if group >= bgdt.len() {
-            return Err(Errno::EINVAL);
-        }
+        let inode_table_block = {
+            let bgdt = self.bgdt.lock();
+            if group >= bgdt.len() {
+                return Err(Errno::EINVAL);
+            }
+            bgdt[group].bg_inode_table as u64
+        };
 
-        let inode_table_block = bgdt[group].bg_inode_table as u64;
         let byte_offset =
             inode_table_block * self.block_size as u64 + (index * self.inode_size) as u64;
 

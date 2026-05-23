@@ -1,4 +1,5 @@
 use crate::irq::MsiLine;
+use alloc::sync::Arc;
 use core::arch::asm;
 
 pub unsafe fn set_irq_state(value: bool) -> bool {

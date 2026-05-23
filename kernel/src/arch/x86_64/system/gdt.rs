@@ -1,9 +1,8 @@
 use crate::{
     arch::x86_64::consts::{CPL_KERNEL, CPL_USER, MSR_GS_BASE},
-    memory::virt::KERNEL_STACK_SIZE,
-    util::mutex::spin::SpinMutex,
+    memory::stack::KernelStack,
+    util::{mutex::spin::SpinMutex, once::Once},
 };
-use alloc::boxed::Box;
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use core::{arch::asm, mem::offset_of};
@@ -333,17 +332,17 @@ per_cpu! {
     pub static GDT: SpinMutex<Gdt> = SpinMutex::new(Gdt::new());
 
     pub static TSS: SpinMutex<TaskStateSegment> = SpinMutex::new(TaskStateSegment::new());
+
+    static TSS_STACK: Once<KernelStack> = Once::new();
 }
 
 pub fn init() {
     let mut gdt = GDT.get().lock();
     let mut tss = TSS.get().lock();
 
-    // Allocate an initial stack for the TSS.
-    // TODO: Use kernel stack struct.
-    let stack = unsafe { Box::new_zeroed_slice(KERNEL_STACK_SIZE).assume_init() };
-    let val = Box::leak(stack).as_mut_ptr() as *mut u8 as u64 + KERNEL_STACK_SIZE as u64;
-    tss.rsp0 = val;
+    let stack = KernelStack::new().expect("Failed to allocate TSS stack");
+    unsafe { TSS_STACK.get().init(stack) };
+    tss.rsp0 = TSS_STACK.get().get().top().into();
 
     *gdt = BASE_GDT;
     gdt.tss.set_base(unsafe { TSS.get().raw_inner() } as u64);

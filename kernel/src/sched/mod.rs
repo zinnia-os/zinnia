@@ -381,7 +381,11 @@ impl Scheduler {
 
     /// Returns the task currently running on this CPU.
     pub fn get_current() -> Arc<Task> {
-        let ptr = CPU_DATA.get().scheduler.current.load(Ordering::Acquire);
+        CPU_DATA.get().scheduler.current()
+    }
+
+    pub fn current(&self) -> Arc<Task> {
+        let ptr = self.current.load(Ordering::Acquire);
         debug_assert!(!ptr.is_null());
 
         // If we don't do this, then the Arc's refcount won't get incremented.
@@ -694,10 +698,8 @@ impl Scheduler {
                     .store(cpu.user_stack.load(Ordering::Acquire), Ordering::Release);
 
                 // Get the kernel and user stack pointers from the new task and write them to the per-CPU data.
-                cpu.kernel_stack.store(
-                    (*to).kernel_entry_stack.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
+                cpu.kernel_stack
+                    .store((*to).kernel_stack.top().value(), Ordering::Release);
                 cpu.user_stack
                     .store((*to).user_stack.load(Ordering::Acquire), Ordering::Release);
             }

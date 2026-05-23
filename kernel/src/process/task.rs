@@ -1,19 +1,14 @@
 use crate::{
     arch::{self},
-    memory::{
-        UserAccessRegion,
-        virt::{AddressSpace, KERNEL_STACK_SIZE},
-    },
+    memory::{UserAccessRegion, stack::KernelStack, virt::AddressSpace},
     posix::errno::EResult,
-    process::Process,
-    process::signal::ThreadSignalState,
+    process::{Process, signal::ThreadSignalState},
+    sched::Scheduler,
     util::mutex::spin::SpinMutex,
 };
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::Arc, task::Wake};
 use core::{
-    alloc::Layout,
     fmt::Debug,
-    panic,
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
 };
@@ -54,9 +49,7 @@ pub struct Task {
     /// The saved context of a task while it is not running.
     pub task_context: SpinMutex<arch::sched::TaskContext>,
     /// Allocation base of the kernel stack for this task.
-    pub kernel_stack: AtomicUsize,
-    /// Stack pointer used when entering the kernel from userspace.
-    pub kernel_entry_stack: AtomicUsize,
+    pub kernel_stack: KernelStack,
     /// The user stack for this task.
     pub user_stack: AtomicUsize,
     /// The amount of time that this task can live on.
@@ -93,11 +86,6 @@ pub struct Task {
     pub load_counted: AtomicBool,
 }
 
-const STACK_LAYOUT: Layout = match Layout::from_size_align(KERNEL_STACK_SIZE, 0x1000) {
-    Ok(x) => x,
-    Err(_) => panic!("Layout error"),
-};
-
 impl Task {
     /// Creates a new task.
     pub fn new(
@@ -126,9 +114,6 @@ impl Task {
         address_space: Arc<SpinMutex<AddressSpace>>,
         is_user: bool,
     ) -> EResult<Self> {
-        let kernel_stack_base = unsafe { alloc::alloc::alloc_zeroed(STACK_LAYOUT) as usize };
-        let kernel_stack = AtomicUsize::new(kernel_stack_base);
-
         let result = Self {
             id: TASK_ID_COUNTER.fetch_add(1, Ordering::Acquire),
             is_user,
@@ -140,8 +125,7 @@ impl Task {
             queued: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             task_context: SpinMutex::new(arch::sched::TaskContext::default()),
-            kernel_stack,
-            kernel_entry_stack: AtomicUsize::new(kernel_stack_base + KERNEL_STACK_SIZE),
+            kernel_stack: KernelStack::new()?,
             user_stack: AtomicUsize::new(0),
             ticks: 0,
             priority: 0,
@@ -166,7 +150,7 @@ impl Task {
                 entry,
                 arg1,
                 arg2,
-                result.kernel_stack.load(Ordering::Relaxed).into(),
+                &result.kernel_stack,
                 is_user,
             )?;
         }
@@ -199,12 +183,9 @@ impl Task {
     }
 }
 
-impl Drop for Task {
-    fn drop(&mut self) {
-        let stack = self.kernel_stack.load(Ordering::Relaxed);
-        if stack != 0 {
-            unsafe { alloc::alloc::dealloc(stack as *mut u8, STACK_LAYOUT) };
-        }
+impl Wake for Task {
+    fn wake(self: Arc<Self>) {
+        Scheduler::wake_task(self);
     }
 }
 
