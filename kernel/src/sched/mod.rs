@@ -10,9 +10,11 @@ use crate::{
 };
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
 use core::{
+    future::Future,
     mem,
     ptr::{addr_eq, null_mut},
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
+    task::{Context, Poll, Waker},
 };
 
 const NO_CPU: u32 = u32::MAX;
@@ -47,6 +49,8 @@ pub struct Scheduler {
     reschedule_pending: AtomicBool,
     load: AtomicUsize,
     run_queue: SpinMutex<RunQueue>,
+    reap_queue: SpinMutex<VecDeque<Arc<Task>>>,
+    reaper_task: AtomicPtr<Task>,
 }
 
 struct RunQueue {
@@ -207,6 +211,8 @@ impl Scheduler {
             reschedule_pending: AtomicBool::new(false),
             load: AtomicUsize::new(0),
             run_queue: SpinMutex::new(RunQueue::new()),
+            reap_queue: SpinMutex::new(VecDeque::new()),
+            reaper_task: AtomicPtr::new(null_mut()),
         };
     }
 
@@ -622,7 +628,7 @@ impl Scheduler {
         self.reschedule_pending.load(Ordering::Acquire)
     }
 
-    fn notify_cpu(cpu: &CpuData, task: &Task) {
+    fn notify_cpu(cpu: &'static CpuData, task: &Task) {
         if !Self::should_preempt_current(cpu, task) {
             return;
         }
@@ -713,8 +719,12 @@ impl Scheduler {
     pub(crate) fn post_switch(previous: *mut Task, irq_guard: IrqGuard) {
         let idle = CPU_DATA.get().scheduler.idle_task.load(Ordering::Acquire);
         if !previous.is_null() && previous != idle {
-            _ = unsafe { Arc::from_raw(previous) };
+            let previous = unsafe { Arc::from_raw(previous) };
+            if Arc::strong_count(&previous) == 1 {
+                CPU_DATA.get().scheduler.queue_reap(previous);
+            }
         }
+
         drop(irq_guard);
     }
 
@@ -733,6 +743,31 @@ impl Scheduler {
         if !old_ptr.is_null() {
             _ = unsafe { Arc::from_raw(old_ptr) }; // Arc is dropped here.
         }
+    }
+
+    pub(crate) fn set_reaper_task(&self, task: Arc<Task>) {
+        let new_ptr = Arc::into_raw(task);
+        let old_ptr = self.reaper_task.swap(new_ptr as *mut _, Ordering::AcqRel);
+        if !old_ptr.is_null() {
+            _ = unsafe { Arc::from_raw(old_ptr) };
+        }
+    }
+
+    fn queue_reap(&self, task: Arc<Task>) {
+        self.reap_queue.lock().push_back(task);
+
+        let reaper = self.reaper();
+        self.add_task(reaper);
+    }
+
+    fn reaper(&self) -> Arc<Task> {
+        let ptr = self.reaper_task.load(Ordering::Acquire);
+        debug_assert!(!ptr.is_null());
+
+        let task = unsafe { Arc::from_raw(ptr) };
+        let result = task.clone();
+        mem::forget(task);
+        result
     }
 
     fn load(&self) -> usize {
@@ -842,6 +877,24 @@ impl Scheduler {
         task.sched_runtime.store(runtime / 2, Ordering::Release);
         task.sched_sleeptime.store(sleeptime / 2, Ordering::Release);
     }
+
+    /// Blocks on an async future.
+    pub fn block_on<T, F: Future<Output = T>>(&self, future: F) -> F::Output {
+        let mut future = core::pin::pin!(future);
+
+        let task = self.current();
+
+        loop {
+            let waker = Waker::from(task.clone());
+            let mut ctx = Context::from_waker(&waker);
+            match future.as_mut().poll(&mut ctx) {
+                Poll::Ready(output) => {
+                    return output;
+                }
+                Poll::Pending => self.do_yield(),
+            }
+        }
+    }
 }
 
 /// Generic task entry point. This is to be called by an implementing [`crate::arch::sched::init_task`].
@@ -876,6 +929,20 @@ pub extern "C" fn dummy_fn(_: usize, _: usize) {
     unreachable!("Tried to actually run a dummy task");
 }
 
+pub extern "C" fn reaper_fn(_: usize, _: usize) {
+    loop {
+        loop {
+            let task = CPU_DATA.get().scheduler.reap_queue.lock().pop_front();
+            let Some(task) = task else {
+                break;
+            };
+            drop(task);
+        }
+
+        CpuData::get().scheduler.do_yield();
+    }
+}
+
 #[initgraph::task(
     name = "generic.scheduler",
     depends = [crate::memory::MEMORY_STAGE, super::process::PROCESS_STAGE],
@@ -888,6 +955,9 @@ pub fn SCHEDULER_STAGE() {
     // Create a new idle task.
     bsp.idle_task
         .store(Arc::into_raw(idle_task) as *mut _, Ordering::Release);
+
+    let reaper_task = Arc::new(Task::new(reaper_fn, 0, 0, Process::get_kernel(), false).unwrap());
+    bsp.set_reaper_task(reaper_task);
 
     // Create a dummy task to drop right after the first reschedule.
     let dummy = Arc::new(Task::new(dummy_fn, 0, 0, Process::get_kernel(), false).unwrap());

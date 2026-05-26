@@ -229,18 +229,26 @@ impl dyn MemoryObject {
 
 impl MemoryObject for PagedMemoryObject {
     fn try_get_page(&self, page_index: usize) -> Option<PhysAddr> {
+        if let Some(page) = self.pages.lock().get(&page_index).copied() {
+            return Some(page);
+        }
+
+        let page = match self.source.try_get_page(page_index) {
+            Ok(x) => x,
+            Err(_) => return None,
+        };
+
         let mut pages = self.pages.lock();
-        match pages.get(&page_index) {
-            // If the page already exists, we can return it.
-            Some(page) => Some(*page),
-            // If it does not, we need to check if it's actually available.
-            None => match self.source.try_get_page(page_index) {
-                Ok(x) => {
-                    pages.insert(page_index, x);
-                    Some(x)
-                }
-                Err(_) => None,
-            },
+        match pages.get(&page_index).copied() {
+            Some(existing) => {
+                drop(pages);
+                unsafe { KernelAlloc::dealloc(page, 1) };
+                Some(existing)
+            }
+            None => {
+                pages.insert(page_index, page);
+                Some(page)
+            }
         }
     }
 

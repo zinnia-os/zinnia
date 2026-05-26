@@ -57,6 +57,8 @@ impl PageTableEntry {
 
         if flags.contains(PteFlags::User) {
             result |= PageFlags::UserMode.bits();
+        } else {
+            result |= PageFlags::Global.bits();
         }
 
         if flags.contains(PteFlags::Directory) {

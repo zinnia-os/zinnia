@@ -4,7 +4,7 @@ use crate::{
     posix::errno::EResult,
     process::{signal::SignalSet, task::Task},
 };
-use core::fmt::Debug;
+use core::{fmt::Debug, mem::MaybeUninit};
 
 pub use internal::sched::Context;
 assert_trait_impl!(TaskContext, Debug);
@@ -58,6 +58,25 @@ pub fn init_task(
     is_user: bool,
 ) -> EResult<()> {
     internal::sched::init_task(task, entry, arg1, arg2, stack, is_user)
+}
+
+/// Executes a function or closure on the provided kernel stack.
+pub fn run_on_stack<F: FnMut(usize) -> !>(stack: &KernelStack, f: F) -> ! {
+    extern "C" fn run_on_stack_entry<F: FnMut(usize) -> !>(previous_sp: usize, arg: usize) -> ! {
+        let f = unsafe { &mut *(arg as *mut F) };
+
+        f(previous_sp)
+    }
+
+    let mut top = stack.top().value();
+    top -= size_of::<F>().next_multiple_of(align_of::<u128>());
+
+    unsafe {
+        let ptr = top as *mut MaybeUninit<F>;
+        (*ptr).write(f);
+    }
+
+    internal::sched::run_on_stack_raw(stack.top().value(), run_on_stack_entry::<F>, top)
 }
 
 /// Transitions to user mode at a specified IP and SP.

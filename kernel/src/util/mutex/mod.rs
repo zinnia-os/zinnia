@@ -85,6 +85,16 @@ unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 
 impl<T: ?Sized> Mutex<T> {
+    /// Returns a pointer to the contained value.
+    ///
+    /// # Safety
+    /// The caller must ensure that the contained data isn't accessed by a different caller.
+    pub unsafe fn raw_inner(&self) -> *mut T {
+        self.data.get()
+    }
+}
+
+impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         if self
             .flag

@@ -179,6 +179,9 @@ impl LocalApic {
         match &mut *self.xapic_regs.lock() {
             Some(x) => unsafe {
                 if reg == lapic_regs::ICR {
+                    while x.read_reg(lapic_regs::ICR).unwrap().value() & (1 << 12) != 0 {
+                        core::hint::spin_loop();
+                    }
                     x.write_reg(lapic_regs::ICR_HI, (value >> 32) as u32)
                         .unwrap();
                     x.write_reg(lapic_regs::ICR, value as u32).unwrap();

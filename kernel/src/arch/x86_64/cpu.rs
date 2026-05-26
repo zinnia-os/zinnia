@@ -69,11 +69,11 @@ pub fn setup_bsp() {
         super::asm::wrmsr(consts::MSR_GS_BASE, &raw const LD_PERCPU_START as u64);
         super::asm::wrmsr(consts::MSR_FS_BASE, 0);
     }
-
-    CpuData::get().present.store(true, Ordering::Relaxed);
 }
 
 pub(super) fn setup_core(context: &'static CpuData) {
+    context.present.store(true, Ordering::Release);
+
     let mut cr0: usize;
     let mut cr4: usize;
 
@@ -193,9 +193,6 @@ pub(super) fn setup_core(context: &'static CpuData) {
     }
 
     LocalApic::init();
-
-    context.present.store(true, Ordering::Release);
-    context.online.store(true, Ordering::Release);
 }
 
 pub static IS_INIT: AtomicBool = AtomicBool::new(false);

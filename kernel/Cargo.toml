@@ -23,6 +23,8 @@ rustc-demangle = { version = "0.1.26" }
 intrusive-collections = { workspace = true }
 paste = "1.0.15"
 num_enum = { workspace = true }
+async-trait = "0.1.89"
+async-channel = { version = "2.5.0", default-features = false }
 
 [features]
 default = ["acpi", "boot_limine"]

@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use alloc::{alloc::AllocError, slice};
-use core::num::NonZeroUsize;
+use core::{num::NonZeroUsize, sync::atomic::Ordering};
 
 /// Represents a virtual address space.
 #[derive(Debug)]
@@ -116,6 +116,11 @@ impl PageTable {
     ///
     /// All parts of the kernel must still be mapped for this call to be safe.
     pub unsafe fn set_active(&self) {
+        if self.is_user {
+            let cpu = crate::percpu::CpuData::get();
+            cpu.active_user_table
+                .store(core::ptr::from_ref(self).cast_mut(), Ordering::Release);
+        }
         unsafe {
             arch::virt::set_page_table(self);
         }

@@ -1,13 +1,20 @@
 use crate::{
     arch::{self},
     memory::{UserAccessRegion, stack::KernelStack, virt::AddressSpace},
+    percpu::CpuData,
     posix::errno::EResult,
     process::{Process, signal::ThreadSignalState},
     sched::Scheduler,
-    util::mutex::spin::SpinMutex,
+    util::mutex::{Mutex, spin::SpinMutex},
 };
-use alloc::{string::String, sync::Arc, task::Wake};
+use alloc::{
+    boxed::Box,
+    string::String,
+    sync::{Arc, Weak},
+    task::Wake,
+};
 use core::{
+    cell::SyncUnsafeCell,
     fmt::Debug,
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
@@ -38,7 +45,7 @@ pub struct Task {
     /// If this task is a user task. `false` forbids this task to ever enter user mode.
     is_user: bool,
     /// The address space this task executes in.
-    pub address_space: Arc<SpinMutex<AddressSpace>>,
+    pub address_space: Arc<Mutex<AddressSpace>>,
     /// The current state of the thread.
     pub state: SpinMutex<State>,
     /// Whether this task is currently present in some scheduler run queue.
@@ -46,8 +53,9 @@ pub struct Task {
     pub queued: AtomicBool,
     /// Set by [`Scheduler::add_task`] when a wakeup arrives while this task is still `Running`.
     pub wake_pending: AtomicBool,
-    /// The saved context of a task while it is not running.
-    pub task_context: SpinMutex<arch::sched::TaskContext>,
+    /// Saved arch context. Touched only by the CPU running this task
+    /// (and by `init_context` before the task is published).
+    pub task_context: SyncUnsafeCell<arch::sched::TaskContext>,
     /// Allocation base of the kernel stack for this task.
     pub kernel_stack: KernelStack,
     /// The user stack for this task.
@@ -111,10 +119,60 @@ impl Task {
         arg1: usize,
         arg2: usize,
         parent: &Arc<Process>,
-        address_space: Arc<SpinMutex<AddressSpace>>,
+        address_space: Arc<Mutex<AddressSpace>>,
         is_user: bool,
     ) -> EResult<Self> {
-        let result = Self {
+        let result = Self::new_uninitialized(parent, address_space, is_user)?;
+        result.init_context(entry, arg1, arg2, is_user)?;
+
+        return Ok(result);
+    }
+
+    /// Creates a new kernel task that runs a Rust closure.
+    pub fn run<F>(f: F) -> EResult<Arc<Self>>
+    where
+        F: FnOnce(Arc<Self>) + Send + 'static,
+    {
+        extern "C" fn task_entry<F: FnOnce(Arc<Task>) + Send + 'static>(f: usize, task: usize) {
+            let task = unsafe { Weak::from_raw(task as *const Task).upgrade().unwrap() };
+            let f = unsafe { Box::from_raw(f as *mut F) };
+
+            f(task);
+        }
+
+        let proc = Process::get_kernel();
+        let result = Arc::try_new(Self::new_uninitialized(
+            &proc,
+            proc.address_space.lock().clone(),
+            false,
+        )?)?;
+        let f = Box::into_raw(Box::try_new(f)?);
+        let task = Weak::into_raw(Arc::downgrade(&result));
+
+        if let Err(error) = result.init_context(task_entry::<F>, f as usize, task as usize, false) {
+            unsafe {
+                drop(Box::from_raw(f));
+                drop(Weak::from_raw(task));
+            }
+            return Err(error);
+        }
+
+        Ok(result)
+    }
+
+    pub fn run_async<F>(f: F) -> EResult<Arc<Self>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        Self::run(move |_| CpuData::get().scheduler.block_on(f))
+    }
+
+    fn new_uninitialized(
+        parent: &Arc<Process>,
+        address_space: Arc<Mutex<AddressSpace>>,
+        is_user: bool,
+    ) -> EResult<Self> {
+        Ok(Self {
             id: TASK_ID_COUNTER.fetch_add(1, Ordering::Acquire),
             is_user,
             process: parent.clone(),
@@ -124,7 +182,7 @@ impl Task {
             state: SpinMutex::new(State::Ready),
             queued: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
-            task_context: SpinMutex::new(arch::sched::TaskContext::default()),
+            task_context: SyncUnsafeCell::new(arch::sched::TaskContext::default()),
             kernel_stack: KernelStack::new()?,
             user_stack: AtomicUsize::new(0),
             ticks: 0,
@@ -141,21 +199,19 @@ impl Task {
             queued_bucket: AtomicUsize::new(usize::MAX),
             migration_enabled: AtomicBool::new(true),
             load_counted: AtomicBool::new(false),
-        };
+        })
+    }
 
-        {
-            let mut task_context = result.task_context.lock();
-            arch::sched::init_task(
-                &mut task_context,
-                entry,
-                arg1,
-                arg2,
-                &result.kernel_stack,
-                is_user,
-            )?;
-        }
-
-        return Ok(result);
+    fn init_context(
+        &self,
+        entry: extern "C" fn(usize, usize),
+        arg1: usize,
+        arg2: usize,
+        is_user: bool,
+    ) -> EResult<()> {
+        // SAFETY: caller has exclusive access; task is not yet published.
+        let task_context = unsafe { &mut *self.task_context.get() };
+        arch::sched::init_task(task_context, entry, arg1, arg2, &self.kernel_stack, is_user)
     }
 
     /// Returns true if this is a user task.

@@ -116,14 +116,11 @@ pub unsafe fn switch(from: *const Task, to: *const Task) -> *mut Task {
         let from = from.as_ref().unwrap();
         let to = to.as_ref().unwrap();
 
-        let mut from_context = from.task_context.lock();
-        let to_context = to.task_context.lock();
+        let from_context = &mut *from.task_context.get();
+        let to_context = &*to.task_context.get();
 
         let old_sp = &raw mut from_context.sp;
         let new_sp = to_context.sp;
-
-        drop(from_context);
-        drop(to_context);
         perform_switch(old_sp, new_sp, previous)
     }
 }
@@ -187,9 +184,21 @@ pub unsafe extern "C" fn perform_switch(
     );
 }
 
-pub unsafe fn remote_reschedule(cpu: u32) {
-    let _ = cpu;
-    todo!()
+#[unsafe(naked)]
+pub(in crate::arch) extern "C" fn run_on_stack_raw(
+    stack_top: usize,
+    f: extern "C" fn(usize, usize) -> !,
+    arg: usize,
+) -> ! {
+    naked_asm!(
+        "mv t0, a1",
+        "mv t1, sp",
+        "mv sp, a0",
+        "mv a0, t1",
+        "mv a1, a2",
+        "jalr t0",
+        "unimp",
+    )
 }
 
 pub fn init_task(
@@ -250,7 +259,9 @@ pub fn setup_signal_frame(
     _handler: usize,
     _signal: u32,
     _mask: SignalSet,
+    _flags: u32,
     _restorer: usize,
+    _restart_context: Option<Context>,
 ) {
     todo!("riscv64 signal frame setup not yet implemented")
 }

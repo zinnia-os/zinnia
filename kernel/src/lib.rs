@@ -11,6 +11,8 @@
 #![feature(const_cmp)]
 #![feature(macro_attr)]
 #![feature(macro_metavar_expr)]
+#![feature(never_type)]
+#![feature(sync_unsafe_cell)]
 // Clippy lints
 #![allow(clippy::needless_return)]
 #![allow(clippy::new_without_default)]
@@ -22,6 +24,8 @@ pub extern crate alloc;
 #[macro_use]
 pub extern crate core;
 
+pub use async_channel;
+pub use async_trait;
 pub use bitflags;
 pub use num_enum;
 pub use num_traits;
@@ -63,7 +67,7 @@ use crate::{
 };
 use alloc::{string::String, sync::Arc};
 use boot::BootInfo;
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Initializes all important kernel structures.
 /// This is invoked by the boot environment.
@@ -73,6 +77,7 @@ pub fn init() -> ! {
         init::run();
     }
 
+    CpuData::get().online.store(true, Ordering::Release);
     CpuData::get().scheduler.do_yield();
     unreachable!("The scheduler got back to zinnia::init?");
 }

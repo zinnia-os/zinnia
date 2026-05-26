@@ -16,7 +16,7 @@ use crate::{
     },
     sched::Scheduler,
     uapi,
-    util::{event::Event, mutex::spin::SpinMutex, once::Once},
+    util::{event::Event, mutex::{Mutex, spin::SpinMutex}, once::Once},
     vfs::{
         self,
         cache::PathNode,
@@ -54,7 +54,7 @@ pub struct Process {
     /// A list of [`Task`]s associated with this process.
     pub threads: SpinMutex<Vec<Arc<Task>>>,
     /// The address space for this process.
-    pub address_space: SpinMutex<Arc<SpinMutex<AddressSpace>>>,
+    pub address_space: SpinMutex<Arc<Mutex<AddressSpace>>>,
     /// The root directory for this process.
     pub root_dir: SpinMutex<PathNode>,
     /// Current working directory.
@@ -130,20 +130,22 @@ impl Process {
 
     fn replace_address_space(
         &self,
-        address_space: Arc<SpinMutex<AddressSpace>>,
-    ) -> Arc<SpinMutex<AddressSpace>> {
+        address_space: Arc<Mutex<AddressSpace>>,
+    ) -> Arc<Mutex<AddressSpace>> {
         mem::replace(&mut *self.address_space.lock(), address_space)
     }
 
     pub fn fork(self: Arc<Self>, context: &Context) -> EResult<(Arc<Self>, Arc<Task>)> {
+        let forked_space = {
+            let parent_space = self.address_space.lock().clone();
+            Arc::new(Mutex::new(parent_space.lock().fork()?))
+        };
         let forked = Arc::new(Self {
             id: PID_COUNTER.fetch_add(1, Ordering::Acquire) as _,
             name: self.name.clone(),
             parent: SpinMutex::new(Some(Arc::downgrade(&self))),
             threads: SpinMutex::new(Vec::new()),
-            address_space: SpinMutex::new(Arc::new(SpinMutex::new(
-                self.address_space.lock().lock().fork()?,
-            ))),
+            address_space: SpinMutex::new(forked_space),
             root_dir: SpinMutex::new(self.root_dir.lock().clone()),
             working_dir: SpinMutex::new(self.working_dir.lock().clone()),
             status: SpinMutex::new(State::Running),
@@ -218,7 +220,7 @@ impl Process {
             name,
             parent: SpinMutex::new(parent.map(|x| Arc::downgrade(&x))),
             threads: SpinMutex::new(Vec::new()),
-            address_space: SpinMutex::new(Arc::new(SpinMutex::new(space))),
+            address_space: SpinMutex::new(Arc::new(Mutex::new(space))),
             status: SpinMutex::new(State::Running),
             children: SpinMutex::new(Vec::new()),
             root_dir: SpinMutex::new(root),
@@ -246,8 +248,8 @@ impl Process {
 
     /// Replaces a process with a new executable image, given some arguments and an environment.
     /// The given file must be opened with ReadOnly and Executable.
-    /// Any existing threads of the current process are destroyed upon a successful execve.
-    /// This also means that a successful execve will never return.
+    /// Any existing threads of this process are destroyed upon a successful execve.
+    /// If this is the current process, a successful execve will never return.
     pub fn fexecve(
         self: Arc<Self>,
         file: Arc<File>,
@@ -255,6 +257,10 @@ impl Process {
         argv: Vec<Vec<u8>>,
         envp: Vec<Vec<u8>>,
     ) -> EResult<()> {
+        let current = Scheduler::get_current();
+        let is_current_process = Arc::ptr_eq(&current.get_process(), &self);
+        let old_threads;
+
         {
             let mut info = ExecInfo {
                 executable: file.clone(),
@@ -267,13 +273,19 @@ impl Process {
 
             let format = vfs::exec::identify(&file).ok_or(Errno::ENOEXEC)?;
             let mut init_task = format.load(&self, &mut info)?;
-            let new_address_space = Arc::new(SpinMutex::new(info.space));
+            let new_address_space = Arc::new(Mutex::new(info.space));
             init_task.address_space = new_address_space.clone();
             let init = Arc::try_new(init_task)?;
 
             // If we get here, then the loading of the executable was successful.
             let mut threads = self.threads.lock();
-            threads.clear();
+            old_threads = mem::take(&mut *threads);
+            for thread in &old_threads {
+                if is_current_process && Arc::ptr_eq(thread, &current) {
+                    continue;
+                }
+                *thread.state.lock() = task::State::Dead;
+            }
             threads.push(init.clone());
 
             let old_space = self.replace_address_space(new_address_space.clone());
@@ -282,7 +294,9 @@ impl Process {
             self.open_files.lock().close_exec();
             self.signal_actions.lock().reset_on_exec();
 
-            unsafe { new_table.set_active() };
+            if is_current_process {
+                unsafe { new_table.set_active() };
+            }
             drop(old_space);
             CpuData::get().scheduler.add_task(init);
         }
@@ -290,8 +304,15 @@ impl Process {
         drop(file);
         drop(self);
 
-        // execve never returns on success.
-        Scheduler::kill_current();
+        if is_current_process {
+            drop(old_threads);
+            drop(current);
+
+            // execve never returns on success when replacing the current process.
+            Scheduler::kill_current();
+        }
+
+        Ok(())
     }
 
     /// Exits the current process.
@@ -306,7 +327,7 @@ impl Process {
 
         PROCESS_TABLE.lock().remove(&proc.get_pid());
 
-        let old_space = proc.replace_address_space(Arc::new(SpinMutex::new(
+        let old_space = proc.replace_address_space(Arc::new(Mutex::new(
             AddressSpace::new_kernel(crate::memory::virt::KERNEL_PAGE_TABLE.get().clone()),
         )));
 

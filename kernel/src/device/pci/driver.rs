@@ -90,6 +90,14 @@ impl Driver {
             return Err(Errno::EEXIST);
         }
 
+        if self.variants.is_empty() {
+            warn!(
+                "PCI Driver \"{}\" does not define any variants, ignoring",
+                self.name
+            );
+            return Ok(());
+        }
+
         drivers.insert(self.name, self);
 
         log!(

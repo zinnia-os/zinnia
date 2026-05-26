@@ -152,8 +152,8 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task) -> *mut
         let from = from.as_ref().unwrap();
         let to = to.as_ref().unwrap();
 
-        let mut from_context = from.task_context.lock();
-        let to_context = to.task_context.lock();
+        let from_context = &mut *from.task_context.get();
+        let to_context = &mut *to.task_context.get();
 
         let cpu = ARCH_DATA.get();
         TSS.get().lock().rsp0 = to.kernel_stack.top().into();
@@ -187,9 +187,6 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task) -> *mut
 
         let old_rsp = &raw mut from_context.rsp;
         let new_rsp = to_context.rsp;
-
-        drop(from_context);
-        drop(to_context);
         perform_switch(old_rsp, new_rsp, previous)
     }
 }
@@ -226,6 +223,24 @@ unsafe extern "C" fn perform_switch(
         r14 = const offset_of!(TaskFrame, r14),
         r15 = const offset_of!(TaskFrame, r15),
     );
+}
+
+#[unsafe(naked)]
+pub(in crate::arch) extern "C" fn run_on_stack_raw(
+    stack_top: usize,
+    f: extern "C" fn(usize, usize) -> !,
+    arg: usize,
+) -> ! {
+    naked_asm!(
+        "xor ebp, ebp",
+        "mov rax, rsp",
+        "mov rsp, rdi",
+        "mov rdi, rax",
+        "mov rax, rsi",
+        "mov rsi, rdx",
+        "call rax",
+        "ud2",
+    )
 }
 
 pub(in crate::arch) fn init_task(

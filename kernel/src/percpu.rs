@@ -3,14 +3,12 @@
 use super::{memory::VirtAddr, sched::Scheduler};
 use crate::{
     arch,
-    {
-        memory::{
-            self,
-            pmm::{AllocFlags, KernelAlloc, PageAllocator},
-            virt::{VmFlags, mmu::PageTable},
-        },
-        posix::errno::{EResult, Errno},
+    memory::{
+        self,
+        pmm::{AllocFlags, KernelAlloc, PageAllocator},
+        virt::{VmFlags, mmu::PageTable},
     },
+    posix::errno::{EResult, Errno},
 };
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
@@ -25,10 +23,12 @@ pub struct CpuData {
     pub kernel_stack: AtomicUsize,
     /// Stack pointer for user mode.
     pub user_stack: AtomicUsize,
-    /// Whether this CPU is online.
+    /// Whether this CPU is online and available.
     pub online: AtomicBool,
-    /// Whether this CPU is present.
+    /// Whether this CPU is physically present.
     pub present: AtomicBool,
+    /// User page table currently loaded on this CPU, or null.
+    pub active_user_table: AtomicPtr<PageTable>,
     /// A scheduler instance on this CPU.
     pub scheduler: Scheduler,
 }
@@ -135,13 +135,14 @@ pub type PerCpuCtor = fn(cpu_data: &'static CpuData);
 // This variable must come first, so put it in a special section that is guaranteed to be put before `.percpu`.
 #[used]
 #[unsafe(link_section = ".percpu.init")]
-pub static CPU_DATA: PerCpuData<CpuData> = PerCpuData::new(CpuData {
+pub(crate) static CPU_DATA: PerCpuData<CpuData> = PerCpuData::new(CpuData {
     this: AtomicPtr::new(&raw const LD_PERCPU_START as *mut CpuData),
     id: 0,
     kernel_stack: AtomicUsize::new(0),
     user_stack: AtomicUsize::new(0),
     online: AtomicBool::new(false),
-    present: AtomicBool::new(false),
+    present: AtomicBool::new(true), // BSP is always present at boot.
+    active_user_table: AtomicPtr::new(core::ptr::null_mut()),
     scheduler: Scheduler::new_for_cpu(0),
 });
 
@@ -176,6 +177,7 @@ pub(crate) fn allocate_cpu() -> EResult<&'static CpuData> {
             user_stack: AtomicUsize::new(0),
             online: AtomicBool::new(false),
             present: AtomicBool::new(false),
+            active_user_table: AtomicPtr::new(core::ptr::null_mut()),
             scheduler: Scheduler::new_for_cpu(id),
         });
         let new_context = this_ptr.as_ref().unwrap();

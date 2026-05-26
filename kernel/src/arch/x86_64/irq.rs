@@ -312,7 +312,18 @@ fn page_fault_handler(context: &mut Context) {
         addr: cr2.into(),
     };
 
-    if !crate::memory::virt::fault::handler(&info) {
+    let irqs_were_on = context.rflags & consts::RFLAGS_IF as u64 != 0;
+    if irqs_were_on {
+        unsafe { set_irq_state(true) };
+    }
+
+    let handled = crate::memory::virt::fault::handler(&info);
+
+    if irqs_were_on {
+        unsafe { set_irq_state(false) };
+    }
+
+    if !handled {
         let task = Scheduler::get_current();
         let uar = task.uar.load(Ordering::Relaxed);
         context.rip = unsafe { (*uar).fault_ip } as *const _ as u64;

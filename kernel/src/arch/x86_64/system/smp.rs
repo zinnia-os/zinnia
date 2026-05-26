@@ -214,6 +214,10 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
         .idle_task
         .store(Arc::into_raw(idle_task) as *mut _, Ordering::Release);
 
+    let reaper_task =
+        Arc::new(Task::new(sched::reaper_fn, 0, 0, Process::get_kernel(), false).unwrap());
+    cpu_ctx.scheduler.set_reaper_task(reaper_task);
+
     // Create a dummy task to drop right after the first reschedule.
     let dummy = Arc::new(Task::new(sched::dummy_fn, 0, 0, Process::get_kernel(), false).unwrap());
     cpu_ctx.scheduler.set_task(dummy);
@@ -222,8 +226,6 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
         cpu_ctx.present.load(Ordering::Acquire),
         "CPU is not present?"
     );
-    assert!(cpu_ctx.online.load(Ordering::Acquire), "CPU is not online?");
-    log!("CPU {}: online", CpuData::get().id);
 
     unsafe {
         // Let the BSP know that we're alive.
@@ -231,6 +233,8 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
     }
 
     unsafe { crate::arch::irq::set_irq_state(true) };
+    cpu_ctx.online.store(true, Ordering::Release);
+    log!("CPU {}: online", CpuData::get().id);
 
     cpu_ctx.scheduler.do_yield();
     loop {}
