@@ -6,7 +6,10 @@ use crate::{
     INIT,
     arch::sched::Context,
     device::tty::Tty,
-    memory::{VirtAddr, virt::AddressSpace},
+    memory::{
+        VirtAddr,
+        virt::{AddressSpace, KERNEL_PAGE_TABLE},
+    },
     percpu::CpuData,
     posix::errno::{EResult, Errno},
     process::{
@@ -16,7 +19,11 @@ use crate::{
     },
     sched::Scheduler,
     uapi,
-    util::{event::Event, mutex::{Mutex, spin::SpinMutex}, once::Once},
+    util::{
+        event::Event,
+        mutex::{Mutex, spin::SpinMutex},
+        once::Once,
+    },
     vfs::{
         self,
         cache::PathNode,
@@ -327,18 +334,20 @@ impl Process {
 
         PROCESS_TABLE.lock().remove(&proc.get_pid());
 
-        let old_space = proc.replace_address_space(Arc::new(Mutex::new(
-            AddressSpace::new_kernel(crate::memory::virt::KERNEL_PAGE_TABLE.get().clone()),
-        )));
+        let old_space = proc.replace_address_space(Arc::new(Mutex::new(AddressSpace::new_kernel(
+            KERNEL_PAGE_TABLE.get().clone(),
+        ))));
 
         {
             let mut open_files = proc.open_files.lock();
             let mut threads = proc.threads.lock();
             let mut status = proc.status.lock();
 
-            // Kill all threads.
+            // Kill all other threads. Keep the current task runnable until the parent has been notified below.
             for thread in threads.iter() {
-                *thread.state.lock() = task::State::Dead;
+                if !Arc::ptr_eq(thread, &task) {
+                    *thread.state.lock() = task::State::Dead;
+                }
             }
             threads.clear();
 
