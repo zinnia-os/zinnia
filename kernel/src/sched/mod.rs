@@ -689,7 +689,7 @@ impl Scheduler {
                 self.account_load(cpu, &*to);
             }
         }
-        self.current.store(to, Ordering::Relaxed);
+        self.current.store(to, Ordering::Release);
 
         unsafe {
             // If we are switching between address spaces, we need to update the page table.
