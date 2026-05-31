@@ -411,7 +411,7 @@ impl TcpSocket {
                             inner.recv_buf.write(&segment.payload[..writable]);
                             inner.rcv_nxt = inner.rcv_nxt.wrapping_add(writable as u32);
                             ack_after = true;
-                            self.rd_event.wake_one();
+                            self.rd_event.wake_all();
                         }
                     }
 
@@ -479,8 +479,8 @@ impl TcpSocket {
             }
             listener_inner.backlog.push_back(socket);
         }
-        listener.accept_event.wake_one();
-        listener.rd_event.wake_one();
+        listener.accept_event.wake_all();
+        listener.rd_event.wake_all();
         Ok(())
     }
 
@@ -662,7 +662,7 @@ impl SocketOps for TcpSocket {
                     if got > 0 {
                         buf.copy_from_slice(&data[..got])?;
                         if !peek {
-                            self.wr_event.wake_one();
+                            self.wr_event.wake_all();
                         }
                     }
                     return Ok((got as isize, 0, 0, 0));

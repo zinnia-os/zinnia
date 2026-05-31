@@ -466,7 +466,7 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
         data: payload.to_vec(),
     });
     drop(inner);
-    socket.rd_event.wake_one();
+    socket.rd_event.wake_all();
     Ok(true)
 }
 

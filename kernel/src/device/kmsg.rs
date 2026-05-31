@@ -2,14 +2,9 @@ use crate::{
     device,
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    process::{Identity, PROCESS_STAGE},
+    process::PROCESS_STAGE,
     uapi::{self, termios::winsize},
-    vfs::{
-        self, File,
-        file::FileOps,
-        fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::{MknodTarget, Mode},
-    },
+    vfs::{File, file::FileOps, fs::devtmpfs::DEVTMPFS_STAGE, inode::Mode},
 };
 use alloc::sync::Arc;
 
@@ -49,19 +44,10 @@ impl FileOps for Console {
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
 fn KMSG_STAGE() {
-    let root = devtmpfs::get_root();
-
-    vfs::mknod(
-        root.clone(),
-        root.clone(),
+    device::register_char_node(
         b"kmsg",
+        device::make_shared(Arc::new(Console), 1, 11),
         Mode::from_bits_truncate(0o666),
-        Some(MknodTarget::CharacterDevice(device::make_shared(
-            Arc::new(Console),
-            1,
-            11,
-        ))),
-        &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/kmsg");
 }

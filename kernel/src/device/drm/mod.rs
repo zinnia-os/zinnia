@@ -476,11 +476,16 @@ impl FileOps for DrmFile {
 
                 val.crtc_id = encoder.active_crtc.id() as _;
 
-                // Create a bit mask using the IDs as indices.
-                let mut possible_crtcs = 0;
+                // possible_crtcs is indexed by each CRTC's position in the global
+                // CRTC list (drm_crtc_index), not by its object id.
+                let crtcs = state.crtcs.lock();
+                let mut possible_crtcs = 0u32;
                 for crtc in encoder.possible_crtcs.iter() {
-                    possible_crtcs |= 1 << crtc.id();
+                    if let Some(idx) = crtcs.iter().position(|c| c.id() == crtc.id()) {
+                        possible_crtcs |= 1 << idx;
+                    }
                 }
+                drop(crtcs);
                 val.possible_crtcs = possible_crtcs;
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
@@ -1148,18 +1153,12 @@ static CARD_COUNTER: AtomicU32 = AtomicU32::new(0);
 pub fn register(device: Arc<dyn Device>) -> EResult<()> {
     log!("Registering new DRM card");
 
-    let root = devtmpfs::get_root();
     let minor = CARD_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-    vfs::mknod(
-        root.clone(),
-        root.clone(),
+    crate::device::register_char_node(
         format!("drm/card{}", minor).as_bytes(),
+        Arc::new(DrmDeviceNode { device, minor }),
         Mode::from_bits_truncate(0o660),
-        Some(crate::vfs::inode::MknodTarget::CharacterDevice(Arc::new(
-            DrmDeviceNode { device, minor },
-        ))),
-        &Identity::get_kernel(),
     )
 }
 

@@ -7,12 +7,7 @@ use crate::{
     memory::IovecIter,
     posix::errno::EResult,
     process::Identity,
-    vfs::{
-        self, File,
-        file::FileOps,
-        fs::devtmpfs,
-        inode::{MknodTarget, Mode},
-    },
+    vfs::{self, File, file::FileOps, fs::devtmpfs, inode::Mode},
 };
 use alloc::{format, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -75,18 +70,10 @@ pub fn register_nic(nic: Arc<dyn NicDevice>) -> EResult<()> {
     let idx = ETH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = format!("net/eth{}", idx);
 
-    let root = devtmpfs::get_root();
-    vfs::mknod(
-        root.clone(),
-        root,
+    device::register_char_node(
         name.as_bytes(),
+        device::make_shared(Arc::new(NicFile { nic }), 0, idx),
         Mode::from_bits_truncate(0o660),
-        Some(MknodTarget::CharacterDevice(device::make_shared(
-            Arc::new(NicFile { nic }),
-            0,
-            idx,
-        ))),
-        &Identity::get_kernel(),
     )
 }
 

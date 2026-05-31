@@ -3,13 +3,8 @@ use crate::{
     device,
     memory::IovecIter,
     posix::errno::{EResult, Errno},
-    process::{Identity, PROCESS_STAGE},
-    vfs::{
-        self, File,
-        file::FileOps,
-        fs::devtmpfs::{self, DEVTMPFS_STAGE},
-        inode::{MknodTarget, Mode},
-    },
+    process::PROCESS_STAGE,
+    vfs::{File, file::FileOps, fs::devtmpfs::DEVTMPFS_STAGE, inode::Mode},
 };
 use alloc::sync::Arc;
 
@@ -30,19 +25,10 @@ impl FileOps for CmdlineFile {
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
 fn CMDLINE_STAGE() {
-    let root = devtmpfs::get_root();
-
-    vfs::mknod(
-        root.clone(),
-        root.clone(),
+    device::register_char_node(
         b"cmdline",
+        device::make_shared(Arc::new(CmdlineFile), 1, 12),
         Mode::from_bits_truncate(0o666),
-        Some(MknodTarget::CharacterDevice(device::make_shared(
-            Arc::new(CmdlineFile),
-            1,
-            12,
-        ))),
-        &Identity::get_kernel(),
     )
     .expect("Unable to create /dev/cmdline");
 }

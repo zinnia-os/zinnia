@@ -7,12 +7,7 @@ use crate::{
     memory::{IovecIter, VirtAddr},
     posix::errno::{EResult, Errno},
     process::Identity,
-    vfs::{
-        self, File,
-        file::{FileOps, PollFlags},
-        fs::devtmpfs,
-        inode::{MknodTarget, Mode},
-    },
+    vfs::{self, File, file::FileOps, fs::devtmpfs, inode::Mode},
 };
 use alloc::{format, sync::Arc};
 
@@ -168,15 +163,10 @@ pub fn BLOCK_STAGE() {
 /// Registers a block device by name and scans for partitions.
 pub fn register_block_device(name: &str, device: Arc<dyn BlockDevice>) -> EResult<()> {
     // Register in devtmpfs as well.
-    let root = devtmpfs::get_root();
-
-    vfs::mknod(
-        root.clone(),
-        root,
+    crate::device::register_block_node(
         format!("block/{}", name).as_bytes(),
+        device.clone(),
         Mode::from_bits_truncate(0o660),
-        Some(MknodTarget::BlockDevice(device.clone())),
-        &Identity::get_kernel(),
     )?;
 
     log!("Registered block device: \"{}\"", name);
@@ -202,17 +192,13 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             part.end_lba - part.start_lba + 1,
         ));
 
-        let root = devtmpfs::get_root();
-
-        vfs::mknod(
-            root.clone(),
-            root.clone(),
+        crate::device::register_block_node(
             format!("block/{}", part_name).as_bytes(),
+            part_dev,
             Mode::from_bits_truncate(0o660),
-            Some(MknodTarget::BlockDevice(part_dev)),
-            &Identity::get_kernel(),
         )?;
 
+        let root = devtmpfs::get_root();
         let uuid_str = part.unique_guid.to_string();
         let type_str = part.type_guid.to_string();
 
@@ -366,10 +352,5 @@ impl<T: BlockDevice> FileOps for T {
 
     fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         self.handle_ioctl(file, request, arg)
-    }
-
-    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
-        _ = (file, mask);
-        Ok(mask)
     }
 }

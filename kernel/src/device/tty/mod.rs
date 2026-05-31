@@ -5,15 +5,15 @@ use crate::{
     device::{self, Device},
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    process::{self, Identity, signal::Signal},
+    process::{self, signal::Signal},
     sched::Scheduler,
     uapi::{self, termios::*},
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
     vfs::{
-        self, File,
+        File,
         file::{FileOps, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
-        inode::{MknodTarget, Mode},
+        inode::Mode,
     },
 };
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec};
@@ -301,16 +301,8 @@ impl Tty {
             .strip_prefix(b"/dev/")
             .or_else(|| name.strip_prefix(b"/"))
             .unwrap_or(name);
-        let root = devtmpfs::get_root();
 
-        vfs::mknod(
-            root.clone(),
-            root,
-            dev_name,
-            Mode::from_bits_truncate(0o666),
-            Some(MknodTarget::CharacterDevice(opener)),
-            &Identity::get_kernel(),
-        )
+        device::register_char_node(dev_name, opener, Mode::from_bits_truncate(0o666))
     }
 }
 
@@ -386,7 +378,7 @@ impl FileOps for TtyFileOps {
                 drop(ldisc);
                 guard.wait();
                 if crate::sched::Scheduler::get_current().has_pending_signals() {
-                    return Err(crate::posix::errno::Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
                 woken = true;
             }
@@ -431,7 +423,7 @@ impl FileOps for TtyFileOps {
                 drop(ldisc);
                 guard.wait();
                 if crate::sched::Scheduler::get_current().has_pending_signals() {
-                    return Err(crate::posix::errno::Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
             }
         } else if vmin == 0 && vtime > 0 {
@@ -457,7 +449,7 @@ impl FileOps for TtyFileOps {
                 drop(ldisc);
                 guard.wait();
                 if crate::sched::Scheduler::get_current().has_pending_signals() {
-                    return Err(crate::posix::errno::Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
             }
         } else {
@@ -504,7 +496,7 @@ impl FileOps for TtyFileOps {
                     if bytes_read > 0 {
                         return Ok(bytes_read as isize);
                     }
-                    return Err(crate::posix::errno::Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
             }
         }
@@ -665,19 +657,10 @@ fn get_controlling_tty() -> EResult<Arc<Tty>> {
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]
 pub fn CTTY_STAGE() {
-    let root = devtmpfs::get_root();
-
-    vfs::mknod(
-        root.clone(),
-        root,
+    device::register_char_node(
         b"tty",
+        device::make_shared(Arc::new(CttyFileOps), 5, 0),
         Mode::from_bits_truncate(0o660),
-        Some(MknodTarget::CharacterDevice(device::make_shared(
-            Arc::new(CttyFileOps),
-            5,
-            0,
-        ))),
-        &Identity::get_kernel(),
     )
     .expect("Unable to register ctty device");
 }

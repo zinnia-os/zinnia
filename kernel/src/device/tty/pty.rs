@@ -3,7 +3,7 @@ use crate::{
     device::tty::{Tty, TtyDriver, TtyFileOps},
     memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
-    process::{Identity, PROCESS_TABLE, signal::Signal},
+    process::{Identity, signal::Signal},
     sched::Scheduler,
     uapi::{self, termios::winsize},
     util::{event::Event, mutex::spin::SpinMutex, ring::RingBuffer},
@@ -11,7 +11,7 @@ use crate::{
         self, File,
         file::{FileOps, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
-        inode::{MknodTarget, Mode},
+        inode::Mode,
     },
 };
 use alloc::{
@@ -79,13 +79,16 @@ impl TtyDriver for PtySlaveTtyDriver {
                 continue;
             }
 
-            if !slave_side_is_present(&pair) {
-                return Ok(());
+            if pair.tty.is_hung_up() {
+                return Err(Errno::EIO);
             }
 
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::ERESTART);
+            }
             guard.wait();
             if Scheduler::get_current().has_pending_signals() {
-                return Err(Errno::EINTR);
+                return Err(Errno::ERESTART);
             }
         }
         Ok(())
@@ -101,19 +104,8 @@ impl TtyDriver for PtySlaveTtyDriver {
     }
 }
 
-fn slave_side_is_present(pair: &PtyPair) -> bool {
-    if pair.slave_count.load(Ordering::Acquire) != 0 {
-        return true;
-    }
-
-    PROCESS_TABLE.lock().values().any(|proc| {
-        proc.upgrade().is_some_and(|proc| {
-            proc.controlling_tty
-                .lock()
-                .as_ref()
-                .is_some_and(|tty| Arc::ptr_eq(tty, &pair.tty))
-        })
-    })
+fn has_open_slave(pair: &PtyPair) -> bool {
+    pair.slave_count.load(Ordering::Acquire) != 0
 }
 
 pub fn alloc_pty() -> EResult<Arc<PtyPair>> {
@@ -250,8 +242,7 @@ impl FileOps for PtyMaster {
             if self.pair.packet.load(Ordering::Relaxed) {
                 let pending = self.pair.packet_flags.swap(0, Ordering::AcqRel);
                 if pending != 0 {
-                    buffer.copy_from_slice(&[pending])?;
-                    return Ok(1);
+                    return buffer.copy_from_slice(&[pending]).map(|_| 1isize);
                 }
             }
 
@@ -261,8 +252,9 @@ impl FileOps for PtyMaster {
                     let packet = self.pair.packet.load(Ordering::Relaxed);
                     if packet {
                         if buffer.len() < 2 {
-                            buffer.copy_from_slice(&[uapi::ioctls::TIOCPKT_DATA as u8])?;
-                            return Ok(1);
+                            return buffer
+                                .copy_from_slice(&[uapi::ioctls::TIOCPKT_DATA as u8])
+                                .map(|_| 1isize);
                         }
                         let cap = buffer.len() - 1;
                         let len = core::cmp::min(mbuf.get_data_len(), cap);
@@ -271,21 +263,19 @@ impl FileOps for PtyMaster {
                         let n = mbuf.read(&mut tmp[1..1 + len]);
                         drop(mbuf);
                         self.pair.master_wr_event.wake_all();
-                        buffer.copy_from_slice(&tmp[..1 + n])?;
-                        return Ok((1 + n) as isize);
+                        return buffer.copy_from_slice(&tmp[..1 + n]).map(|_| (1 + n) as isize);
                     } else {
                         let len = core::cmp::min(mbuf.get_data_len(), buffer.len());
                         let mut tmp = vec![0u8; len];
                         let n = mbuf.read(&mut tmp);
                         drop(mbuf);
                         self.pair.master_wr_event.wake_all();
-                        buffer.copy_from_slice(&tmp[..n])?;
-                        return Ok(n as isize);
+                        return buffer.copy_from_slice(&tmp[..n]).map(|_| n as isize);
                     }
                 }
             }
 
-            if !slave_side_is_present(&self.pair) {
+            if !has_open_slave(&self.pair) {
                 return Err(Errno::EIO);
             }
 
@@ -293,9 +283,12 @@ impl FileOps for PtyMaster {
                 return Err(Errno::EAGAIN);
             }
 
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::ERESTART);
+            }
             guard.wait();
             if Scheduler::get_current().has_pending_signals() {
-                return Err(Errno::EINTR);
+                return Err(Errno::ERESTART);
             }
         }
     }
@@ -379,10 +372,10 @@ impl FileOps for PtyMaster {
                 revents |= PollFlags::In;
             }
         }
-        if mask.contains(PollFlags::Out) {
+        if mask.contains(PollFlags::Out) && has_open_slave(&self.pair) {
             revents |= PollFlags::Out;
         }
-        if !slave_side_is_present(&self.pair) {
+        if !has_open_slave(&self.pair) {
             revents |= PollFlags::Hup;
         }
         Ok(revents & (mask | PollFlags::Hup))
@@ -410,13 +403,7 @@ impl Drop for PtyMaster {
 
         // Best effort unlink. If it fails, we don't care.
         let slave_name = format!("pts/{}", self.pair.index);
-        let root = devtmpfs::get_root();
-        let _ = vfs::unlink(
-            root.clone(),
-            root,
-            slave_name.as_bytes(),
-            Identity::get_kernel(),
-        );
+        let _ = crate::device::unregister_node(slave_name.as_bytes());
     }
 }
 
@@ -446,20 +433,17 @@ pub fn PTMX_STAGE() {
 
     vfs::mkdir(
         root.clone(),
-        root.clone(),
+        root,
         b"pts",
         Mode::from_bits_truncate(0o755),
         Identity::get_kernel(),
     )
     .expect("Unable to create /dev/pts/");
 
-    vfs::mknod(
-        root.clone(),
-        root,
+    crate::device::register_char_node(
         b"ptmx",
+        Arc::new(PtmxDevice),
         Mode::from_bits_truncate(0o666),
-        Some(MknodTarget::CharacterDevice(Arc::new(PtmxDevice))),
-        Identity::get_kernel(),
     )
     .expect("Unable to create PTMX device");
 }

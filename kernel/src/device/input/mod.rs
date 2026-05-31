@@ -15,7 +15,7 @@ use crate::{
         self, File,
         file::{FileOps, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
-        inode::{MknodTarget, Mode},
+        inode::Mode,
     },
 };
 use alloc::{
@@ -106,15 +106,10 @@ impl EventDevice {
 
     pub fn register_device(self: &Arc<Self>) -> EResult<()> {
         let name = format!("input/event{}", self.index);
-        let root = devtmpfs::get_root();
-
-        vfs::mknod(
-            root.clone(),
-            root,
+        crate::device::register_char_node(
             name.as_bytes(),
+            self.clone(),
             Mode::from_bits_truncate(0o666),
-            Some(MknodTarget::CharacterDevice(self.clone())),
-            &Identity::get_kernel(),
         )
     }
 
@@ -278,7 +273,6 @@ impl FileOps for EventDeviceFile {
             return EventDevice::drain_events(&mut buf, buffer, ev_size);
         }
 
-        // Wait for events if we can block.
         loop {
             let guard = self.device.rd_event.guard();
             {
