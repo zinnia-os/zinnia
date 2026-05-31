@@ -79,7 +79,20 @@ impl SuperBlock for TmpSuper {
     }
 
     fn statvfs(self: Arc<Self>) -> EResult<statvfs> {
-        todo!()
+        Ok(statvfs {
+            f_bsize: 0,
+            f_frsize: 0,
+            f_blocks: 0,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 0,
+            f_ffree: 0,
+            f_favail: 0,
+            f_fsid: 0,
+            f_flag: 0,
+            f_namemax: 0,
+            f_basetype: [0; 80],
+        })
     }
 }
 
