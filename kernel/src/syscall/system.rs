@@ -137,16 +137,17 @@ pub fn futex_wait(pointer: VirtAddr, expected: i32, timeout: VirtAddr) -> EResul
 }
 
 #[wrap_syscall]
-pub fn futex_wake(pointer: VirtAddr, all: bool) -> EResult<usize> {
+pub fn futex_wake(pointer: VirtAddr, count: u32) -> EResult<usize> {
     let Some(queue) = find_futex_queue(pointer) else {
         return Ok(0);
     };
 
-    Ok(if all {
-        queue.event.wake_all()
-    } else {
+    let woken = if count == 1 {
         queue.event.wake_one()
-    })
+    } else {
+        queue.event.wake_all()
+    };
+    Ok(woken)
 }
 
 #[wrap_syscall]
@@ -298,7 +299,7 @@ pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
             }
             return Err(Errno::EINTR);
         }
-        crate::percpu::CpuData::get().scheduler.do_yield();
+        CpuData::get().scheduler.do_yield();
     }
 
     if !remainder.addr().is_null() {

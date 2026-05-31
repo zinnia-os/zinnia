@@ -129,11 +129,12 @@ pub fn openat(fd: i32, path: UserCStr, oflag: usize, mode: mode_t) -> EResult<i3
     let oflag = OpenFlags::from_bits_truncate(oflag as _);
 
     let proc = Scheduler::get_current().get_process();
-    let mut proc_inner = proc.open_files.lock();
+
     let parent = if fd == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
-        proc_inner
+        proc.open_files
+            .lock()
             .get_fd(fd)
             .ok_or(Errno::EBADF)?
             .file
@@ -155,7 +156,8 @@ pub fn openat(fd: i32, path: UserCStr, oflag: usize, mode: mode_t) -> EResult<i3
         &proc.identity.lock(),
     )?;
 
-    proc_inner
+    proc.open_files
+        .lock()
         .open_file(
             FileDescription {
                 file,
@@ -182,9 +184,9 @@ pub fn seek(fd: i32, offset: usize, whence: i32) -> EResult<usize> {
 #[wrap_syscall]
 pub fn close(fd: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-    let mut proc_inner = proc.open_files.lock();
 
-    proc_inner.close(fd).ok_or(Errno::EBADF)?;
+    let removed = proc.open_files.lock().close(fd);
+    removed.ok_or(Errno::EBADF)?;
     Ok(0)
 }
 
@@ -322,9 +324,8 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
 pub fn fstat(fd: i32, statbuf: VirtAddr) -> EResult<()> {
     let mut statbuf = UserPtr::new(statbuf);
     let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
 
-    let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
     if let Some(inode) = file.inode.as_ref() {
         write_stat(inode, &mut statbuf)?;
     } else {
@@ -363,7 +364,6 @@ pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> ERes
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
     let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
 
     if v.is_empty() && flags & (AT_EMPTY_PATH as usize) != 0 {
         let inode = if at == AT_FDCWD as _ {
@@ -373,7 +373,8 @@ pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> ERes
                 .get_inode()
                 .ok_or(Errno::ENOENT)?
         } else {
-            proc_inner
+            proc.open_files
+                .lock()
                 .get_fd(at)
                 .ok_or(Errno::EBADF)?
                 .file
@@ -383,14 +384,14 @@ pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> ERes
                 .clone()
         };
 
-        drop(proc_inner);
         return write_stat(&inode, &mut statbuf);
     }
 
     let parent = if at == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
-        proc_inner
+        proc.open_files
+            .lock()
             .get_fd(at)
             .ok_or(Errno::EBADF)?
             .file
@@ -414,7 +415,6 @@ pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> ERes
     )?;
     let inode = node.entry.get_inode().ok_or(Errno::EINVAL)?;
 
-    drop(proc_inner);
     write_stat(&inode, &mut statbuf)?;
 
     Ok(())
@@ -445,17 +445,24 @@ pub fn dup3(fd1: i32, fd2: i32, flags: usize) -> EResult<i32> {
     }
 
     let proc = Scheduler::get_current().get_process();
-    let mut proc_inner = proc.open_files.lock();
 
-    let file = proc_inner.get_fd(fd1).ok_or(Errno::EBADF)?;
-    if proc_inner.get_fd(fd2).is_some() {
-        proc_inner.close(fd2);
-    }
+    // The file displaced from fd2 (if any) must be dropped after releasing the lock.
+    let mut displaced = None;
+    let result = {
+        let mut proc_inner = proc.open_files.lock();
 
-    let flags = OpenFlags::from_bits_truncate(flags as _);
-    let file = file.duplicate(flags.contains(OpenFlags::CloseOnExec));
+        let file = proc_inner.get_fd(fd1).ok_or(Errno::EBADF)?;
+        if proc_inner.get_fd(fd2).is_some() {
+            displaced = proc_inner.close(fd2);
+        }
 
-    proc_inner.open_file(file, fd2).ok_or(Errno::EMFILE)
+        let flags = OpenFlags::from_bits_truncate(flags as _);
+        let file = file.duplicate(flags.contains(OpenFlags::CloseOnExec));
+
+        proc_inner.open_file(file, fd2).ok_or(Errno::EMFILE)
+    };
+    drop(displaced);
+    result
 }
 
 #[wrap_syscall]
@@ -464,10 +471,10 @@ pub fn mkdirat(fd: i32, path: VirtAddr, mode: mode_t) -> EResult<i32> {
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
     let proc = Scheduler::get_current().get_process();
-    let inner = proc.open_files.lock();
     let parent = if fd == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
+        let inner = proc.open_files.lock();
         inner
             .get_fd(fd)
             .ok_or(Errno::EBADF)?
@@ -537,10 +544,8 @@ pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
     }
 
     let proc = Scheduler::get_current().get_process();
-    let inner = proc.open_files.lock();
 
-    // fd must be a valid descriptor open for reading.
-    let dir = inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    let dir = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
     let flags = *dir.flags.lock();
     if !flags.contains(OpenFlags::Read | OpenFlags::Directory) {
         return Err(Errno::EBADF);
@@ -677,21 +682,36 @@ pub fn ppoll(
     ];
     fds_ptr.read_slice(&mut fds).ok_or(Errno::EFAULT)?;
 
-    // Determine if this is a non-blocking poll (timeout of zero).
-    let is_nonblocking = if !timeout_ptr.is_null() {
+    // Parse the timeout.
+    let timeout_ns: Option<usize> = if timeout_ptr.is_null() {
+        None
+    } else {
         let ts: UserPtr<crate::uapi::time::timespec> = UserPtr::new(timeout_ptr);
         let timeout = ts.read().ok_or(Errno::EFAULT)?;
-        timeout.tv_sec == 0 && timeout.tv_nsec == 0
-    } else {
-        false // NULL timeout = block indefinitely
+        if timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1_000_000_000 {
+            return Err(Errno::EINVAL);
+        }
+        Some((timeout.tv_sec as usize) * 1_000_000_000 + timeout.tv_nsec as usize)
     };
+    let is_nonblocking = timeout_ns == Some(0);
+    let deadline = timeout_ns
+        .filter(|&ns| ns > 0)
+        .map(|ns| clock::get_elapsed().saturating_add(ns));
 
-    let _ = sigmask_ptr; // TODO: apply signal mask during poll
+    // Temporarily replace the signal mask while waiting.
+    if !sigmask_ptr.is_null() {
+        let set: UserPtr<sigset_t> = UserPtr::new(sigmask_ptr);
+        let mut new_mask = SignalSet::from_raw(set.read().ok_or(Errno::EFAULT)?);
+        new_mask.sanitize_mask();
+        let task = Scheduler::get_current();
+        let mut state = task.signal.lock();
+        let old = state.mask;
+        state.mask = new_mask;
+        state.restore_mask = Some(old);
+    }
 
     let proc = Scheduler::get_current().get_process();
 
-    // Collect the Arc<File> references for each valid fd once (avoids holding
-    // the open_files lock across a potential block).
     let files: Vec<Option<Arc<File>>> = {
         let open_files = proc.open_files.lock();
         fds.iter()
@@ -705,78 +725,69 @@ pub fn ppoll(
             .collect()
     };
 
-    // Register as a waiter on every fd that provides a poll event before the
-    // first poll pass so we don't miss a wake-up that happens between the poll
-    // check and going to sleep.
+    let masks: Vec<PollFlags> = fds
+        .iter()
+        .map(|e| PollFlags::from_bits_truncate(e.events))
+        .collect();
+
     let guards: Vec<_> = if is_nonblocking {
         Vec::new()
     } else {
         let mut guards = Vec::new();
-
-        for (poll_entry, file_opt) in fds.iter().zip(files.iter()) {
+        for (file_opt, mask) in files.iter().zip(masks.iter()) {
             if let Some(file) = file_opt {
-                let mask = PollFlags::from_bits_truncate(poll_entry.events);
-                guards.extend(
-                    file.ops
-                        .poll_events(file, mask)
-                        .iter()
-                        .map(|event| event.guard()),
-                );
+                guards.extend(file.ops.poll_events(file, *mask).iter().map(|e| e.guard()));
             }
         }
-
         guards
     };
 
+    let timeout_guard = deadline.map(clock::timeout_at);
+
     loop {
         let mut ready_count = 0usize;
-
-        for (poll_entry, file_opt) in fds.iter_mut().zip(files.iter()) {
+        for ((poll_entry, file_opt), mask) in fds.iter_mut().zip(files.iter()).zip(masks.iter()) {
             poll_entry.revents = 0;
-
             if poll_entry.fd < 0 {
                 continue;
             }
-
-            let file = match file_opt {
-                Some(f) => f,
+            match file_opt {
                 None => {
                     poll_entry.revents = PollFlags::Nval.bits();
                     ready_count += 1;
-                    continue;
                 }
-            };
-
-            let mask = PollFlags::from_bits_truncate(poll_entry.events);
-
-            match file.poll(mask) {
-                Ok(revents) => {
-                    poll_entry.revents = revents.bits();
-                    if !revents.is_empty() {
+                Some(file) => match file.poll(*mask) {
+                    Ok(revents) => {
+                        poll_entry.revents = revents.bits();
+                        if !revents.is_empty() {
+                            ready_count += 1;
+                        }
+                    }
+                    Err(_) => {
+                        poll_entry.revents = PollFlags::Err.bits();
                         ready_count += 1;
                     }
-                }
-                Err(_) => {
-                    poll_entry.revents = PollFlags::Err.bits();
-                    ready_count += 1;
-                }
+                },
             }
         }
 
-        if ready_count > 0 || is_nonblocking {
-            // Write back the results.
+        // Return once anything is ready, on a zero timeout, once the deadline passes,
+        // or when there is nothing that could ever wake us.
+        if ready_count > 0
+            || is_nonblocking
+            || timeout_guard.as_ref().is_some_and(|g| g.expired())
+            || (guards.is_empty() && timeout_guard.is_none())
+        {
             let mut fds_out = UserPtr::<pollfd>::new(fds_ptr.addr());
             fds_out.write_slice(&fds).ok_or(Errno::EFAULT)?;
             return Ok(ready_count);
         }
 
-        if guards.is_empty() {
-            let mut fds_out = UserPtr::<pollfd>::new(fds_ptr.addr());
-            fds_out.write_slice(&fds).ok_or(Errno::EFAULT)?;
-            return Ok(0);
+        if let Some(g) = guards.first() {
+            g.wait();
+        } else {
+            CpuData::get().scheduler.do_yield();
         }
-
-        guards[0].wait();
         if Scheduler::get_current().has_pending_signals() {
             return Err(Errno::EINTR);
         }
@@ -836,7 +847,7 @@ pub fn faccessat(fd: i32, path: UserCStr, amode: usize, flag: usize) -> EResult<
     }
 
     let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
+
     let inode = if path.is_empty() && flag as u32 & AT_EMPTY_PATH != 0 {
         if fd == AT_FDCWD as _ {
             proc.working_dir
@@ -845,7 +856,8 @@ pub fn faccessat(fd: i32, path: UserCStr, amode: usize, flag: usize) -> EResult<
                 .get_inode()
                 .ok_or(Errno::ENOENT)?
         } else {
-            proc_inner
+            proc.open_files
+                .lock()
                 .get_fd(fd)
                 .ok_or(Errno::EBADF)?
                 .file
@@ -857,7 +869,8 @@ pub fn faccessat(fd: i32, path: UserCStr, amode: usize, flag: usize) -> EResult<
         let parent = if fd == AT_FDCWD as _ {
             proc.working_dir.lock().clone()
         } else {
-            proc_inner
+            proc.open_files
+                .lock()
                 .get_fd(fd)
                 .ok_or(Errno::EBADF)?
                 .file
@@ -935,9 +948,8 @@ pub fn statvfs(path: VirtAddr, buf: VirtAddr) -> EResult<()> {
 pub fn fstatvfs(fd: i32, buf: VirtAddr) -> EResult<()> {
     let mut buf: UserPtr<statvfs> = UserPtr::new(buf);
     let proc = Scheduler::get_current().get_process();
-    let files = proc.open_files.lock();
 
-    let file = files.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
     let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
     let sb = inode.sb.as_ref().ok_or(Errno::ENOSYS)?;
 
@@ -1030,9 +1042,8 @@ pub fn renameat(old_fd: i32, old_path: VirtAddr, new_fd: i32, new_path: VirtAddr
 #[wrap_syscall]
 pub fn fchmod(fd: i32, mode: mode_t) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
-    let files = proc.open_files.lock();
 
-    let file = files.get_fd(fd).ok_or(Errno::EBADF)?.file;
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
     let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
     inode.chmod(Mode::from_bits_truncate(mode));
     Ok(())
@@ -1399,10 +1410,10 @@ pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> ERe
     }
 
     let proc = Scheduler::get_current().get_process();
-    let files = proc.open_files.lock();
     let at = if at == AT_FDCWD as _ {
         proc.working_dir.lock().clone()
     } else {
+        let files = proc.open_files.lock();
         files
             .get_fd(at)
             .ok_or(Errno::EBADF)?
@@ -1630,7 +1641,17 @@ pub fn epoll_pwait(
     if maxevents <= 0 {
         return Err(Errno::EINVAL);
     }
-    let _ = sigmask_ptr; // TODO: apply signal mask during wait
+    // Temporarily replace the signal mask for the wait.
+    if !sigmask_ptr.is_null() {
+        let set: UserPtr<sigset_t> = UserPtr::new(sigmask_ptr);
+        let mut new_mask = SignalSet::from_raw(set.read().ok_or(Errno::EFAULT)?);
+        new_mask.sanitize_mask();
+        let task = Scheduler::get_current();
+        let mut state = task.signal.lock();
+        let old = state.mask;
+        state.mask = new_mask;
+        state.restore_mask = Some(old);
+    }
 
     let epfile = resolve_epoll(epfd)?;
     let epoll = epoll_of(&epfile);
@@ -1645,6 +1666,7 @@ pub fn epoll_pwait(
     };
 
     let registrations = epoll.snapshot();
+
     let mut wait_files: Vec<Arc<File>> = Vec::new();
     if !is_nonblocking {
         for (_, _, _, file) in &registrations {
@@ -1660,7 +1682,6 @@ pub fn epoll_pwait(
     } else {
         let mut guards = Vec::new();
         for file in &wait_files {
-            // Use Read mask so we wait on any readability.
             for ev in file.ops.poll_events(file, PollFlags::Read).iter() {
                 guards.push(ev.guard());
             }
@@ -1702,6 +1723,7 @@ pub fn epoll_pwait(
         if timeout_guard.as_ref().is_some_and(|g| g.expired()) {
             break;
         }
+
         // No way to be woken: empty interest list and indefinite wait would hang.
         if guards.is_empty() && timeout_guard.is_none() {
             break;
