@@ -263,7 +263,9 @@ impl FileOps for PtyMaster {
                         let n = mbuf.read(&mut tmp[1..1 + len]);
                         drop(mbuf);
                         self.pair.master_wr_event.wake_all();
-                        return buffer.copy_from_slice(&tmp[..1 + n]).map(|_| (1 + n) as isize);
+                        return buffer
+                            .copy_from_slice(&tmp[..1 + n])
+                            .map(|_| (1 + n) as isize);
                     } else {
                         let len = core::cmp::min(mbuf.get_data_len(), buffer.len());
                         let mut tmp = vec![0u8; len];
