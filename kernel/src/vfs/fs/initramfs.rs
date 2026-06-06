@@ -105,6 +105,10 @@ pub fn create_dirs(
     return Ok((current, file_name));
 }
 
+pub fn is_initramfs(data: &[u8]) -> bool {
+    data.len() >= size_of::<FileHeader>() && &data[257..262] == b"ustar"
+}
+
 pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
     let mut offset = 0;
     let mut name_override = None;

@@ -54,6 +54,7 @@ pub mod util;
 pub mod vfs;
 
 use crate::{
+    device::block::ram::RamDisk,
     irq::lock::IrqLock,
     percpu::CpuData,
     process::{Identity, Process},
@@ -94,11 +95,27 @@ pub extern "C" fn main(_: usize, _: usize) {
     {
         let kernel_proc = Process::get_kernel();
         let root_dir = kernel_proc.root_dir.lock().clone();
+        let mut ramdisk_index = 0;
+
         for file in BootInfo::get().files {
-            initramfs::load(root_dir.clone(), root_dir.clone(), unsafe {
-                core::slice::from_raw_parts(file.data.as_hhdm(), file.length)
-            })
-            .expect("Failed to load one of the provided initramfs archives");
+            let data =
+                unsafe { core::slice::from_raw_parts(file.data.as_hhdm::<u8>(), file.length) };
+
+            if initramfs::is_initramfs(data) {
+                initramfs::load(root_dir.clone(), root_dir.clone(), data)
+                    .expect("Failed to load one of the provided initramfs archives");
+            } else {
+                let name = format!("ram{ramdisk_index}");
+                let disk = Arc::new(RamDisk::new(file.data, file.length));
+                device::block::register_block_device(&name, disk)
+                    .expect("Failed to register RAM disk block device");
+                log!(
+                    "Exposed module \"{}\" as RAM disk /dev/block/{}",
+                    file.name,
+                    name
+                );
+                ramdisk_index += 1;
+            }
         }
     }
 

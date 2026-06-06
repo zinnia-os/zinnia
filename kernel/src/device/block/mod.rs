@@ -1,6 +1,7 @@
 pub mod gpt;
 pub mod io;
 pub mod partition;
+pub mod ram;
 
 use crate::device::Device;
 use crate::{
