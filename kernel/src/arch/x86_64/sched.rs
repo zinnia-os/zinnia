@@ -13,10 +13,11 @@ use crate::{
     posix::errno::EResult,
     process::{
         Process, State,
-        signal::{Signal, SignalSet},
+        signal::{Signal, SignalDelivery, SignalSet},
         task::Task,
     },
     sched::Scheduler,
+    uapi::signal::{SA_ONSTACK, siginfo_t},
 };
 use alloc::boxed::Box;
 use core::{
@@ -75,6 +76,10 @@ impl Context {
         self.rax as usize
     }
 
+    pub fn syscall_error(&self) -> usize {
+        self.rdx as usize
+    }
+
     pub fn arg0(&self) -> usize {
         self.rdi as usize
     }
@@ -103,6 +108,36 @@ impl Context {
         self.rax = val as _;
         self.rdx = err as _;
     }
+
+    pub fn sp(&self) -> usize {
+        self.rsp as usize
+    }
+
+    pub fn ip(&self) -> usize {
+        self.rip as usize
+    }
+
+    pub fn snapshot_syscall(&self) -> SyscallRestart {
+        SyscallRestart {
+            nr: self.rax as usize,
+            arg2: self.rdx as usize,
+        }
+    }
+
+    pub fn restart_syscall(&mut self, restart: &SyscallRestart) {
+        self.rip -= 2; // Length of the `syscall` instruction.
+        self.rax = restart.nr as u64;
+        self.rdx = restart.arg2 as u64;
+    }
+}
+
+/// Registers captured before a syscall is dispatched so that an interrupted
+/// syscall can be transparently restarted afterwards.
+/// The fields are whichever registers [`Context::set_return`] would clobber.
+#[derive(Clone, Copy, Debug)]
+pub struct SyscallRestart {
+    nr: usize,
+    arg2: usize,
 }
 
 impl core::fmt::Debug for Context {
@@ -379,57 +414,132 @@ pub(in crate::arch) unsafe fn jump_to_context(context: *mut Context) -> ! {
     }
 }
 
-/// Signal frame placed on the user stack when delivering a signal.
-/// The restorer function pops this frame via sigreturn.
+/// Saved state for `sigreturn`, written to the user stack below the rest of the signal frame.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SignalFrame {
-    /// The saved signal mask to restore after handler returns.
     saved_mask: u64,
-    /// The saved user context to restore after handler returns.
     saved_context: Context,
-    /// The signal number.
-    signal_number: u32,
-    _pad: u32,
-    /// Return address: points to the restorer trampoline.
-    restorer_ret: u64,
 }
 
-pub(in crate::arch) fn setup_signal_frame(
-    context: &mut Context,
-    handler: usize,
-    signal: u32,
-    mask: SignalSet,
-    restorer: usize,
-) {
-    let frame_sp = (context.rsp as usize - size_of::<SignalFrame>()) & !0xF;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct UserStack {
+    ss_sp: u64,
+    ss_size: u64,
+    ss_flags: i32,
+    _pad: u32,
+}
 
-    let frame = SignalFrame {
-        saved_mask: mask.as_raw(),
-        saved_context: *context,
-        signal_number: signal,
-        _pad: 0,
-        restorer_ret: restorer as u64,
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Mcontext {
+    oldmask: u64,
+    gregs: [u64; 16],
+    pc: u64,
+    pr: u64,
+    sr: u64,
+    gbr: u64,
+    mach: u64,
+    macl: u64,
+    fpregs: [u64; 16],
+    xfpregs: [u64; 16],
+    fpscr: u32,
+    fpul: u32,
+    ownedfp: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Ucontext {
+    uc_link: u64,
+    uc_stack: UserStack,
+    uc_mcontext: Mcontext,
+    uc_sigmask: u64,
+}
+
+pub(in crate::arch) fn setup_signal_frame(context: &mut Context, delivery: &SignalDelivery) {
+    let altstack = delivery.altstack;
+    let on_altstack = altstack.contains(context.rsp as usize);
+    let use_altstack = delivery.flags & SA_ONSTACK != 0 && altstack.is_enabled() && !on_altstack;
+
+    // Top of the alternate stack if requested, otherwise below the 128-byte red zone
+    // of the interrupted stack (System V AMD64 ABI).
+    let base = if use_altstack {
+        altstack.sp + altstack.size
+    } else {
+        context.rsp as usize - 128
     };
 
-    let mut ptr = UserPtr::<SignalFrame>::new(VirtAddr::new(frame_sp));
-    if ptr.write(frame).is_none() {
+    let align = |x: usize| x & !0xF;
+
+    let info_addr = align(base - size_of::<siginfo_t>());
+    let uc_addr = align(info_addr - size_of::<Ucontext>());
+    let sf_addr = align(uc_addr - size_of::<SignalFrame>());
+    let ret_addr = sf_addr - 8;
+
+    let mut gregs = [0u64; 16];
+    gregs[0] = context.rax;
+    gregs[1] = context.rbx;
+    gregs[2] = context.rcx;
+    gregs[3] = context.rdx;
+    gregs[4] = context.rsi;
+    gregs[5] = context.rdi;
+    gregs[6] = context.rbp;
+    gregs[7] = context.rsp;
+    gregs[8] = context.r8;
+    gregs[9] = context.r9;
+    gregs[10] = context.r10;
+    gregs[11] = context.r11;
+    gregs[12] = context.r12;
+    gregs[13] = context.r13;
+    gregs[14] = context.r14;
+    gregs[15] = context.r15;
+
+    let ucontext = Ucontext {
+        uc_link: 0,
+        uc_stack: UserStack {
+            ss_sp: altstack.sp as u64,
+            ss_size: altstack.size as u64,
+            ss_flags: altstack.flags,
+            _pad: 0,
+        },
+        uc_mcontext: Mcontext {
+            oldmask: delivery.old_mask.as_raw(),
+            gregs,
+            pc: context.rip,
+            ..Default::default()
+        },
+        uc_sigmask: delivery.old_mask.as_raw(),
+    };
+
+    let frame = SignalFrame {
+        saved_mask: delivery.old_mask.as_raw(),
+        saved_context: *context,
+    };
+
+    let ok = UserPtr::<siginfo_t>::new(VirtAddr::new(info_addr))
+        .write(delivery.info)
+        .is_some()
+        && UserPtr::<Ucontext>::new(VirtAddr::new(uc_addr))
+            .write(ucontext)
+            .is_some()
+        && UserPtr::<SignalFrame>::new(VirtAddr::new(sf_addr))
+            .write(frame)
+            .is_some()
+        && UserPtr::<u64>::new(VirtAddr::new(ret_addr))
+            .write(delivery.restorer as u64)
+            .is_some();
+    if !ok {
         Process::exit(State::Signaled(Signal::SigSegv));
     }
 
-    // Place the restorer return address BELOW the signal frame so the
-    // handler's stack grows downward away from the frame, not into it.
-    // Also ensures RSP % 16 == 8 at handler entry (x86_64 ABI).
-    let ret_sp = frame_sp - 8;
-    let mut ret_ptr = UserPtr::<u64>::new(VirtAddr::new(ret_sp));
-    if ret_ptr.write(restorer as u64).is_none() {
-        Process::exit(State::Signaled(Signal::SigSegv));
-    }
-
-    // Modify context to jump to the handler.
-    context.rip = handler as u64;
-    context.rdi = signal as u64; // First argument: signal number.
-    context.rsp = ret_sp as u64;
+    // Hand control to the handler.
+    context.rip = delivery.handler as u64;
+    context.rdi = delivery.signal as u64;
+    context.rsi = info_addr as u64;
+    context.rdx = uc_addr as u64;
+    context.rsp = ret_addr as u64;
     context.rflags &= !consts::RFLAGS_DF;
 }
 

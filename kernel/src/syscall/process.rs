@@ -330,11 +330,11 @@ pub fn exit(error: usize) -> ! {
 pub fn fork(ctx: &Context) -> EResult<pid_t> {
     let old = Scheduler::get_current().get_process();
 
-    // Fork the current process. This puts both processes at this point in code.
     let (new_proc, new_task) = old.fork(ctx)?;
+    let child_pid = new_proc.get_pid();
     Scheduler::add_task_to_best_cpu(new_task.clone());
 
-    Ok(new_proc.get_pid())
+    Ok(child_pid)
 }
 
 #[wrap_syscall]
@@ -379,6 +379,7 @@ pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> 
         Mode::empty(),
         &proc.identity.lock(),
     )?;
+
     proc.fexecve(file, path_str, args, envs)?;
 
     unreachable!("fexecve should never return on success");
@@ -421,96 +422,76 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
 
     loop {
         let guard = proc.child_event.guard();
-        let mut children = proc.children.lock();
+        {
+            let mut children = proc.children.lock();
 
-        if children.is_empty() {
-            return Err(Errno::ECHILD);
-        }
-
-        let mut saw_match = false;
-        let mut reap: Option<(usize, pid_t, i32)> = None;
-        let mut report: Option<(pid_t, i32)> = None;
-
-        for (idx, child) in children.iter().enumerate() {
-            if !waitpid_matches(pid, caller_pgrp, child) {
-                continue;
+            if children.is_empty() {
+                return Err(Errno::ECHILD);
             }
-            saw_match = true;
 
-            let state = child.status.lock();
-            match *state {
-                State::Exited(code) => {
-                    reap = Some((idx, child.get_pid(), encode_exit(code)));
-                    break;
-                }
-                State::Signaled(sig) => {
-                    reap = Some((idx, child.get_pid(), encode_signaled(sig as u32)));
-                    break;
-                }
-                State::Stopped(sig)
-                    if (options & uapi::wait::WUNTRACED) != 0
-                        && child.stop_unwaited.swap(false, Ordering::AcqRel) =>
-                {
-                    report = Some((child.get_pid(), encode_stopped(sig as u32)));
-                    break;
-                }
-                _ if (options & uapi::wait::WCONTINUED) != 0
-                    && child.continue_unwaited.swap(false, Ordering::AcqRel) =>
-                {
-                    report = Some((child.get_pid(), 0xffff));
-                    break;
-                }
-                _ => {}
-            }
-        }
+            let mut saw_match = false;
+            let mut reap: Option<(usize, pid_t, i32)> = None;
+            let mut report: Option<(pid_t, i32)> = None;
 
-        if let Some((idx, child_pid, status)) = reap {
-            write_status(&mut stat_ptr, status)?;
-            children.remove(idx);
-            return Ok(child_pid);
-        }
-
-        if let Some((child_pid, status)) = report {
-            write_status(&mut stat_ptr, status)?;
-            return Ok(child_pid);
-        }
-
-        if !saw_match {
-            return Err(Errno::ECHILD);
-        }
-
-        if (options & uapi::wait::WNOHANG) != 0 {
-            return Ok(0);
-        }
-
-        if Scheduler::get_current().has_pending_signals() {
-            return Err(Errno::EINTR);
-        }
-
-        drop(children);
-        guard.wait();
-
-        // On wakeup, re-scan the child list first. Only surface EINTR if the
-        // rescan turns up nothing and we have a pending signal.
-        // Otherwise a SIGCHLD arriving in parallel with a child transition would race the legitimate reap and steal it.
-        if Scheduler::get_current().has_pending_signals() {
-            let children = proc.children.lock();
-            let any_ready = children.iter().any(|child| {
+            for (idx, child) in children.iter().enumerate() {
                 if !waitpid_matches(pid, caller_pgrp, child) {
-                    return false;
+                    continue;
                 }
+                saw_match = true;
+
                 let state = child.status.lock();
-                matches!(*state, State::Exited(_))
-                    || matches!(*state, State::Signaled(_))
-                    || ((options & uapi::wait::WUNTRACED) != 0
-                        && child.stop_unwaited.load(Ordering::Acquire))
-                    || ((options & uapi::wait::WCONTINUED) != 0
-                        && child.continue_unwaited.load(Ordering::Acquire))
-            });
-            drop(children);
-            if !any_ready {
-                return Err(Errno::EINTR);
+                match *state {
+                    State::Exited(code) => {
+                        reap = Some((idx, child.get_pid(), encode_exit(code)));
+                        break;
+                    }
+                    State::Signaled(sig) => {
+                        reap = Some((idx, child.get_pid(), encode_signaled(sig as u32)));
+                        break;
+                    }
+                    State::Stopped(sig)
+                        if (options & uapi::wait::WUNTRACED) != 0
+                            && child.stop_unwaited.swap(false, Ordering::AcqRel) =>
+                    {
+                        report = Some((child.get_pid(), encode_stopped(sig as u32)));
+                        break;
+                    }
+                    _ if (options & uapi::wait::WCONTINUED) != 0
+                        && child.continue_unwaited.swap(false, Ordering::AcqRel) =>
+                    {
+                        report = Some((child.get_pid(), 0xffff));
+                        break;
+                    }
+                    _ => {}
+                }
             }
+
+            if let Some((idx, child_pid, status)) = reap {
+                write_status(&mut stat_ptr, status)?;
+                children.remove(idx);
+                return Ok(child_pid);
+            }
+
+            if let Some((child_pid, status)) = report {
+                write_status(&mut stat_ptr, status)?;
+                return Ok(child_pid);
+            }
+
+            if !saw_match {
+                return Err(Errno::ECHILD);
+            }
+
+            if (options & uapi::wait::WNOHANG) != 0 {
+                return Ok(0);
+            }
+        }
+
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::ERESTART);
+        }
+        guard.wait();
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::ERESTART);
         }
     }
 }
@@ -583,7 +564,10 @@ pub fn thread_kill(pid: pid_t, tid: usize, sig: u32) -> EResult<pid_t> {
 
     if sig_num != 0 {
         let sig = Signal::try_from(sig_num).unwrap();
-        signal::send_signal_to_thread(&thread, sig);
+        let sender = Scheduler::get_current().get_process();
+        let mut info = signal::SigInfoData::user(sender.get_pid(), sender.identity.lock().user_id);
+        info.code = crate::uapi::signal::SI_TKILL as i32;
+        signal::send_signal_info_to_thread(&thread, sig, info);
     }
 
     Ok(0)

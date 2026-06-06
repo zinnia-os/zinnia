@@ -1,7 +1,11 @@
+use crate::memory::virt::VmFlags;
 use crate::{
     arch,
-    memory::{MemoryObject, PagedMemoryObject, VirtAddr, pmm::KernelAlloc, virt::VmFlags},
-    process::signal::Signal,
+    memory::{
+        MemoryObject, PagedMemoryObject, VirtAddr,
+        pmm::KernelAlloc,
+    },
+    process::signal::{self, SigInfoData, Signal},
     sched::Scheduler,
 };
 use alloc::sync::Arc;
@@ -114,7 +118,37 @@ fn signal_or_panic(info: &PageFaultInfo) -> bool {
     if info.caused_by_user {
         // Force SIGSEGV to the faulting user process. Using force_signal ensures the signal
         // cannot be masked or caught in a loop (handler is reset to SIG_DFL).
-        crate::process::signal::force_signal_to_thread(&task, Signal::SigSegv);
+        let code = if info.page_was_present {
+            crate::uapi::signal::SEGV_ACCERR
+        } else {
+            crate::uapi::signal::SEGV_MAPERR
+        };
+        let sig_info = SigInfoData {
+            code: code as i32,
+            addr: info.addr.value(),
+            ..Default::default()
+        };
+        let proc = task.get_process();
+        warn!(
+            "segfault in {} (pid {}): {} {} page at {:#x} (IP {:#x})",
+            proc.get_name(),
+            proc.get_pid(),
+            if info.caused_by_write {
+                "write to"
+            } else if info.caused_by_fetch {
+                "execute on"
+            } else {
+                "read from"
+            },
+            if info.page_was_present {
+                "present"
+            } else {
+                "non-present"
+            },
+            info.addr.value(),
+            info.ip.value(),
+        );
+        signal::force_signal_to_thread(&task, Signal::SigSegv, sig_info);
         return true; // Will be delivered on return to userspace.
     }
 

@@ -378,7 +378,15 @@ impl Process {
             }
         }
 
-        signal::notify_parent_of_child_state_change(&proc, false);
+        let (cld_code, cld_status) = match *proc.status.lock() {
+            State::Exited(code) => (uapi::signal::CLD_EXITED as i32, code as i32),
+            State::Signaled(sig) if sig.default_action() == signal::DefaultAction::CoreDump => {
+                (uapi::signal::CLD_DUMPED as i32, sig as i32)
+            }
+            State::Signaled(sig) => (uapi::signal::CLD_KILLED as i32, sig as i32),
+            _ => (uapi::signal::CLD_EXITED as i32, 0),
+        };
+        signal::notify_parent_of_child_state_change(&proc, cld_code, cld_status);
 
         drop(proc);
         drop(task);

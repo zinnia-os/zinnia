@@ -117,11 +117,12 @@ pub unsafe extern "C" fn amd64_syscall_stub() {
 extern "C" fn syscall_handler(frame: *mut Context) {
     unsafe {
         let frame = frame.as_mut().unwrap();
+        let restart = frame.snapshot_syscall();
 
         crate::syscall::dispatch(frame);
 
         // Check for pending signals before returning to userspace.
-        crate::process::signal::deliver_pending_signals(frame);
+        signal::deliver_pending_signals(frame, Some(restart));
     }
 }
 
@@ -257,8 +258,20 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
                 }
             };
 
+            let code = match sig {
+                Signal::SigIll => crate::uapi::signal::ILL_ILLOPC,
+                Signal::SigBus => crate::uapi::signal::BUS_ADRALN,
+                Signal::SigSegv => crate::uapi::signal::SEGV_MAPERR,
+                _ => 0,
+            };
+            let info = signal::SigInfoData {
+                code: code as i32,
+                addr: context.rip as usize,
+                ..Default::default()
+            };
+
             let task = Scheduler::get_current();
-            signal::send_signal_to_thread(&task, sig);
+            signal::send_signal_info_to_thread(&task, sig, info);
         }
         // Kernel exceptions are fatal.
         0x00..0x20 => {
@@ -294,7 +307,7 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
 
     // Check for pending signals before returning to userspace.
     if from_user {
-        signal::deliver_pending_signals(context);
+        signal::deliver_pending_signals(context, None);
     }
 }
 

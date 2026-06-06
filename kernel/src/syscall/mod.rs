@@ -154,11 +154,14 @@ pub(crate) fn dispatch(frame: &mut Context) {
 
         // Signals
         numbers::SIGPROCMASK => signal::sigprocmask,
-        numbers::SIGSUSPEND => sys_unimpl!("sigsuspend", Err(Errno::ENOSYS)),
-        numbers::SIGPENDING => sys_unimpl!("sigpending", Err(Errno::ENOSYS)),
+        numbers::SIGSUSPEND => signal::sigsuspend,
+        numbers::SIGPENDING => signal::sigpending,
         numbers::SIGACTION => signal::sigaction,
         numbers::SIGTIMEDWAIT => sys_unimpl!("sigtimedwait", Err(Errno::ENOSYS)),
-        numbers::SIGALTSTACK => sys_unimpl!("sigaltstack", Err(Errno::ENOSYS)),
+        numbers::SIGALTSTACK => {
+            SyscallReturn::into_ctx(signal::sigaltstack(frame), frame);
+            return;
+        }
         numbers::SIGRETURN => signal::sigreturn(frame),
 
         // Processes

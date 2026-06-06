@@ -2,11 +2,11 @@ use super::internal;
 use crate::{
     memory::{VirtAddr, stack::KernelStack},
     posix::errno::EResult,
-    process::{signal::SignalSet, task::Task},
+    process::task::Task,
 };
 use core::{fmt::Debug, mem::MaybeUninit};
 
-pub use internal::sched::Context;
+pub use internal::sched::{Context, SyscallRestart};
 assert_trait_impl!(TaskContext, Debug);
 assert_trait_impl!(Context, Default);
 assert_trait_impl!(Context, Clone);
@@ -97,12 +97,9 @@ pub unsafe fn jump_to_context(context: *mut Context) {
 /// When the handler returns, execution continues via the restorer which calls sigreturn.
 pub fn setup_signal_frame(
     context: &mut Context,
-    handler: usize,
-    signal: u32,
-    mask: SignalSet,
-    restorer: usize,
+    delivery: &crate::process::signal::SignalDelivery,
 ) {
-    internal::sched::setup_signal_frame(context, handler, signal, mask, restorer);
+    internal::sched::setup_signal_frame(context, delivery);
 }
 
 /// Restores the original context from a signal frame on the user stack.
@@ -117,9 +114,25 @@ pub fn restore_signal_frame(context: &mut Context) {
 #[doc(hidden)]
 #[allow(unused)]
 mod api {
-    use super::Context;
+    use super::{Context, SyscallRestart};
 
     fn set_return(ctx: &mut Context, val: usize, err: usize) {
         ctx.set_return(val, err);
+    }
+
+    fn sp(ctx: &Context) -> usize {
+        ctx.sp()
+    }
+
+    fn return_error(ctx: &Context) -> usize {
+        ctx.syscall_error()
+    }
+
+    fn snapshot_syscall(ctx: &Context) -> SyscallRestart {
+        ctx.snapshot_syscall()
+    }
+
+    fn restart_syscall(ctx: &mut Context, restart: &SyscallRestart) {
+        ctx.restart_syscall(restart);
     }
 }

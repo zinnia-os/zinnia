@@ -1,10 +1,13 @@
 use crate::{
-    arch::sched::Context,
+    arch::sched::{Context, SyscallRestart},
+    memory::{UserPtr, VirtAddr},
+    posix::errno::Errno,
     process::{Process, State, task::Task},
     sched::Scheduler,
     uapi::{
-        pid_t,
-        signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction},
+        self, pid_t,
+        signal::{self, MAX_SIGNAL, SIG_DFL, SIG_IGN, sigaction, siginfo_t, sigval},
+        uid_t,
     },
 };
 use alloc::sync::Arc;
@@ -130,8 +133,12 @@ impl SignalSet {
         self.inner
     }
 
+    const fn bit(sig: Signal) -> u64 {
+        1u64 << (sig as u32 - 1)
+    }
+
     pub const fn set(&mut self, sig: Signal, state: bool) {
-        let bit = 1u64 << sig as u32;
+        let bit = Self::bit(sig);
         if state {
             self.inner |= bit;
         } else {
@@ -140,7 +147,7 @@ impl SignalSet {
     }
 
     pub const fn is_set(&self, sig: Signal) -> bool {
-        self.inner & (1u64 << sig as u32) != 0
+        self.inner & Self::bit(sig) != 0
     }
 
     pub const fn is_empty(&self) -> bool {
@@ -153,7 +160,7 @@ impl SignalSet {
             return None;
         }
         let bit = self.inner.trailing_zeros();
-        Signal::try_from(bit).ok()
+        Signal::try_from(bit + 1).ok()
     }
 
     /// Remove the unblockable signals (SIGKILL, SIGSTOP) from this set.
@@ -284,27 +291,123 @@ impl SignalState {
     }
 }
 
+/// Per-signal information delivered to [`uapi::signal::SA_SIGINFO`] handlers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SigInfoData {
+    pub code: i32,
+    pub errno: i32,
+    pub pid: pid_t,
+    pub uid: uid_t,
+    pub addr: usize,
+    pub status: i32,
+}
+
+impl SigInfoData {
+    /// Info for a signal raised by the kernel.
+    pub fn kernel() -> Self {
+        Self {
+            code: signal::SI_KERNEL as i32,
+            ..Default::default()
+        }
+    }
+
+    /// Info for a signal sent by a process via kill/tkill.
+    pub fn user(sender: pid_t, uid: uid_t) -> Self {
+        Self {
+            code: signal::SI_USER as i32,
+            pid: sender,
+            uid,
+            ..Default::default()
+        }
+    }
+
+    /// Convert to the userspace [`siginfo_t`] for a given signal number.
+    pub fn to_user(self, sig: Signal) -> siginfo_t {
+        siginfo_t {
+            si_signo: sig as i32,
+            si_code: self.code,
+            si_errno: self.errno,
+            si_pid: self.pid,
+            si_uid: self.uid,
+            si_addr: UserPtr::new(VirtAddr::new(self.addr)),
+            si_status: self.status,
+            si_value: sigval { sival_int: 0 },
+        }
+    }
+}
+
+/// The alternate signal stack registered via `sigaltstack`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AltStack {
+    pub sp: usize,
+    pub size: usize,
+    pub flags: i32,
+}
+
+impl AltStack {
+    /// Whether an alternate stack is registered and usable.
+    pub fn is_enabled(&self) -> bool {
+        self.flags & signal::SS_DISABLE as i32 == 0 && self.size != 0
+    }
+
+    /// Whether the given stack pointer currently points inside this stack.
+    pub fn contains(&self, sp: usize) -> bool {
+        self.is_enabled() && sp > self.sp && sp <= self.sp + self.size
+    }
+}
+
+pub struct SignalDelivery {
+    pub handler: usize,
+    pub signal: u32,
+    pub info: siginfo_t,
+    pub old_mask: SignalSet,
+    pub flags: u32,
+    pub restorer: usize,
+    pub altstack: AltStack,
+}
+
 /// Per-thread signal state.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ThreadSignalState {
     /// Signals pending delivery to this thread.
     pub pending: SignalSet,
     /// Current signal mask (signals blocked from delivery).
     pub mask: SignalSet,
+    /// Per-signal info for the currently pending signals.
+    pub pending_info: [SigInfoData; (MAX_SIGNAL + 1) as usize],
+    /// The alternate signal stack for this thread.
+    pub altstack: AltStack,
+    /// Mask to restore once the next signal is delivered.
+    pub restore_mask: Option<SignalSet>,
+}
+
+impl Default for ThreadSignalState {
+    fn default() -> Self {
+        Self {
+            pending: SignalSet::new(),
+            mask: SignalSet::new(),
+            pending_info: [SigInfoData::default(); (MAX_SIGNAL + 1) as usize],
+            altstack: AltStack::default(),
+            restore_mask: None,
+        }
+    }
+}
+
+/// Signals whose default action stops the process.
+const STOP_SIGNALS: [Signal; 4] = [
+    Signal::SigStop,
+    Signal::SigTstp,
+    Signal::SigTtin,
+    Signal::SigTtou,
+];
+
+pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
+    send_signal_info_to_thread(task, sig, SigInfoData::kernel());
 }
 
 /// Queue a signal on the given thread and wake it if it is sleeping.
-pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
+pub fn send_signal_info_to_thread(task: &Arc<Task>, sig: Signal, info: SigInfoData) {
     let proc = task.get_process();
-
-    if !sig.is_uncatchable() {
-        let action = *proc.signal_actions.lock().get_action(sig);
-        if action.is_ignore()
-            || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
-        {
-            return;
-        }
-    }
 
     // SIGCONT (and SIGKILL) must unblock a stopped process so it can run again.
     if sig == Signal::SigCont || sig == Signal::SigKill {
@@ -320,55 +423,97 @@ pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
         };
         if was_stopped {
             proc.cont_event.wake_all();
-            notify_parent_of_child_state_change(&proc, false);
+            if sig == Signal::SigCont {
+                notify_parent_of_child_state_change(
+                    &proc,
+                    signal::CLD_CONTINUED as i32,
+                    Signal::SigCont as i32,
+                );
+            }
+        }
+    }
+
+    if !sig.is_uncatchable() {
+        let action = *proc.signal_actions.lock().get_action(sig);
+        if action.is_ignore()
+            || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
+        {
+            return;
         }
     }
 
     {
         let mut state = task.signal.lock();
+        // SIGCONT discards pending stop signals and vice versa.
+        if sig == Signal::SigCont {
+            for s in STOP_SIGNALS {
+                state.pending.set(s, false);
+            }
+        } else if STOP_SIGNALS.contains(&sig) {
+            state.pending.set(Signal::SigCont, false);
+        }
         state.pending.set(sig, true);
+        state.pending_info[sig as usize] = info;
     }
     proc.signalfd_event.wake_all();
     Scheduler::wake_task(task.clone());
 }
 
+/// Send a process-directed signal with default (kernel-originated) info.
 pub fn send_signal_to_process(proc: &Arc<Process>, sig: Signal) -> bool {
-    let thread = {
+    send_signal_info_to_process(proc, sig, SigInfoData::kernel())
+}
+
+/// Deliver a process-directed signal, choosing a thread that has it unblocked.
+pub fn send_signal_info_to_process(proc: &Arc<Process>, sig: Signal, info: SigInfoData) -> bool {
+    let target = {
         let threads = proc.threads.lock();
-        threads.first().cloned()
+        threads
+            .iter()
+            .find(|t| !t.signal.lock().mask.is_set(sig))
+            .or_else(|| threads.first())
+            .cloned()
     };
 
-    let Some(thread) = thread else {
+    let Some(target) = target else {
         return false;
     };
 
-    send_signal_to_thread(&thread, sig);
+    send_signal_info_to_thread(&target, sig, info);
     true
 }
 
-pub fn notify_parent_of_child_state_change(proc: &Arc<Process>, stopped: bool) {
+pub fn notify_parent_of_child_state_change(proc: &Arc<Process>, code: i32, status: i32) {
     let Some(parent) = proc.get_parent() else {
         return;
     };
 
     parent.child_event.wake_all();
 
-    if stopped {
+    if code == signal::CLD_STOPPED as i32 {
         let action = *parent.signal_actions.lock().get_action(Signal::SigChld);
         if action.flags & signal::SA_NOCLDSTOP != 0 {
             return;
         }
     }
 
-    send_signal_to_process(&parent, Signal::SigChld);
+    let info = SigInfoData {
+        code,
+        pid: proc.get_pid(),
+        uid: proc.identity.lock().user_id,
+        status,
+        ..Default::default()
+    };
+    send_signal_info_to_process(&parent, Signal::SigChld, info);
 }
 
-pub fn force_signal_to_thread(task: &Task, sig: Signal) {
+pub fn force_signal_to_thread(task: &Task, sig: Signal, info: SigInfoData) {
     // Unmask the signal so it's deliverable.
     {
         let mut state = task.signal.lock();
         state.mask.set(sig, false);
         state.pending.set(sig, true);
+        state.pending_info[sig as usize] = info;
     }
 
     // Reset the handler to SIG_DFL so the default action (terminate) is taken.
@@ -380,12 +525,17 @@ pub fn force_signal_to_thread(task: &Task, sig: Signal) {
 
 /// Send a signal to every process in the given process group.
 pub fn send_signal_to_pgrp(pgrp: pid_t, sig: Signal) -> usize {
+    send_signal_info_to_pgrp(pgrp, sig, SigInfoData::kernel())
+}
+
+/// Send a signal with the given info to every process in a process group.
+pub fn send_signal_info_to_pgrp(pgrp: pid_t, sig: Signal, info: SigInfoData) -> usize {
     let table = crate::process::PROCESS_TABLE.lock();
     let mut delivered = 0;
 
     for proc in table.values() {
         let Some(proc) = proc.upgrade() else { continue }; // TODO: Should entries be removed?
-        if *proc.pgrp.lock() == pgrp && send_signal_to_process(&proc, sig) {
+        if *proc.pgrp.lock() == pgrp && send_signal_info_to_process(&proc, sig, info) {
             delivered += 1;
         }
     }
@@ -393,27 +543,37 @@ pub fn send_signal_to_pgrp(pgrp: pid_t, sig: Signal) -> usize {
     delivered
 }
 
-/// Deliver pending signals to the current thread. Called before returning to
-/// userspace. May modify the context to redirect execution to a user handler,
-/// terminate the process, or block until SIGCONT (for stop signals).
-///
-/// At most one user handler is set up per call; ignored and default-ignore
-/// signals are consumed in the same pass so a later important signal behind
-/// them in the bitmap is not delayed.
-pub fn deliver_pending_signals(context: &mut Context) {
+pub fn deliver_pending_signals(context: &mut Context, syscall: Option<SyscallRestart>) {
+    let restartable =
+        syscall.is_some() && context.syscall_error() == uapi::errno::ERESTART as usize;
+
     loop {
         let task = Scheduler::get_current();
         let proc = task.get_process();
 
         let sig = {
             let state = task.signal.lock();
-            match (state.pending & !state.mask).first_set() {
-                Some(s) => s,
-                None => return,
-            }
+            (state.pending & !state.mask).first_set()
         };
 
-        task.signal.lock().pending.set(sig, false);
+        let Some(sig) = sig else {
+            // If a syscall was interrupted by such a signal, restart it transparently.
+            if let Some(sc) = syscall.as_ref().filter(|_| restartable) {
+                context.restart_syscall(sc);
+            }
+
+            let mut state = task.signal.lock();
+            if let Some(mask) = state.restore_mask.take() {
+                state.mask = mask;
+            }
+            return;
+        };
+
+        let info = {
+            let mut state = task.signal.lock();
+            state.pending.set(sig, false);
+            state.pending_info[sig as usize]
+        };
 
         let action = *proc.signal_actions.lock().get_action(sig);
 
@@ -434,7 +594,22 @@ pub fn deliver_pending_signals(context: &mut Context) {
             }
         }
 
-        let old_mask = task.signal.lock().mask;
+        if restartable {
+            if let Some(sc) = syscall.as_ref() {
+                if action.flags & signal::SA_RESTART != 0 {
+                    context.restart_syscall(sc);
+                } else {
+                    context.set_return(0, Errno::EINTR as usize);
+                }
+            }
+        }
+
+        // The mask restored on sigreturn, or otherwise the current mask.
+        let (old_mask, altstack) = {
+            let mut state = task.signal.lock();
+            let old_mask = state.restore_mask.take().unwrap_or(state.mask);
+            (old_mask, state.altstack)
+        };
 
         {
             let mut state = task.signal.lock();
@@ -451,13 +626,16 @@ pub fn deliver_pending_signals(context: &mut Context) {
                 .set_action(sig, SigAction::default());
         }
 
-        crate::arch::sched::setup_signal_frame(
-            context,
-            action.handler,
-            sig as u32,
+        let delivery = SignalDelivery {
+            handler: action.handler,
+            signal: sig as u32,
+            info: info.to_user(sig),
             old_mask,
-            action.restorer,
-        );
+            flags: action.flags,
+            restorer: action.restorer,
+            altstack,
+        };
+        crate::arch::sched::setup_signal_frame(context, &delivery);
 
         return;
     }
@@ -468,9 +646,9 @@ pub fn deliver_pending_signals(context: &mut Context) {
 fn enter_stopped_state(proc: &Arc<Process>, sig: Signal) {
     *proc.status.lock() = State::Stopped(sig);
     proc.stop_unwaited.store(true, Ordering::Release);
-    notify_parent_of_child_state_change(proc, true);
+    notify_parent_of_child_state_change(proc, signal::CLD_STOPPED as i32, sig as i32);
 
-    // Park on cont_event until SIGCONT (or SIGKILL) flips us back to Running.
+    // Park on cont_event until SIGCONT (or SIGKILL) flips us out of Stopped.
     loop {
         let guard = proc.cont_event.guard();
         if !matches!(*proc.status.lock(), State::Stopped(_)) {
