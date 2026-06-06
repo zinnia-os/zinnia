@@ -111,7 +111,7 @@ impl FileOps for PipeFile {
 
             // If there was at least one byte written to the pipe
             if len > 0 {
-                self.buffer.wr_queue.wake_one();
+                self.buffer.wr_queue.wake_all();
                 return Ok(len as _);
             }
 
@@ -155,7 +155,7 @@ impl FileOps for PipeFile {
                 inner.buffer.write(&v)
             };
             if len > 0 {
-                self.buffer.rd_queue.wake_one();
+                self.buffer.rd_queue.wake_all();
                 return Ok(len as _);
             }
 
