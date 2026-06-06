@@ -3,4 +3,4 @@
 	url = https://github.com/uACPI/uacpi
 [submodule "bindings/flanterm/flanterm"]
 	path = bindings/flanterm/flanterm
-	url = https://codeberg.org/mintsuki/flanterm
+	url = https://github.com/Mintsuki/Flanterm
