@@ -242,9 +242,8 @@ impl crate::device::Device for DrmDeviceNode {
 
 impl FileOps for DrmFile {
     fn read(&self, file: &File, buf: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let guard = self.rd_event.guard();
-
         loop {
+            let guard = self.rd_event.guard();
             let event = {
                 let mut events = self.events.lock();
                 if events.is_empty() {

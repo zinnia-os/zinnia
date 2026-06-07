@@ -277,9 +277,9 @@ impl SocketOps for UdpSocket {
     ) -> EResult<(isize, usize, usize, u32)> {
         let _ = control;
         let peek = flags & MSG_PEEK != 0;
-        let rd_guard = self.rd_event.guard();
 
         loop {
+            let rd_guard = self.rd_event.guard();
             {
                 let mut inner = self.inner.lock();
                 if inner.shutdown.contains(ShutdownFlags::Read) {

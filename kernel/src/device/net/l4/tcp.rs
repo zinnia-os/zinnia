@@ -281,8 +281,8 @@ impl TcpSocket {
             return Err(Errno::EINPROGRESS);
         }
 
-        let guard = self.wr_event.guard();
         loop {
+            let guard = self.wr_event.guard();
             {
                 let inner = self.inner.lock();
                 match inner.state {
@@ -521,8 +521,8 @@ impl SocketOps for TcpSocket {
     }
 
     fn accept(&self, nonblocking: bool) -> EResult<Arc<Socket>> {
-        let guard = self.accept_event.guard();
         loop {
+            let guard = self.accept_event.guard();
             {
                 let mut inner = self.inner.lock();
                 if inner.state != TcpState::Listen {
@@ -641,9 +641,9 @@ impl SocketOps for TcpSocket {
     ) -> EResult<(isize, usize, usize, u32)> {
         let _ = (addr, control);
         let peek = flags & MSG_PEEK != 0;
-        let guard = self.rd_event.guard();
 
         loop {
+            let guard = self.rd_event.guard();
             {
                 let mut inner = self.inner.lock();
                 if inner.state == TcpState::Listen || inner.state == TcpState::SynSent {

@@ -125,6 +125,15 @@ pub trait SocketOps: Send + Sync + Any {
 
     /// Get the events relevant to the requested poll mask.
     fn poll_events(&self, mask: PollFlags) -> PollEventSet<'_>;
+
+    /// Called when the last file descriptor for this open socket is dropped.
+    fn on_close(&self) {}
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        self.ops.on_close();
+    }
 }
 
 impl FileOps for Socket {

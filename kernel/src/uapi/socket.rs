@@ -133,7 +133,7 @@ pub const SO_TIMESTAMPNS: u32 = 30;
 pub const SO_PRIORITY: u32 = 31;
 pub const SO_MARK: u32 = 32;
 
-pub const SOMAXCONN: u32 = 1;
+pub const SOMAXCONN: u32 = 128;
 
 pub const MSG_CTRUNC: u32 = 0x1;
 pub const MSG_DONTROUTE: u32 = 0x2;

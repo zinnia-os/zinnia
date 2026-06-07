@@ -31,6 +31,7 @@ const BUFFER_SIZE: usize = 0x4000;
 /// or extended by plain data-only sends.
 struct InflightSection {
     files: Vec<Arc<File>>,
+    cred: Option<ucred>,
     bytes: usize,
 }
 
@@ -40,10 +41,6 @@ const fn cmsg_align(x: usize) -> usize {
     (x + a - 1) & !(a - 1)
 }
 
-const fn cmsg_len(payload: usize) -> usize {
-    cmsg_align(size_of::<cmsghdr>()) + payload
-}
-
 /// Record a send of `bytes` bytes (and optionally fds) into the peer's
 /// inflight section queue. Data-only sends extend the trailing section's
 /// byte count; a send that carries fds always starts a fresh section so
@@ -51,16 +48,18 @@ const fn cmsg_len(payload: usize) -> usize {
 fn push_inflight(
     inflight: &mut VecDeque<InflightSection>,
     files: &mut Vec<Arc<File>>,
+    cred: Option<ucred>,
     bytes: usize,
 ) {
-    if files.is_empty() {
+    if files.is_empty() && cred.is_none() {
         if bytes == 0 {
             return;
         }
         match inflight.back_mut() {
-            Some(back) if back.files.is_empty() => back.bytes += bytes,
+            Some(back) if back.files.is_empty() && back.cred.is_none() => back.bytes += bytes,
             _ => inflight.push_back(InflightSection {
                 files: Vec::new(),
+                cred: None,
                 bytes,
             }),
         }
@@ -73,12 +72,15 @@ fn push_inflight(
     if let Some(back) = inflight.back_mut()
         && back.bytes == 0
         && back.files.is_empty()
+        && back.cred.is_none()
     {
         back.files = taken;
+        back.cred = cred;
         back.bytes = bytes;
     } else {
         inflight.push_back(InflightSection {
             files: taken,
+            cred,
             bytes,
         });
     }
@@ -105,6 +107,7 @@ struct LocalInner {
     shutdown: ShutdownFlags,
     peer_closed: bool,
     owner_cred: ucred,
+    passcred: bool,
 }
 
 pub struct LocalSocket {
@@ -139,6 +142,7 @@ fn make_socket(state: State, sock_type: u32) -> EResult<Arc<LocalSocket>> {
             shutdown: ShutdownFlags::empty(),
             peer_closed: false,
             owner_cred: current_cred(),
+            passcred: false,
         }),
         rd_event: Event::new(),
         wr_event: Event::new(),
@@ -249,49 +253,99 @@ impl LocalSocket {
         Ok(())
     }
 
-    fn build_cmsg(
-        inflight: &mut VecDeque<InflightSection>,
+    /// Installs detached SCM_RIGHTS fds into the fd table and serializes them.
+    fn install_cmsg(
         control: &mut [u8],
+        files: Vec<Arc<File>>,
+        cred: Option<ucred>,
         flags: u32,
         out_flags: &mut u32,
-    ) -> EResult<usize> {
-        // A caller that didn't ask for ancillary data (plain read / recv)
-        // leaves fds pending for a future recvmsg rather than dropping them.
-        if control.is_empty() {
-            return Ok(0);
-        }
-
-        let Some(section) = inflight.front_mut() else {
-            return Ok(0);
-        };
-        if section.files.is_empty() {
-            return Ok(0);
+    ) -> usize {
+        if control.is_empty() || (files.is_empty() && cred.is_none()) {
+            return 0;
         }
 
         let hdr_size = size_of::<cmsghdr>();
         let header_aligned = cmsg_align(hdr_size);
+        let mut off = 0usize;
 
-        let available = control.len();
-        if available <= header_aligned {
-            let _ = core::mem::take(&mut section.files);
-            *out_flags |= MSG_CTRUNC;
-            return Ok(0);
+        let write_cmsg = |control: &mut [u8],
+                          off: usize,
+                          cmsg_type: u32,
+                          payload: &[u8],
+                          out_flags: &mut u32|
+         -> Option<usize> {
+            let total_len = header_aligned + payload.len();
+            if off
+                .checked_add(total_len)
+                .is_none_or(|end| end > control.len())
+            {
+                *out_flags |= MSG_CTRUNC;
+                return None;
+            }
+
+            let hdr = cmsghdr {
+                cmsg_len: total_len as socklen_t,
+                cmsg_level: SOL_SOCKET as i32,
+                cmsg_type: cmsg_type as i32,
+            };
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &hdr as *const _ as *const u8,
+                    control.as_mut_ptr().add(off),
+                    hdr_size,
+                );
+            }
+            for b in &mut control[off + hdr_size..off + header_aligned] {
+                *b = 0;
+            }
+            control[off + header_aligned..off + total_len].copy_from_slice(payload);
+
+            let next = off + cmsg_align(total_len);
+            if next <= control.len() {
+                for b in &mut control[off + total_len..next] {
+                    *b = 0;
+                }
+            }
+            Some(next)
+        };
+
+        if let Some(cred) = cred {
+            let mut payload = [0u8; size_of::<ucred>()];
+            payload[0..4].copy_from_slice(&cred.pid.to_ne_bytes());
+            payload[4..8].copy_from_slice(&cred.uid.to_ne_bytes());
+            payload[8..12].copy_from_slice(&cred.gid.to_ne_bytes());
+            if let Some(next) = write_cmsg(control, off, SCM_CREDENTIALS, &payload, out_flags) {
+                off = next;
+            }
         }
 
-        let fd_slot_count = (available - header_aligned) / size_of::<i32>();
-        let n = min(section.files.len(), fd_slot_count);
+        let available = control.len().saturating_sub(off);
+        if !files.is_empty() && available <= header_aligned {
+            *out_flags |= MSG_CTRUNC;
+            return off;
+        }
+
+        let fd_slot_count = available.saturating_sub(header_aligned) / size_of::<i32>();
+        let n = min(files.len(), fd_slot_count);
+        if files.len() > n {
+            *out_flags |= MSG_CTRUNC;
+        }
+        if n == 0 {
+            return off;
+        }
 
         let cloexec = flags & MSG_CMSG_CLOEXEC != 0;
 
         let proc = Scheduler::get_current().get_process();
         let mut installed_fds: Vec<i32> = Vec::with_capacity(n);
 
-        let taken: Vec<Arc<File>> = section.files.drain(..n).collect();
         {
             let mut fdtable = proc.open_files.lock();
-            for file in taken {
+            for file in files.iter().take(n) {
                 let desc = FileDescription {
-                    file,
+                    file: file.clone(),
                     close_on_exec: AtomicBool::new(cloexec),
                 };
                 match fdtable.open_file(desc, 0) {
@@ -305,42 +359,21 @@ impl LocalSocket {
             }
         }
 
-        // Discard any fds in this section that we could not (or chose not to) deliver.
-        // Dropping the Arc<File> runs File cleanup when the last ref goes away.
-        if !section.files.is_empty() {
-            *out_flags |= MSG_CTRUNC;
-            section.files.clear();
-        }
+        drop(files);
 
         let installed = installed_fds.len();
+        if installed == 0 {
+            return off;
+        }
+
         let payload = installed * size_of::<i32>();
-        let total_len = header_aligned + payload;
-
-        let hdr = cmsghdr {
-            cmsg_len: cmsg_len(payload) as socklen_t,
-            cmsg_level: SOL_SOCKET as i32,
-            cmsg_type: SCM_RIGHTS as i32,
-        };
-
-        // Write header.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &hdr as *const _ as *const u8,
-                control.as_mut_ptr(),
-                hdr_size,
-            );
-        }
-        // Zero any header padding up to the data offset.
-        for b in &mut control[hdr_size..header_aligned] {
-            *b = 0;
-        }
-        // Write fds.
-        for (i, fd) in installed_fds.iter().enumerate() {
-            let off = header_aligned + i * size_of::<i32>();
-            control[off..off + 4].copy_from_slice(&fd.to_ne_bytes());
+        let mut fd_payload = vec![0u8; payload];
+        for (i, fd) in installed_fds.into_iter().enumerate() {
+            let payload_off = i * size_of::<i32>();
+            fd_payload[payload_off..payload_off + 4].copy_from_slice(&fd.to_ne_bytes());
         }
 
-        Ok(total_len)
+        write_cmsg(control, off, SCM_RIGHTS, &fd_payload, out_flags).unwrap_or(off)
     }
 
     fn write_addr(addr: &Option<Vec<u8>>, buf: &mut [u8]) -> usize {
@@ -404,22 +437,27 @@ impl SocketOps for LocalSocket {
     }
 
     fn accept(&self, nonblocking: bool) -> EResult<Arc<Socket>> {
-        let guard = self.accept_event.guard();
-        loop {
-            {
-                let mut inner = self.inner.lock();
-                if inner.state != State::Listening {
-                    return Err(Errno::EINVAL);
-                }
-                if let Some(sock) = inner.backlog.pop_front() {
-                    return Ok(sock);
-                }
+        let attempt = || -> Option<EResult<Arc<Socket>>> {
+            let mut inner = self.inner.lock();
+            if inner.state != State::Listening {
+                return Some(Err(Errno::EINVAL));
             }
-            if nonblocking {
-                return Err(Errno::EAGAIN);
+            inner.backlog.pop_front().map(Ok)
+        };
+
+        if nonblocking {
+            return attempt().unwrap_or(Err(Errno::EAGAIN));
+        }
+        loop {
+            let guard = self.accept_event.guard();
+            if let Some(r) = attempt() {
+                return r;
+            }
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
             }
             guard.wait();
-            if crate::sched::Scheduler::get_current().has_pending_signals() {
+            if Scheduler::get_current().has_pending_signals() {
                 return Err(Errno::EINTR);
             }
         }
@@ -474,10 +512,12 @@ impl SocketOps for LocalSocket {
             }
 
             let listener_cred = listener_inner.owner_cred;
+            let listener_passcred = listener_inner.passcred;
             {
                 let mut server_inner = server_end.inner.lock();
                 server_inner.peer = Some(self_arc);
                 server_inner.owner_cred = listener_cred;
+                server_inner.passcred = listener_passcred;
             }
 
             let server_socket = Socket::new(AF_UNIX, sock_type, server_end.clone())?;
@@ -490,8 +530,8 @@ impl SocketOps for LocalSocket {
             self_inner.state = State::Connected;
         }
 
-        listener.accept_event.wake_one();
-        listener.rd_event.wake_one();
+        listener.accept_event.wake_all();
+        listener.rd_event.wake_all();
 
         Ok(())
     }
@@ -535,6 +575,7 @@ impl SocketOps for LocalSocket {
         let mut files_to_send: Vec<Arc<File>> = Vec::new();
         let mut has_rights_cmsg = false;
         Self::parse_scm_rights(control, &mut files_to_send, &mut has_rights_cmsg)?;
+        let sender_cred = current_cred();
 
         // Zero-length send: still deliver any fds to the peer's inflight
         // queue (attached to the next data that arrives) and return.
@@ -545,39 +586,69 @@ impl SocketOps for LocalSocket {
                 return Err(Errno::EPIPE);
             }
             if has_rights_cmsg {
-                push_inflight(&mut peer_inner.inflight, &mut files_to_send, 0);
+                let cred = peer_inner.passcred.then_some(sender_cred);
+                push_inflight(&mut peer_inner.inflight, &mut files_to_send, cred, 0);
             }
             return Ok(0);
         }
 
-        let wr_guard = self.wr_event.guard();
-        loop {
-            {
+        let mut scratch = vec![0u8; BUFFER_SIZE];
+
+        let mut attempt = || -> Option<EResult<isize>> {
+            let start_offset = buf.total_offset();
+            let chunk = min(buf.len() - start_offset, BUFFER_SIZE);
+            if chunk == 0 {
+                return Some(Ok(0));
+            }
+            if let Err(e) = buf.copy_to_slice(&mut scratch[..chunk]) {
+                return Some(Err(e));
+            }
+
+            let written = {
                 let mut peer_inner = peer.inner.lock();
                 if peer_inner.peer_closed || peer_inner.shutdown.contains(ShutdownFlags::Read) {
+                    buf.set_offset(start_offset);
                     self.maybe_sigpipe(flags);
-                    return Err(Errno::EPIPE);
+                    return Some(Err(Errno::EPIPE));
                 }
 
                 let available = peer_inner.recv_buf.get_available_len();
-                if available > 0 {
-                    let want = min(buf.len() - buf.total_offset(), available);
-                    let mut scratch = vec![0u8; min(want, BUFFER_SIZE)];
-                    buf.copy_to_slice(&mut scratch)?;
-                    let written = peer_inner.recv_buf.write(&scratch);
-
-                    if written > 0 {
-                        push_inflight(&mut peer_inner.inflight, &mut files_to_send, written);
-                        peer.rd_event.wake_one();
-                        return Ok(written as isize);
-                    }
+                let take = min(chunk, available);
+                let written = if take > 0 {
+                    peer_inner.recv_buf.write(&scratch[..take])
+                } else {
+                    0
+                };
+                if written > 0 {
+                    let cred = peer_inner.passcred.then_some(sender_cred);
+                    push_inflight(&mut peer_inner.inflight, &mut files_to_send, cred, written);
+                    peer.rd_event.wake_all();
                 }
+                written
+            };
+
+            if written > 0 {
+                buf.set_offset(start_offset + written);
+                return Some(Ok(written as isize));
             }
 
-            if nonblocking {
-                return Err(Errno::EAGAIN);
+            // Ring full: rewind and wait for the peer to drain.
+            buf.set_offset(start_offset);
+            None
+        };
+
+        if nonblocking {
+            return attempt().unwrap_or(Err(Errno::EAGAIN));
+        }
+        loop {
+            let guard = self.wr_event.guard();
+            if let Some(r) = attempt() {
+                return r;
             }
-            wr_guard.wait();
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
+            }
+            guard.wait();
             if Scheduler::get_current().has_pending_signals() {
                 return Err(Errno::EINTR);
             }
@@ -599,70 +670,101 @@ impl SocketOps for LocalSocket {
 
         let peek = flags & MSG_PEEK != 0;
 
-        let rd_guard = self.rd_event.guard();
-        loop {
+        // Bounce buffer allocated outside the lock (see sendmsg).
+        let mut scratch = vec![0u8; BUFFER_SIZE];
+
+        let mut attempt = || -> Option<EResult<(isize, usize, usize, u32)>> {
+            let mut len = 0usize;
+            let mut cmsg_files: Vec<Arc<File>> = Vec::new();
+            let mut cmsg_cred: Option<ucred> = None;
+            let mut wake_writer = false;
+            let mut ready = false;
+            // Draining our recv_buf makes the *peer* writable so we wake peer.wr_event.
+            let mut writer_to_wake: Option<Arc<LocalSocket>> = None;
             {
                 let mut inner = self.inner.lock();
                 if inner.state != State::Connected {
-                    return Err(Errno::ENOTCONN);
+                    return Some(Err(Errno::ENOTCONN));
                 }
 
                 let data_len = inner.recv_buf.get_data_len();
 
                 if data_len > 0 {
+                    ready = true;
                     let mut recvcount = min(buf.len(), data_len);
-                    // Clamp to the current barrier section so we don't read
-                    // past data that belongs to a later fd-carrying message.
                     if let Some(front) = inner.inflight.front()
                         && front.bytes > 0
                     {
                         recvcount = min(recvcount, front.bytes);
                     }
 
-                    let mut scratch = vec![0u8; min(recvcount, BUFFER_SIZE)];
-                    let len = inner.recv_buf.peek(&mut scratch);
+                    len = inner
+                        .recv_buf
+                        .peek(&mut scratch[..min(recvcount, BUFFER_SIZE)]);
 
-                    if len > 0 {
-                        buf.copy_from_slice(&scratch[..len])?;
+                    if !control.is_empty()
+                        && let Some(front) = inner.inflight.front_mut()
+                    {
+                        cmsg_files = core::mem::take(&mut front.files);
+                        cmsg_cred = front.cred.take();
                     }
 
-                    // Data made it to userspace (or there was none). Now
-                    // commit: install cmsg fds and advance the ring cursor.
-                    let mut out_flags = 0u32;
-                    let ctrl_written =
-                        Self::build_cmsg(&mut inner.inflight, control, flags, &mut out_flags)?;
-
                     if len > 0 && !peek {
-                        let mut drop = vec![0u8; len];
-                        inner.recv_buf.read(&mut drop);
+                        inner.recv_buf.read(&mut scratch[..len]);
 
                         if let Some(front) = inner.inflight.front_mut() {
+                            if control.is_empty() {
+                                front.cred = None;
+                            }
                             front.bytes = front.bytes.saturating_sub(len);
-                            // Advance to the next section once this one's data range is drained.
-                            // Any fds still sitting here were not delivered (caller didn't pass a control buffer).
                             if front.bytes == 0 && inner.inflight.len() > 1 {
                                 inner.inflight.pop_front();
                             }
                         }
-                        self.wr_event.wake_one();
+                        wake_writer = true;
+                        writer_to_wake = inner.peer.clone();
                     }
-
-                    return Ok((len as isize, 0, ctrl_written, out_flags));
-                }
-
-                if inner.shutdown.contains(ShutdownFlags::Read) || inner.peer_closed {
-                    // Even on EOF, hand back any remaining inflight fds.
-                    let mut out_flags = 0u32;
-                    let ctrl_written =
-                        Self::build_cmsg(&mut inner.inflight, control, flags, &mut out_flags)?;
-                    return Ok((0, 0, ctrl_written, out_flags));
+                } else if inner.shutdown.contains(ShutdownFlags::Read) || inner.peer_closed {
+                    ready = true;
+                    if !control.is_empty()
+                        && let Some(front) = inner.inflight.front_mut()
+                    {
+                        cmsg_files = core::mem::take(&mut front.files);
+                        cmsg_cred = front.cred.take();
+                    }
                 }
             }
 
-            if nonblocking {
-                return Err(Errno::EAGAIN);
+            if !ready {
+                return None;
             }
-            rd_guard.wait();
+
+            if len > 0 {
+                if let Err(e) = buf.copy_from_slice(&scratch[..len]) {
+                    return Some(Err(e));
+                }
+            }
+            let mut out_flags = 0u32;
+            let ctrl_written =
+                Self::install_cmsg(control, cmsg_files, cmsg_cred, flags, &mut out_flags);
+            if wake_writer && let Some(peer) = &writer_to_wake {
+                peer.wr_event.wake_all();
+            }
+            Some(Ok((len as isize, 0, ctrl_written, out_flags)))
+        };
+
+        if nonblocking {
+            return attempt().unwrap_or(Err(Errno::EAGAIN));
+        }
+        loop {
+            let guard = self.rd_event.guard();
+            if let Some(r) = attempt() {
+                return r;
+            }
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
+            }
+            guard.wait();
             if Scheduler::get_current().has_pending_signals() {
                 return Err(Errno::EINTR);
             }
@@ -681,13 +783,31 @@ impl SocketOps for LocalSocket {
         };
 
         if flags.contains(ShutdownFlags::Read) {
+            // Our blocked readers must wake to observe the half-close.
             self.rd_event.wake_all();
         }
         if flags.contains(ShutdownFlags::Write) {
-            if let Some(peer) = &peer {
-                peer.rd_event.wake_all();
-            }
+            // Our blocked writers must wake (further sends now fail EPIPE).
             self.wr_event.wake_all();
+        }
+        if let Some(peer) = &peer {
+            let mut peer_mode = ShutdownFlags::empty();
+            if flags.contains(ShutdownFlags::Read) {
+                peer_mode |= ShutdownFlags::Write;
+            }
+            if flags.contains(ShutdownFlags::Write) {
+                peer_mode |= ShutdownFlags::Read;
+            }
+            if !peer_mode.is_empty() {
+                peer.inner.lock().shutdown |= peer_mode;
+                // Wake the peer in the direction that just became unblocked.
+                if peer_mode.contains(ShutdownFlags::Read) {
+                    peer.rd_event.wake_all();
+                }
+                if peer_mode.contains(ShutdownFlags::Write) {
+                    peer.wr_event.wake_all();
+                }
+            }
         }
         Ok(())
     }
@@ -741,6 +861,13 @@ impl SocketOps for LocalSocket {
                 buf[..len].copy_from_slice(&bytes[..len]);
                 Ok(size_of::<i32>())
             }
+            SO_PASSCRED => {
+                let val = self.inner.lock().passcred as i32;
+                let bytes = val.to_ne_bytes();
+                let len = min(bytes.len(), buf.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                Ok(size_of::<i32>())
+            }
             SO_PEERCRED => {
                 let peer = self.inner.lock().peer.clone().ok_or(Errno::ENOTCONN)?;
                 let cred = peer.inner.lock().owner_cred;
@@ -756,20 +883,28 @@ impl SocketOps for LocalSocket {
         }
     }
 
-    fn setsockopt(&self, level: i32, optname: i32, _buf: &[u8]) -> EResult<()> {
+    fn setsockopt(&self, level: i32, optname: i32, buf: &[u8]) -> EResult<()> {
         if level as u32 != SOL_SOCKET {
             return Err(Errno::ENOPROTOOPT);
         }
         match optname as u32 {
-            SO_SNDBUF | SO_RCVBUF | SO_PASSCRED | SO_REUSEADDR => Ok(()),
+            SO_PASSCRED => {
+                if buf.len() < size_of::<i32>() {
+                    return Err(Errno::EINVAL);
+                }
+                let mut bytes = [0u8; size_of::<i32>()];
+                bytes.copy_from_slice(&buf[..size_of::<i32>()]);
+                self.inner.lock().passcred = i32::from_ne_bytes(bytes) != 0;
+                Ok(())
+            }
+            SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR => Ok(()),
             _ => Err(Errno::ENOPROTOOPT),
         }
     }
 
     fn poll(&self, mask: PollFlags) -> EResult<PollFlags> {
-        let inner = self.inner.lock();
         let mut revents = PollFlags::empty();
-
+        let inner = self.inner.lock();
         match inner.state {
             State::Listening => {
                 if !inner.backlog.is_empty() {
@@ -777,27 +912,31 @@ impl SocketOps for LocalSocket {
                 }
             }
             State::Connected => {
-                if inner.recv_buf.get_data_len() > 0 || inner.peer_closed {
+                let read_shut = inner.shutdown.contains(ShutdownFlags::Read);
+                let write_shut = inner.shutdown.contains(ShutdownFlags::Write);
+                let peer_closed = inner.peer_closed;
+                let has_data = inner.recv_buf.get_data_len() > 0;
+
+                if (read_shut && write_shut) || peer_closed {
+                    revents |= PollFlags::Hup;
+                }
+                if read_shut || peer_closed {
+                    revents |= PollFlags::In | PollFlags::Rdhup;
+                }
+                if has_data {
                     revents |= PollFlags::In;
                 }
-                if inner.shutdown.contains(ShutdownFlags::Read) {
-                    revents |= PollFlags::Hup;
-                }
-                if inner.peer_closed {
-                    revents |= PollFlags::Hup;
-                }
+
                 let peer = inner.peer.clone();
-                let shutdown_write = inner.shutdown.contains(ShutdownFlags::Write);
-                let err = inner.shutdown.contains(ShutdownFlags::Write) && inner.peer_closed;
                 drop(inner);
 
                 let peer_can_recv = peer
                     .as_ref()
                     .is_some_and(|p| p.inner.lock().recv_buf.get_available_len() > 0);
-                if peer_can_recv && !shutdown_write {
+                if peer_can_recv || write_shut || peer_closed {
                     revents |= PollFlags::Out;
                 }
-                if err {
+                if write_shut && peer_closed {
                     revents |= PollFlags::Err;
                 }
                 return Ok(revents & (mask | PollFlags::Err | PollFlags::Hup));
@@ -823,10 +962,8 @@ impl SocketOps for LocalSocket {
         }
         events
     }
-}
 
-impl Drop for LocalSocket {
-    fn drop(&mut self) {
+    fn on_close(&self) {
         let (peer, inflight) = {
             let mut inner = self.inner.lock();
             inner.state = State::Unconnected;
@@ -843,6 +980,13 @@ impl Drop for LocalSocket {
             peer.inner.lock().peer_closed = true;
             peer.rd_event.wake_all();
             peer.wr_event.wake_all();
+            peer.accept_event.wake_all();
         }
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        self.on_close();
     }
 }
