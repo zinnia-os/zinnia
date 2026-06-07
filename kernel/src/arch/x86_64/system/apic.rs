@@ -70,7 +70,6 @@ pub enum DestinationMode {
 #[repr(u8)]
 pub enum DeliveryStatus {
     Idle = 0,
-    Pending = 1,
 }
 
 #[repr(u8)]

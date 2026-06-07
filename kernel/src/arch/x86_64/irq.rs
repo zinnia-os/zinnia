@@ -43,7 +43,7 @@ pub(in crate::arch) fn get_irq_state() -> bool {
 
 pub(in crate::arch) fn wait_for_irq() {
     unsafe {
-        asm!("hlt", options(nostack));
+        asm!("sti; hlt", options(nostack));
     }
 }
 
@@ -100,8 +100,11 @@ pub unsafe extern "C" fn amd64_syscall_stub() {
         "pop rcx",
         "pop rbx",
         "pop rax",
-        "add rsp, 0x10",              // Skip .error and .isr fields (2 * sizeof(u64))
-        "mov rsp, gs:{user_stack}",   // Load user stack from `Cpu.user_stack`.
+        "add rsp, 0x10",              // Skip the .error and .isr fields.
+        "pop rcx",                    // Context::rip -> rcx (sysretq loads RIP from rcx).
+        "add rsp, 8",                 // Skip Context::cs.
+        "pop r11",                    // Context::rflags -> r11 (sysretq loads RFLAGS from r11).
+        "pop rsp",                    // Context::rsp (honours an alternate/signal stack).
         "swapgs",
         "sysretq",                    // Return to user mode.
 
