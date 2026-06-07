@@ -130,3 +130,30 @@ pub const TIOCPKT_NOSTOP: u32 = 16;
 pub const TIOCPKT_DOSTOP: u32 = 32;
 pub const TIOCPKT_IOCTL: u32 = 64;
 pub const TIOCSER_TEMT: u32 = 0x01;
+
+pub const VT_OPENQRY: u32 = io(b'V', 0x00);
+pub const VT_GETMODE: u32 = io(b'V', 0x01);
+pub const VT_SETMODE: u32 = io(b'V', 0x02);
+pub const VT_GETSTATE: u32 = io(b'V', 0x03);
+pub const VT_RELDISP: u32 = io(b'V', 0x05);
+pub const VT_ACTIVATE: u32 = io(b'V', 0x06);
+pub const VT_WAITACTIVE: u32 = io(b'V', 0x07);
+pub const VT_DISALLOCATE: u32 = io(b'V', 0x08);
+
+pub const VT_AUTO: u8 = 0x00;
+pub const VT_PROCESS: u8 = 0x01;
+pub const VT_ACKACQ: usize = 0x02;
+
+pub const KDGETMODE: u32 = io(b'K', 0x3B);
+pub const KDSETMODE: u32 = io(b'K', 0x3A);
+pub const KDGKBMODE: u32 = io(b'K', 0x44);
+pub const KDSKBMODE: u32 = io(b'K', 0x45);
+
+pub const KD_TEXT: u32 = 0x00;
+pub const KD_GRAPHICS: u32 = 0x01;
+
+pub const K_RAW: u32 = 0x00;
+pub const K_XLATE: u32 = 0x01;
+pub const K_MEDIUMRAW: u32 = 0x02;
+pub const K_UNICODE: u32 = 0x03;
+pub const K_OFF: u32 = 0x04;

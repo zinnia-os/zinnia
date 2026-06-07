@@ -152,6 +152,10 @@ impl VtDisplay for FbCon {
             ws_ypixel: 0,
         }
     }
+
+    fn refresh(&self) {
+        unsafe { flanterm_sys::flanterm_full_refresh(self.ctx) };
+    }
 }
 
 impl LoggerSink for FbCon {
