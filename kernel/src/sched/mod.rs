@@ -2,23 +2,24 @@ use crate::{
     arch::{self},
     irq::lock::{IrqGuard, IrqLock},
     percpu::{CPU_DATA, CpuData},
+    posix::errno::EResult,
     process::{
         Process,
         task::{State, Task},
     },
     util::mutex::spin::SpinMutex,
 };
-use alloc::{collections::vec_deque::VecDeque, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     future::Future,
     mem,
     ptr::{addr_eq, null_mut},
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
+use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 
 const NO_CPU: u32 = u32::MAX;
-const NO_BUCKET: usize = usize::MAX;
 const BASE_SLICE_TICKS: usize = 10;
 const MIN_SLICE_TICKS: usize = 1;
 const AFFINITY_TICKS: usize = 4;
@@ -28,15 +29,18 @@ const SLEEP_RUN_MAX: usize = 512;
 
 const INTERACT_MAX: usize = 100;
 const INTERACT_THRESH: usize = 30;
-const INTERACTIVE_BUCKETS: usize = INTERACT_THRESH;
-const TIMESHARE_BUCKETS: usize = 32;
 
-const BUCKET_KERNEL: usize = 0;
-const BUCKET_INTERACTIVE_BASE: usize = 1;
-const BUCKET_TIMESHARE_BASE: usize = BUCKET_INTERACTIVE_BASE + INTERACTIVE_BUCKETS;
-const BUCKET_IDLE: usize = BUCKET_TIMESHARE_BASE + TIMESHARE_BUCKETS;
+const RQ_NQS: usize = 64;
+const RQB_BITS: usize = usize::BITS as usize;
+const RQB_LEN: usize = RQ_NQS / RQB_BITS;
+
+const PRI_REALTIME_BASE: usize = 0;
+const PRI_TIMESHARE_BASE: usize = RQ_NQS;
 
 static SCHED_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+intrusive_adapter!(TaskRunLink = UnsafeRef<Task>: Task { run_link => LinkedListAtomicLink });
+intrusive_adapter!(TaskReapLink = UnsafeRef<Task>: Task { reap_link => LinkedListAtomicLink });
 
 /// An instance of a scheduler. Each CPU has one instance running to coordinate task management.
 #[derive(Debug)]
@@ -49,23 +53,118 @@ pub struct Scheduler {
     reschedule_pending: AtomicBool,
     load: AtomicUsize,
     run_queue: SpinMutex<RunQueue>,
-    reap_queue: SpinMutex<VecDeque<Arc<Task>>>,
+    reap_queue: SpinMutex<LinkedList<TaskReapLink>>,
     reaper_task: AtomicPtr<Task>,
 }
 
+struct Runq {
+    status: [usize; RQB_LEN],
+    queues: [LinkedList<TaskRunLink>; RQ_NQS],
+}
+
+impl Runq {
+    const fn new() -> Self {
+        Self {
+            status: [0; RQB_LEN],
+            queues: [const { LinkedList::new(TaskRunLink::NEW) }; RQ_NQS],
+        }
+    }
+
+    fn set_bit(&mut self, idx: usize) {
+        self.status[idx / RQB_BITS] |= 1 << (idx % RQB_BITS);
+    }
+
+    fn clear_bit(&mut self, idx: usize) {
+        self.status[idx / RQB_BITS] &= !(1 << (idx % RQB_BITS));
+    }
+
+    fn is_set(&self, idx: usize) -> bool {
+        self.status[idx / RQB_BITS] & (1 << (idx % RQB_BITS)) != 0
+    }
+
+    fn add(&mut self, idx: usize, task: Arc<Task>) {
+        self.set_bit(idx);
+        self.queues[idx].push_back(unsafe { UnsafeRef::from_raw(Arc::into_raw(task)) });
+    }
+
+    fn find_bit(&self) -> Option<usize> {
+        for (word, &bits) in self.status.iter().enumerate() {
+            if bits != 0 {
+                return Some(word * RQB_BITS + bits.trailing_zeros() as usize);
+            }
+        }
+        None
+    }
+
+    fn find_bit_from(&self, start: usize) -> Option<usize> {
+        let start_word = start / RQB_BITS;
+        let masked = self.status[start_word] & (usize::MAX << (start % RQB_BITS));
+        if masked != 0 {
+            return Some(start_word * RQB_BITS + masked.trailing_zeros() as usize);
+        }
+        for offset in 1..=RQB_LEN {
+            let word = (start_word + offset) % RQB_LEN;
+            if self.status[word] != 0 {
+                return Some(word * RQB_BITS + self.status[word].trailing_zeros() as usize);
+            }
+        }
+        None
+    }
+
+    fn pop_at(&mut self, idx: usize) -> Arc<Task> {
+        let node = self.queues[idx].pop_front().unwrap();
+        if self.queues[idx].is_empty() {
+            self.clear_bit(idx);
+        }
+        unsafe { Arc::from_raw(UnsafeRef::into_raw(node)) }
+    }
+
+    fn take_migratable(&mut self, idx: usize) -> Option<Arc<Task>> {
+        let node = {
+            let mut cursor = self.queues[idx].front_mut();
+            loop {
+                match cursor.get() {
+                    Some(task)
+                        if task.migration_enabled.load(Ordering::Acquire)
+                            && !task.bound.load(Ordering::Acquire) =>
+                    {
+                        break cursor.remove();
+                    }
+                    Some(_) => cursor.move_next(),
+                    None => break None,
+                }
+            }
+        }?;
+        if self.queues[idx].is_empty() {
+            self.clear_bit(idx);
+        }
+        Some(unsafe { Arc::from_raw(UnsafeRef::into_raw(node)) })
+    }
+
+    fn steal_from(&mut self, start: usize) -> Option<Arc<Task>> {
+        for offset in 0..RQ_NQS {
+            let idx = (start + offset) % RQ_NQS;
+            if self.is_set(idx) {
+                if let Some(task) = self.take_migratable(idx) {
+                    return Some(task);
+                }
+            }
+        }
+        None
+    }
+}
+
 struct RunQueue {
-    kernel: VecDeque<Arc<Task>>,
-    interactive: [VecDeque<Arc<Task>>; INTERACTIVE_BUCKETS],
-    timeshare: [VecDeque<Arc<Task>>; TIMESHARE_BUCKETS],
-    idle: VecDeque<Arc<Task>>,
-    timeshare_insert: usize,
-    timeshare_dequeue: usize,
+    realtime: Runq,
+    timeshare: Runq,
+    idle: Runq,
+    idx: usize,
+    ridx: usize,
 }
 
 #[derive(Clone, Copy)]
-enum QueueClass {
-    Kernel,
-    Interactive(usize),
+enum RunqClass {
+    Realtime(usize),
     Timeshare(usize),
     #[allow(dead_code)]
     Idle,
@@ -74,129 +173,55 @@ enum QueueClass {
 impl RunQueue {
     const fn new() -> Self {
         Self {
-            kernel: VecDeque::new(),
-            interactive: [const { VecDeque::new() }; INTERACTIVE_BUCKETS],
-            timeshare: [const { VecDeque::new() }; TIMESHARE_BUCKETS],
-            idle: VecDeque::new(),
-            timeshare_insert: 0,
-            timeshare_dequeue: 0,
+            realtime: Runq::new(),
+            timeshare: Runq::new(),
+            idle: Runq::new(),
+            idx: 0,
+            ridx: 0,
         }
     }
 
-    fn push(&mut self, task: Arc<Task>, class: QueueClass) {
-        let bucket = match class {
-            QueueClass::Kernel => {
-                self.kernel.push_back(task);
-                BUCKET_KERNEL
-            }
-            QueueClass::Interactive(score) => {
-                let index = score.min(INTERACTIVE_BUCKETS - 1);
-                self.interactive[index].push_back(task);
-                BUCKET_INTERACTIVE_BASE + index
-            }
-            QueueClass::Timeshare(priority) => {
-                let mut index = (priority.min(TIMESHARE_BUCKETS - 1) + self.timeshare_insert)
-                    % TIMESHARE_BUCKETS;
-                if self.timeshare_dequeue != self.timeshare_insert
-                    && index == self.timeshare_dequeue
-                {
-                    index = (index + TIMESHARE_BUCKETS - 1) % TIMESHARE_BUCKETS;
+    fn push(&mut self, task: Arc<Task>, class: RunqClass) {
+        match class {
+            RunqClass::Realtime(idx) => self.realtime.add(idx.min(RQ_NQS - 1), task),
+            RunqClass::Timeshare(base) => {
+                let mut idx = (base.min(RQ_NQS - 1) + self.idx) % RQ_NQS;
+                if self.ridx != self.idx && idx == self.ridx {
+                    idx = (self.ridx + RQ_NQS - 1) % RQ_NQS;
                 }
-                self.timeshare[index].push_back(task);
-                BUCKET_TIMESHARE_BASE + index
+                self.timeshare.add(idx, task);
             }
-            QueueClass::Idle => {
-                self.idle.push_back(task);
-                BUCKET_IDLE
-            }
-        };
-
-        let queued = self.bucket_back(bucket);
-        if let Some(task) = queued {
-            task.queued_bucket.store(bucket, Ordering::Release);
-        }
-    }
-
-    fn bucket_back(&self, bucket: usize) -> Option<&Arc<Task>> {
-        match bucket {
-            BUCKET_KERNEL => self.kernel.back(),
-            BUCKET_IDLE => self.idle.back(),
-            BUCKET_INTERACTIVE_BASE..BUCKET_TIMESHARE_BASE => self
-                .interactive
-                .get(bucket - BUCKET_INTERACTIVE_BASE)
-                .and_then(VecDeque::back),
-            BUCKET_TIMESHARE_BASE..BUCKET_IDLE => self
-                .timeshare
-                .get(bucket - BUCKET_TIMESHARE_BASE)
-                .and_then(VecDeque::back),
-            _ => None,
+            RunqClass::Idle => self.idle.add(0, task),
         }
     }
 
     fn pop_next(&mut self) -> Option<Arc<Task>> {
-        if let Some(task) = self.kernel.pop_front() {
+        if let Some(idx) = self.realtime.find_bit() {
+            return Some(self.realtime.pop_at(idx));
+        }
+        if let Some(idx) = self.timeshare.find_bit_from(self.ridx) {
+            let task = self.timeshare.pop_at(idx);
+            if idx == self.ridx && !self.timeshare.is_set(idx) {
+                self.ridx = (self.ridx + 1) % RQ_NQS;
+            }
             return Some(task);
         }
-
-        for queue in &mut self.interactive {
-            if let Some(task) = queue.pop_front() {
-                return Some(task);
-            }
-        }
-
-        for offset in 0..TIMESHARE_BUCKETS {
-            let index = (self.timeshare_dequeue + offset) % TIMESHARE_BUCKETS;
-            if let Some(task) = self.timeshare[index].pop_front() {
-                if self.timeshare[index].is_empty() && index == self.timeshare_dequeue {
-                    self.advance_timeshare_dequeue(true);
-                }
-                return Some(task);
-            }
-        }
-
-        self.idle.pop_front()
+        self.idle.find_bit().map(|idx| self.idle.pop_at(idx))
     }
 
     fn take_stealable(&mut self) -> Option<Arc<Task>> {
-        for offset in (0..TIMESHARE_BUCKETS).rev() {
-            let index = (self.timeshare_dequeue + offset) % TIMESHARE_BUCKETS;
-            if let Some(task) = Self::take_from_back_if(&mut self.timeshare[index]) {
-                return Some(task);
-            }
-        }
-
-        for queue in self.interactive.iter_mut().rev() {
-            if let Some(task) = Self::take_from_back_if(queue) {
-                return Some(task);
-            }
-        }
-
-        Self::take_from_back_if(&mut self.kernel)
+        self.realtime
+            .steal_from(0)
+            .or_else(|| self.timeshare.steal_from(self.ridx))
+            .or_else(|| self.idle.steal_from(0))
     }
 
-    fn take_from_back_if(queue: &mut VecDeque<Arc<Task>>) -> Option<Arc<Task>> {
-        let index = queue
-            .iter()
-            .rposition(|task| task.migration_enabled.load(Ordering::Acquire))?;
-        queue.remove(index)
-    }
-
-    fn advance_timeshare(&mut self, ticks: usize) {
-        if self.timeshare_insert == self.timeshare_dequeue {
-            self.timeshare_insert = (self.timeshare_insert + ticks) % TIMESHARE_BUCKETS;
-            self.advance_timeshare_dequeue(false);
-        }
-    }
-
-    fn advance_timeshare_dequeue(&mut self, mut current_known_empty: bool) {
-        while self.timeshare_dequeue != self.timeshare_insert {
-            if current_known_empty {
-                current_known_empty = false;
-            } else if !self.timeshare[self.timeshare_dequeue].is_empty() {
-                break;
+    fn advance_timeshare(&mut self) {
+        if self.idx == self.ridx {
+            self.idx = (self.idx + 1) % RQ_NQS;
+            if !self.timeshare.is_set(self.ridx) {
+                self.ridx = self.idx;
             }
-
-            self.timeshare_dequeue = (self.timeshare_dequeue + 1) % TIMESHARE_BUCKETS;
         }
     }
 }
@@ -211,7 +236,7 @@ impl Scheduler {
             reschedule_pending: AtomicBool::new(false),
             load: AtomicUsize::new(0),
             run_queue: SpinMutex::new(RunQueue::new()),
-            reap_queue: SpinMutex::new(VecDeque::new()),
+            reap_queue: SpinMutex::new(LinkedList::new(TaskReapLink::NEW)),
             reaper_task: AtomicPtr::new(null_mut()),
         };
     }
@@ -439,13 +464,11 @@ impl Scheduler {
             };
 
             task.queued.store(false, Ordering::Release);
-            task.queued_bucket.store(NO_BUCKET, Ordering::Release);
 
             {
                 let mut state = task.state.lock();
                 if *state == State::Ready {
                     *state = State::Running;
-                    task.wake_pending.store(false, Ordering::Release);
                     task.migration_enabled.store(true, Ordering::Release);
                     drop(state);
                     return Some(task);
@@ -485,7 +508,6 @@ impl Scheduler {
             queue.take_stealable()
         }?;
         task.queued.store(false, Ordering::Release);
-        task.queued_bucket.store(NO_BUCKET, Ordering::Release);
 
         {
             let mut state = task.state.lock();
@@ -500,7 +522,7 @@ impl Scheduler {
             *state = State::Running;
         }
 
-        task.wake_pending.store(false, Ordering::Release);
+        // A pending wake must survive task selection and be consumed only by the task's own `do_yield`.
         task.migration_enabled.store(true, Ordering::Release);
         Self::transfer_load(victim, local_cpu, &task);
         Some(task)
@@ -552,37 +574,35 @@ impl Scheduler {
             if matches!(*state, State::Dead | State::Dying) {
                 drop(state);
                 self.unaccount_load(self.owner_cpu(), current);
-            } else {
-                if current.wake_pending.swap(false, Ordering::AcqRel) {
-                    // A wake landed while we were running.
-                    // Stay runnable and re-enqueue ourselves before yielding the CPU.
-                    *state = State::Ready;
-                    current.migration_enabled.store(false, Ordering::Release);
-                    let queued = current
-                        .queued
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok();
-                    drop(state);
-                    let arc = unsafe {
-                        let task = Arc::from_raw(current_ptr);
-                        let result = task.clone();
-                        mem::forget(task);
-                        result
-                    };
-                    let cpu = self.owner_cpu();
-                    if queued {
-                        self.finish_requeue_current(cpu, arc);
-                    }
-                } else {
-                    *state = State::Waiting;
-                    current.migration_enabled.store(false, Ordering::Release);
-                    current
-                        .sleep_started_tick
-                        .store(SCHED_TICKS.load(Ordering::Acquire), Ordering::Release);
-                    let cpu = self.owner_cpu();
-                    self.unaccount_load(cpu, current);
-                    drop(state);
+            } else if current.wake_pending.swap(false, Ordering::AcqRel) {
+                // A wake landed while we were running.
+                // Stay runnable and re-enqueue ourselves before yielding the CPU.
+                *state = State::Ready;
+                current.migration_enabled.store(false, Ordering::Release);
+                let queued = current
+                    .queued
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                drop(state);
+                let arc = unsafe {
+                    let task = Arc::from_raw(current_ptr);
+                    let result = task.clone();
+                    mem::forget(task);
+                    result
+                };
+                let cpu = self.owner_cpu();
+                if queued {
+                    self.finish_requeue_current(cpu, arc);
                 }
+            } else {
+                *state = State::Waiting;
+                current.migration_enabled.store(false, Ordering::Release);
+                current
+                    .sleep_started_tick
+                    .store(SCHED_TICKS.load(Ordering::Acquire), Ordering::Release);
+                let cpu = self.owner_cpu();
+                self.unaccount_load(cpu, current);
+                drop(state);
             }
         }
         self.do_reschedule(lock);
@@ -600,7 +620,7 @@ impl Scheduler {
 
         {
             let mut queue = self.run_queue.lock();
-            queue.advance_timeshare(1);
+            queue.advance_timeshare();
         }
 
         let current_ptr = self.current.load(Ordering::Acquire);
@@ -720,6 +740,9 @@ impl Scheduler {
         }
         self.current.store(to, Ordering::Release);
 
+        // Claim the new task's context for this CPU.
+        unsafe { (*to).on_cpu.store(true, Ordering::Release) };
+
         unsafe {
             // If we are switching between address spaces, we need to update the page table.
             (*(*to).address_space.raw_inner()).table.set_active();
@@ -746,6 +769,10 @@ impl Scheduler {
 
     /// Runs after a low-level context switch, once the CPU is executing on the new task's kernel stack.
     pub(crate) fn post_switch(previous: *mut Task, irq_guard: IrqGuard) {
+        if !previous.is_null() {
+            unsafe { (*previous).on_cpu.store(false, Ordering::Release) };
+        }
+
         let idle = CPU_DATA.get().scheduler.idle_task.load(Ordering::Acquire);
         if !previous.is_null() && previous != idle {
             let previous = unsafe { Arc::from_raw(previous) };
@@ -783,7 +810,9 @@ impl Scheduler {
     }
 
     fn queue_reap(&self, task: Arc<Task>) {
-        self.reap_queue.lock().push_back(task);
+        self.reap_queue
+            .lock()
+            .push_back(unsafe { UnsafeRef::from_raw(Arc::into_raw(task)) });
 
         let reaper = self.reaper();
         self.add_task(reaper);
@@ -859,23 +888,25 @@ impl Scheduler {
         }
     }
 
-    fn classify(task: &Task) -> (QueueClass, usize) {
+    fn classify(task: &Task) -> (RunqClass, usize) {
         if !task.is_user() {
-            return (QueueClass::Kernel, BUCKET_KERNEL);
+            return (RunqClass::Realtime(0), PRI_REALTIME_BASE);
         }
 
         let score = Self::interact_score(task);
         if score < INTERACT_THRESH {
-            let priority = BUCKET_INTERACTIVE_BASE + score;
-            return (QueueClass::Interactive(score), priority);
+            let idx = 1 + score;
+            return (RunqClass::Realtime(idx), PRI_REALTIME_BASE + idx);
         }
 
         let runtime = task.sched_runtime.load(Ordering::Acquire);
         let sleeptime = task.sched_sleeptime.load(Ordering::Acquire);
         let total = runtime.saturating_add(sleeptime).max(1);
-        let cpu_bias = runtime.saturating_mul(TIMESHARE_BUCKETS - 1) / total;
-        let priority = BUCKET_TIMESHARE_BASE + cpu_bias;
-        (QueueClass::Timeshare(cpu_bias), priority)
+        let cpu_bias = runtime.saturating_mul(RQ_NQS - 1) / total;
+        (
+            RunqClass::Timeshare(cpu_bias),
+            PRI_TIMESHARE_BASE + cpu_bias,
+        )
     }
 
     fn interact_score(task: &Task) -> usize {
@@ -908,13 +939,15 @@ impl Scheduler {
     }
 
     /// Blocks on an async future.
+    #[track_caller]
     pub fn block_on<T, F: Future<Output = T>>(&self, future: F) -> F::Output {
         let mut future = core::pin::pin!(future);
 
         let task = self.current();
 
         loop {
-            let waker = Waker::from(task.clone());
+            let token = task.next_block_token();
+            let waker = task.waker(token);
             let mut ctx = Context::from_waker(&waker);
             match future.as_mut().poll(&mut ctx) {
                 Poll::Ready(output) => {
@@ -924,6 +957,37 @@ impl Scheduler {
             }
         }
     }
+
+    pub fn spawn_kernel_async<F>(future: F) -> EResult<Arc<Task>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = Task::run_async(future)?;
+        Self::add_task_to_best_cpu(task.clone());
+        Ok(task)
+    }
+}
+
+pub struct YieldNow {
+    yielded: bool,
+}
+
+impl Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded {
+            Poll::Ready(())
+        } else {
+            self.yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+pub const fn yield_now() -> YieldNow {
+    YieldNow { yielded: false }
 }
 
 /// Generic task entry point. This is to be called by an implementing [`crate::arch::sched::init_task`].
@@ -950,6 +1014,13 @@ pub extern "C" fn task_entry_after_switch(
 /// Function used for waiting.
 pub extern "C" fn idle_fn(_: usize, _: usize) {
     loop {
+        unsafe { crate::arch::irq::set_irq_state(false) };
+        if CPU_DATA.get().scheduler.has_reschedule_pending() {
+            unsafe { crate::arch::irq::set_irq_state(true) };
+            CPU_DATA.get().scheduler.request_reschedule();
+            continue;
+        }
+
         crate::arch::irq::wait_for_irq();
     }
 }
@@ -961,11 +1032,11 @@ pub extern "C" fn dummy_fn(_: usize, _: usize) {
 pub extern "C" fn reaper_fn(_: usize, _: usize) {
     loop {
         loop {
-            let task = CPU_DATA.get().scheduler.reap_queue.lock().pop_front();
-            let Some(task) = task else {
+            let node = CPU_DATA.get().scheduler.reap_queue.lock().pop_front();
+            let Some(node) = node else {
                 break;
             };
-            drop(task);
+            drop(unsafe { Arc::from_raw(UnsafeRef::into_raw(node)) });
         }
 
         CpuData::get().scheduler.do_yield();
@@ -986,6 +1057,7 @@ pub fn SCHEDULER_STAGE() {
         .store(Arc::into_raw(idle_task) as *mut _, Ordering::Release);
 
     let reaper_task = Arc::new(Task::new(reaper_fn, 0, 0, Process::get_kernel(), false).unwrap());
+    reaper_task.bound.store(true, Ordering::Release);
     bsp.set_reaper_task(reaper_task);
 
     // Create a dummy task to drop right after the first reschedule.

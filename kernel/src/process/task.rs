@@ -18,7 +18,21 @@ use core::{
     fmt::Debug,
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
+    task::Waker,
 };
+use intrusive_collections::LinkedListAtomicLink;
+
+const UNBLOCKED_BIT: usize = 1;
+const NEXT_BLOCK_TOKEN: usize = 1 << 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockToken(usize);
+
+impl BlockToken {
+    pub const fn value(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum State {
@@ -55,9 +69,11 @@ pub struct Task {
     pub wake_pending: AtomicBool,
     /// True while this task's saved context is owned by a CPU.
     pub on_cpu: AtomicBool,
+    /// Token used to pair async wakers with the block cycle that created them.
+    block_token: AtomicUsize,
     /// Saved arch context. Touched only by the CPU running this task
     /// (and by `init_context` before the task is published).
-    pub task_context: SyncUnsafeCell<arch::sched::TaskContext>,
+    pub executor: SyncUnsafeCell<arch::sched::Executor>,
     /// Allocation base of the kernel stack for this task.
     pub kernel_stack: KernelStack,
     /// The user stack for this task.
@@ -88,12 +104,17 @@ pub struct Task {
     pub sched_slice: AtomicUsize,
     /// Current dynamic scheduler priority.
     pub dynamic_priority: AtomicUsize,
-    /// Run-queue bucket this task was most recently placed in.
-    pub queued_bucket: AtomicUsize,
     /// Whether this task may be moved between CPUs by balancing or stealing.
     pub migration_enabled: AtomicBool,
+    /// Whether this task is permanently bound to its owning CPU and must never
+    /// be migrated or stolen.
+    pub bound: AtomicBool,
     /// Whether this task is counted in its assigned CPU's runnable load.
     pub load_counted: AtomicBool,
+    /// Intrusive link into a CPU run queue.
+    pub run_link: LinkedListAtomicLink,
+    /// Intrusive link into a CPU reap queue.
+    pub reap_link: LinkedListAtomicLink,
 }
 
 impl Task {
@@ -185,7 +206,8 @@ impl Task {
             queued: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             on_cpu: AtomicBool::new(false),
-            task_context: SyncUnsafeCell::new(arch::sched::TaskContext::default()),
+            block_token: AtomicUsize::new(0),
+            executor: SyncUnsafeCell::new(arch::sched::Executor::default()),
             kernel_stack: KernelStack::new()?,
             user_stack: AtomicUsize::new(0),
             ticks: 0,
@@ -199,9 +221,11 @@ impl Task {
             sched_sleeptime: AtomicUsize::new(0),
             sched_slice: AtomicUsize::new(0),
             dynamic_priority: AtomicUsize::new(usize::MAX),
-            queued_bucket: AtomicUsize::new(usize::MAX),
             migration_enabled: AtomicBool::new(true),
+            bound: AtomicBool::new(false),
             load_counted: AtomicBool::new(false),
+            run_link: LinkedListAtomicLink::new(),
+            reap_link: LinkedListAtomicLink::new(),
         })
     }
 
@@ -213,8 +237,8 @@ impl Task {
         is_user: bool,
     ) -> EResult<()> {
         // SAFETY: caller has exclusive access; task is not yet published.
-        let task_context = unsafe { &mut *self.task_context.get() };
-        arch::sched::init_task(task_context, entry, arg1, arg2, &self.kernel_stack, is_user)
+        let executor = unsafe { &mut *self.executor.get() };
+        arch::sched::init_task(executor, entry, arg1, arg2, &self.kernel_stack, is_user)
     }
 
     /// Returns true if this is a user task.
@@ -240,11 +264,55 @@ impl Task {
         let state = self.signal.lock();
         !(state.pending & !state.mask).is_empty()
     }
+
+    pub(crate) fn next_block_token(&self) -> BlockToken {
+        let mut result = 0;
+        self.block_token
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                result = (old & !UNBLOCKED_BIT).wrapping_add(NEXT_BLOCK_TOKEN);
+                Some(result)
+            })
+            .unwrap();
+        BlockToken(result)
+    }
+
+    pub(crate) fn unblock(self: &Arc<Self>, token: BlockToken) {
+        if self
+            .block_token
+            .compare_exchange(
+                token.value(),
+                token.value() | UNBLOCKED_BIT,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            Scheduler::wake_task(self.clone());
+        }
+    }
+
+    pub(crate) fn waker(self: &Arc<Self>, token: BlockToken) -> Waker {
+        Waker::from(Arc::new(TaskWaker {
+            task: self.clone(),
+            token,
+        }))
+    }
 }
 
 impl Wake for Task {
     fn wake(self: Arc<Self>) {
         Scheduler::wake_task(self);
+    }
+}
+
+struct TaskWaker {
+    task: Arc<Task>,
+    token: BlockToken,
+}
+
+impl Wake for TaskWaker {
+    fn wake(self: Arc<Self>) {
+        self.task.unblock(self.token);
     }
 }
 

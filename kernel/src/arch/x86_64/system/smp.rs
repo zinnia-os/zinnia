@@ -219,6 +219,7 @@ extern "C" fn ap_entry(info: PhysAddr) -> ! {
 
     let reaper_task =
         Arc::new(Task::new(sched::reaper_fn, 0, 0, Process::get_kernel(), false).unwrap());
+    reaper_task.bound.store(true, Ordering::Release);
     cpu_ctx.scheduler.set_reaper_task(reaper_task);
 
     // Create a dummy task to drop right after the first reschedule.

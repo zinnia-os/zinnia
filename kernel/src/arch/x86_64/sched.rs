@@ -7,6 +7,7 @@ use super::{
     system::{apic::LAPIC, gdt::TSS},
 };
 use crate::{
+    arch::sched::Executor,
     irq::lock::IrqLock,
     memory::{UserPtr, VirtAddr, stack::KernelStack},
     percpu::CpuData,
@@ -19,26 +20,11 @@ use crate::{
     sched::Scheduler,
     uapi::signal::{SA_ONSTACK, siginfo_t},
 };
-use alloc::boxed::Box;
 use core::{
     arch::{asm, naked_asm},
     fmt::Write,
     mem::offset_of,
 };
-
-#[repr(C)]
-#[derive(Default, Debug, Clone)]
-pub struct TaskContext {
-    pub rsp: u64,
-    pub fpu_region: Box<[u8]>,
-    pub ds: u16,
-    pub es: u16,
-    pub fs: u16,
-    pub gs: u16,
-    pub fsbase: u64,
-    pub gsbase: u64,
-    pub restarted: bool,
-}
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -187,8 +173,8 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task) -> *mut
         let from = from.as_ref().unwrap();
         let to = to.as_ref().unwrap();
 
-        let from_context = &mut *from.task_context.get();
-        let to_context = &mut *to.task_context.get();
+        let from_context = &mut *from.executor.get();
+        let to_context = &mut *to.executor.get();
 
         let cpu = ARCH_DATA.get();
         TSS.get().lock().rsp0 = to.kernel_stack.top().into();
@@ -279,7 +265,7 @@ pub(in crate::arch) extern "C" fn run_on_stack_raw(
 }
 
 pub(in crate::arch) fn init_task(
-    context: &mut TaskContext,
+    context: &mut Executor,
     entry: extern "C" fn(usize, usize),
     arg1: usize,
     arg2: usize,

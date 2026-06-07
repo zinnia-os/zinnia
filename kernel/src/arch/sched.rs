@@ -7,15 +7,15 @@ use crate::{
 use core::{fmt::Debug, mem::MaybeUninit};
 
 pub use internal::sched::{Context, SyscallRestart};
-assert_trait_impl!(TaskContext, Debug);
+assert_trait_impl!(Context, Debug);
 assert_trait_impl!(Context, Default);
 assert_trait_impl!(Context, Clone);
 assert_trait_impl!(Context, Copy);
 
-pub use internal::sched::TaskContext;
-assert_trait_impl!(TaskContext, Debug);
-assert_trait_impl!(TaskContext, Default);
-assert_trait_impl!(TaskContext, Clone);
+pub use crate::arch::executor::Executor;
+assert_trait_impl!(Executor, Debug);
+assert_trait_impl!(Executor, Default);
+assert_trait_impl!(Executor, Clone);
 
 /// Disables preemption.
 /// # Safety
@@ -55,7 +55,7 @@ pub fn broadcast_shootdown() {
 
 /// Initializes a new task.
 pub fn init_task(
-    task: &mut TaskContext,
+    task: &mut Executor,
     entry: extern "C" fn(usize, usize),
     arg1: usize,
     arg2: usize,
