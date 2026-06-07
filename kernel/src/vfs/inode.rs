@@ -65,7 +65,8 @@ impl INode {
             return Ok(());
         }
 
-        todo!("Implement UID handling for !root");
+        // TODO: Implement UID handling for !root
+        return Ok(());
     }
 
     pub fn len(&self) -> usize {

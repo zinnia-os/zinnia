@@ -123,12 +123,12 @@ impl FileOps for PipeFile {
                 return Err(Errno::EAGAIN);
             } else {
                 if Scheduler::get_current().has_pending_signals() {
-                    return Err(Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
                 drop(inner);
                 read.wait();
                 if Scheduler::get_current().has_pending_signals() {
-                    return Err(Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
             }
         }
@@ -163,11 +163,11 @@ impl FileOps for PipeFile {
                 return Err(Errno::EAGAIN);
             } else {
                 if Scheduler::get_current().has_pending_signals() {
-                    return Err(Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
                 write.wait();
                 if Scheduler::get_current().has_pending_signals() {
-                    return Err(Errno::EINTR);
+                    return Err(Errno::ERESTART);
                 }
             }
         }

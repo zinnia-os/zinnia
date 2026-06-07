@@ -78,14 +78,15 @@ impl FileOps for EpollFile {
         if !mask.intersects(PollFlags::Read) {
             return Ok(PollFlags::empty());
         }
-        let interest = self.interest.lock();
-        for reg in interest.values() {
-            let child_mask = flags_from_epoll(reg.events);
-            let revents = reg
-                .file
-                .ops
-                .poll(&reg.file, child_mask)
-                .unwrap_or(PollFlags::Err);
+        let regs: Vec<(u32, Arc<File>)> = self
+            .interest
+            .lock()
+            .values()
+            .map(|r| (r.events, r.file.clone()))
+            .collect();
+        for (events, file) in regs {
+            let child_mask = flags_from_epoll(events);
+            let revents = file.ops.poll(&file, child_mask).unwrap_or(PollFlags::Err);
             if !(revents & child_mask).is_empty() {
                 return Ok(PollFlags::In);
             }
@@ -112,9 +113,14 @@ impl EpollFile {
     }
 
     fn get_children_recursive(&self, out: &mut Vec<Arc<File>>, visited: &mut Vec<usize>) {
-        let interest = self.interest.lock();
-        for reg in interest.values() {
-            if let Ok(child_epoll) = Arc::downcast::<EpollFile>(reg.file.ops.clone()) {
+        let files: Vec<Arc<File>> = self
+            .interest
+            .lock()
+            .values()
+            .map(|r| r.file.clone())
+            .collect();
+        for file in files {
+            if let Ok(child_epoll) = Arc::downcast::<EpollFile>(file.ops.clone()) {
                 let key = Arc::as_ptr(&child_epoll) as usize;
                 if visited.contains(&key) {
                     continue;
@@ -122,7 +128,7 @@ impl EpollFile {
                 visited.push(key);
                 child_epoll.get_children_recursive(out, visited);
             } else {
-                out.push(reg.file.clone());
+                out.push(file.clone());
             }
         }
     }

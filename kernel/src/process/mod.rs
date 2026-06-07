@@ -322,7 +322,8 @@ impl Process {
             let old_space = self.replace_address_space(new_address_space.clone());
             let new_table = new_address_space.lock().table.clone();
 
-            self.open_files.lock().close_exec();
+            let closed = self.open_files.lock().close_exec();
+            drop(closed);
             self.signal_actions.lock().reset_on_exec();
 
             if is_current_process {
@@ -376,13 +377,14 @@ impl Process {
             threads.clear();
 
             // Close all files.
-            open_files.close_all();
+            let closed_files = open_files.close_all();
 
             *status = new_state;
 
             drop(status);
             drop(threads);
             drop(open_files);
+            drop(closed_files);
         }
 
         drop(old_space);
@@ -469,30 +471,26 @@ impl FdTable {
         Some(last)
     }
 
-    pub fn close(&mut self, fd: i32) -> Option<()> {
-        self.inner.remove(&fd).map(drop)
+    pub fn close(&mut self, fd: i32) -> Option<FileDescription> {
+        self.inner.remove(&fd)
     }
 
-    pub fn close_all(&mut self) {
-        self.inner.clear();
+    pub fn close_all(&mut self) -> Vec<FileDescription> {
+        core::mem::take(&mut self.inner).into_values().collect()
     }
 
     /// Closes all files with the [`OpenFlags::CloseOnExec`] flag.
-    pub fn close_exec(&mut self) {
-        let fds = self.inner.keys().cloned().collect::<Vec<_>>();
-        for fd in fds {
-            if !self
-                .inner
-                .get(&fd)
-                .unwrap()
-                .close_on_exec
-                .load(Ordering::Acquire)
-            {
-                continue;
-            }
+    pub fn close_exec(&mut self) -> Vec<FileDescription> {
+        let fds = self
+            .inner
+            .iter()
+            .filter(|(_, desc)| desc.close_on_exec.load(Ordering::Acquire))
+            .map(|(fd, _)| *fd)
+            .collect::<Vec<_>>();
 
-            self.inner.remove(&fd);
-        }
+        fds.into_iter()
+            .filter_map(|fd| self.inner.remove(&fd))
+            .collect()
     }
 }
 

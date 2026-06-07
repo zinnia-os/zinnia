@@ -730,21 +730,21 @@ pub fn ppoll(
         .map(|e| PollFlags::from_bits_truncate(e.events))
         .collect();
 
-    let guards: Vec<_> = if is_nonblocking {
-        Vec::new()
-    } else {
-        let mut guards = Vec::new();
-        for (file_opt, mask) in files.iter().zip(masks.iter()) {
-            if let Some(file) = file_opt {
-                guards.extend(file.ops.poll_events(file, *mask).iter().map(|e| e.guard()));
-            }
-        }
-        guards
-    };
-
     let timeout_guard = deadline.map(clock::timeout_at);
 
     loop {
+        let guards: Vec<_> = if is_nonblocking {
+            Vec::new()
+        } else {
+            let mut guards = Vec::new();
+            for (file_opt, mask) in files.iter().zip(masks.iter()) {
+                if let Some(file) = file_opt {
+                    guards.extend(file.ops.poll_events(file, *mask).iter().map(|e| e.guard()));
+                }
+            }
+            guards
+        };
+
         let mut ready_count = 0usize;
         for ((poll_entry, file_opt), mask) in fds.iter_mut().zip(files.iter()).zip(masks.iter()) {
             poll_entry.revents = 0;
@@ -1677,22 +1677,22 @@ pub fn epoll_pwait(
             }
         }
     }
-    let guards: Vec<_> = if is_nonblocking {
-        Vec::new()
-    } else {
-        let mut guards = Vec::new();
-        for file in &wait_files {
-            for ev in file.ops.poll_events(file, PollFlags::Read).iter() {
-                guards.push(ev.guard());
-            }
-        }
-        guards
-    };
-
     let mut out: Vec<epoll_event> = Vec::with_capacity(maxevents);
     let mut oneshot_fired: Vec<i32> = Vec::new();
 
     loop {
+        let guards: Vec<_> = if is_nonblocking {
+            Vec::new()
+        } else {
+            let mut guards = Vec::new();
+            for file in &wait_files {
+                for ev in file.ops.poll_events(file, PollFlags::Read).iter() {
+                    guards.push(ev.guard());
+                }
+            }
+            guards
+        };
+
         out.clear();
         oneshot_fired.clear();
 
