@@ -2,7 +2,7 @@ use crate::{
     arch::x86_64::ARCH_DATA,
     memory::{
         PhysAddr, UserAccessRegion, VirtAddr,
-        virt::{PteFlags, mmu::PageTable},
+        virt::{PteFlags, VmCacheType, mmu::PageTable},
     },
 };
 use bitflags::bitflags;
@@ -52,13 +52,16 @@ impl PageTableEntry {
         return Self { inner: 0 };
     }
 
-    pub const fn new(address: PhysAddr, flags: PteFlags, _level: usize) -> Self {
+    pub const fn new(
+        address: PhysAddr,
+        flags: PteFlags,
+        cache: VmCacheType,
+        _level: usize,
+    ) -> Self {
         let mut result = (address.value() as u64 & ADDR_MASK) | PageFlags::Present.bits();
 
         if flags.contains(PteFlags::User) {
             result |= PageFlags::UserMode.bits();
-        } else {
-            result |= PageFlags::Global.bits();
         }
 
         if flags.contains(PteFlags::Directory) {
@@ -75,9 +78,32 @@ impl PageTableEntry {
             if flags.contains(PteFlags::Large) {
                 result |= PageFlags::Size.bits();
             }
+
+            result |= match cache {
+                VmCacheType::Normal => 0,
+                VmCacheType::WriteThrough => PageFlags::WriteThrough.bits(),
+                VmCacheType::WriteCombine => {
+                    PageFlags::AttributeTable.bits() | PageFlags::WriteThrough.bits()
+                }
+                VmCacheType::Uncacheable => PageFlags::CacheDisable.bits(),
+            };
         }
 
         Self { inner: result }
+    }
+
+    /// Decodes the caching mode of a (leaf) entry from its PAT-index bits.
+    pub fn cache_type(&self) -> VmCacheType {
+        let flags = PageFlags::from_bits_retain(self.inner);
+        let pat = flags.contains(PageFlags::AttributeTable);
+        let pcd = flags.contains(PageFlags::CacheDisable);
+        let pwt = flags.contains(PageFlags::WriteThrough);
+        match (pat, pcd, pwt) {
+            (true, false, true) => VmCacheType::WriteCombine,
+            (false, true, _) => VmCacheType::Uncacheable,
+            (false, false, true) => VmCacheType::WriteThrough,
+            _ => VmCacheType::Normal,
+        }
     }
 
     pub const fn inner(&self) -> usize {
@@ -103,6 +129,12 @@ impl PageTableEntry {
     pub fn address(&self) -> PhysAddr {
         (self.inner & ADDR_MASK).into()
     }
+}
+
+pub(in crate::arch) fn setup_pat() {
+    const IA32_PAT: u32 = 0x277;
+    const PAT_VALUE: u64 = 0x0000_0100_0000_0406;
+    unsafe { super::asm::wrmsr(IA32_PAT, PAT_VALUE) };
 }
 
 pub(in crate::arch) fn flush_tlb(addr: VirtAddr) {
@@ -299,7 +331,7 @@ pub(in crate::arch) unsafe extern "C" fn cstr_len_user(
 
 pub(in crate::arch) unsafe fn set_user_access(state: bool) {
     if *ARCH_DATA.get().can_smap.get() {
-        if state == true {
+        if state {
             unsafe { asm!("stac") };
         } else {
             unsafe { asm!("clac") };

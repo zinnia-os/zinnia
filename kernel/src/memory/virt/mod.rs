@@ -71,8 +71,19 @@ impl VmFlags {
     }
 }
 
-/// Page caching types.
-pub enum VmCacheType {}
+/// Page caching types. MMIO device memory uses [`VmCacheType::Uncacheable`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum VmCacheType {
+    /// Write-back caching. The default for ordinary RAM.
+    #[default]
+    Normal,
+    /// Write-through caching.
+    WriteThrough,
+    /// Write-combining. Used for framebuffers/VRAM.
+    WriteCombine,
+    /// Uncacheable. Used for MMIO device memory.
+    Uncacheable,
+}
 
 #[derive(Debug)]
 pub enum PageTableError {
@@ -103,6 +114,8 @@ pub struct MappedObject {
     pub object: Arc<dyn MemoryObject>,
     /// A [`VmFlags`] object, but stored as an atomic value.
     flags: AtomicU8,
+    /// The caching mode the object's pages are mapped with.
+    cache: VmCacheType,
 }
 
 impl MappedObject {
@@ -123,6 +136,7 @@ impl Clone for MappedObject {
             offset_page: self.offset_page,
             object: self.object.clone(),
             flags: AtomicU8::new(self.flags.load(Ordering::SeqCst)),
+            cache: self.cache,
         }
     }
 }
@@ -234,6 +248,7 @@ impl AddressSpace {
                         offset_page: mapping.offset_page,
                         object: mapping.object.clone(),
                         flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                        cache: mapping.cache,
                     });
                 }
 
@@ -245,17 +260,20 @@ impl AddressSpace {
                         offset_page: mapping.offset_page + (overlap_end - mapping.start_page),
                         object: mapping.object.clone(),
                         flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                        cache: mapping.cache,
                     });
                 }
             }
         }
 
+        let cache = object.cache_type();
         self.mappings.insert(MappedObject {
             start_page,
             end_page,
             offset_page: offset as usize / page_size,
             object: object.clone(),
             flags: AtomicU8::new(prot.bits()),
+            cache,
         });
 
         Ok(())
@@ -328,6 +346,7 @@ impl AddressSpace {
                         offset_page: mapping.offset_page,
                         object: mapping.object.clone(),
                         flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                        cache: mapping.cache,
                     });
                 }
 
@@ -339,6 +358,7 @@ impl AddressSpace {
                         offset_page: mapping.offset_page + (overlap_end - mapping.start_page),
                         object: mapping.object.clone(),
                         flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                        cache: mapping.cache,
                     });
                 }
 
@@ -349,6 +369,7 @@ impl AddressSpace {
                     offset_page: mapping.offset_page + (overlap_start - mapping.start_page),
                     object: mapping.object.clone(),
                     flags: AtomicU8::new(new_flags.bits()),
+                    cache: mapping.cache,
                 });
             }
         }
@@ -389,6 +410,7 @@ impl AddressSpace {
                     offset_page: mapping.offset_page,
                     object: mapping.object.clone(),
                     flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                    cache: mapping.cache,
                 });
             }
 
@@ -399,6 +421,7 @@ impl AddressSpace {
                     offset_page: mapping.offset_page + (overlap_end - mapping.start_page),
                     object: mapping.object.clone(),
                     flags: AtomicU8::new(mapping.flags.load(Ordering::SeqCst)),
+                    cache: mapping.cache,
                 });
             }
         }

@@ -1,6 +1,6 @@
 use crate::arch;
 use crate::memory::pmm::{AllocFlags, KernelAlloc, PageAllocator};
-use crate::memory::virt::{self, KERNEL_VIRTUAL_ALLOCATOR, VmFlags, mmu::PageTable};
+use crate::memory::virt::{self, KERNEL_VIRTUAL_ALLOCATOR, VmCacheType, VmFlags, mmu::PageTable};
 use crate::memory::{PhysAddr, VirtAddr};
 use crate::posix::errno::{EResult, Errno};
 use crate::util::{align_down, align_up, mutex::spin::SpinMutex};
@@ -237,6 +237,7 @@ pub fn load(data: &[u8], cmdline: &[u8]) -> EResult<()> {
                             (load_base + aligned_virt + page).into(),
                             phys + page,
                             VmFlags::Read | VmFlags::Write,
+                            VmCacheType::Normal,
                         )
                         .map_err(|_| Errno::ENOMEM)?;
                 }

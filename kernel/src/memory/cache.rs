@@ -7,6 +7,7 @@ use crate::{
     memory::{
         PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
+        virt::VmCacheType,
     },
     posix::errno::{EResult, Errno},
     util::mutex::spin::SpinMutex,
@@ -29,6 +30,11 @@ pub trait MemoryObject: Sync + Send {
 
     fn sync(&self) -> EResult<()> {
         Ok(())
+    }
+
+    /// The caching mode userspace mappings of this object should use.
+    fn cache_type(&self) -> VmCacheType {
+        VmCacheType::Normal
     }
 }
 

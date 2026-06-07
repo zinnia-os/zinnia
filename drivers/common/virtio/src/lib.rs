@@ -8,6 +8,7 @@ use zinnia::{
     log,
     memory::{
         AllocFlags, KernelAlloc, MmioView, PageAllocator, PhysAddr, Register, UnsafeMemoryView,
+        VmCacheType,
     },
     posix::errno::{EResult, Errno},
 };
@@ -133,9 +134,9 @@ impl VirtQueue {
 
         Self {
             index,
-            desc_view: unsafe { MmioView::new(desc_phys, desc_size) },
-            avail_view: unsafe { MmioView::new(avail_phys, avail_size) },
-            used_view: unsafe { MmioView::new(used_phys, used_size) },
+            desc_view: unsafe { MmioView::new(desc_phys, desc_size, VmCacheType::Uncacheable) },
+            avail_view: unsafe { MmioView::new(avail_phys, avail_size, VmCacheType::Uncacheable) },
+            used_view: unsafe { MmioView::new(used_phys, used_size, VmCacheType::Uncacheable) },
             queue_size,
             notify_offset,
             free_descs: (0..queue_size).rev().collect(),
@@ -475,6 +476,7 @@ impl VirtioDevice {
             MmioView::new(
                 PhysAddr::new(common_bar_addr.value() + common_cfg.1 as usize),
                 common_cfg.2 as usize,
+                VmCacheType::Uncacheable,
             )
         };
 
@@ -488,6 +490,7 @@ impl VirtioDevice {
             MmioView::new(
                 PhysAddr::new(notify_bar_addr.value() + notify_cfg.1 as usize),
                 notify_cfg.2 as usize,
+                VmCacheType::Uncacheable,
             )
         };
 
@@ -501,6 +504,7 @@ impl VirtioDevice {
             MmioView::new(
                 PhysAddr::new(isr_bar_addr.value() + isr_cfg.1 as usize),
                 isr_cfg.2 as usize,
+                VmCacheType::Uncacheable,
             )
         };
 
@@ -514,6 +518,7 @@ impl VirtioDevice {
             MmioView::new(
                 PhysAddr::new(device_bar_addr.value() + device_cfg.1 as usize),
                 device_cfg.2 as usize,
+                VmCacheType::Uncacheable,
             )
         };
 

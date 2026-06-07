@@ -1,6 +1,10 @@
 //! Helpers for structured data accesses.
 
-use super::{PhysAddr, VirtAddr, pmm::KernelAlloc, virt::VmFlags};
+use super::{
+    PhysAddr, VirtAddr,
+    pmm::KernelAlloc,
+    virt::{VmCacheType, VmFlags},
+};
 use crate::memory::virt::mmu::PageTable;
 use core::{marker::PhantomData, ops::RangeInclusive};
 use num_traits::{FromBytes, PrimInt, ToBytes};
@@ -229,11 +233,10 @@ impl MmioView {
     /// Creates a new MMIO context over device memory.
     /// # Safety
     /// `phys` must be pointing to the start of the device memory region.
-    pub unsafe fn new(phys: PhysAddr, len: usize) -> Self {
+    pub unsafe fn new(phys: PhysAddr, len: usize, cache: VmCacheType) -> Self {
         return Self {
-            // TODO: When adding memory type support, map this as uncacheable.
             base: PageTable::get_kernel()
-                .map_memory::<KernelAlloc>(phys, VmFlags::Read | VmFlags::Write, len)
+                .map_memory::<KernelAlloc>(phys, VmFlags::Read | VmFlags::Write, cache, len)
                 .unwrap() as *mut (),
             len,
         };

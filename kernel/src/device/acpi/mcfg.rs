@@ -2,7 +2,7 @@ use crate::{
     device::pci::{self, Access, EcamPciAccess},
     memory::{
         pmm::KernelAlloc,
-        virt::{VmFlags, mmu::PageTable},
+        virt::{VmCacheType, VmFlags, mmu::PageTable},
     },
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -45,6 +45,7 @@ pub fn MCFG_STAGE() {
                 .map_memory::<KernelAlloc>(
                     (entry.address).into(),
                     VmFlags::Read | VmFlags::Write,
+                    VmCacheType::Normal,
                     ((entry.end_bus - entry.start_bus) as usize + 1) << 20, // + 1 because the range is inclusive
                 )
                 .unwrap();

@@ -285,6 +285,7 @@ pub fn MEMORY_STAGE() {
             text_start,
             PhysAddr(text_start.0 - kernel_start.0 + kernel_phys.0),
             VmFlags::Read | VmFlags::Exec,
+            VmCacheType::Normal,
             text_end.0 - text_start.0,
         )
         .expect("Unable to map the text segment");
@@ -295,6 +296,7 @@ pub fn MEMORY_STAGE() {
             rodata_start,
             PhysAddr(rodata_start.0 - kernel_start.0 + kernel_phys.0),
             VmFlags::Read,
+            VmCacheType::Normal,
             rodata_end.0 - rodata_start.0,
         )
         .expect("Unable to map the rodata segment");
@@ -305,6 +307,7 @@ pub fn MEMORY_STAGE() {
             data_start,
             PhysAddr(data_start.0 - kernel_start.0 + kernel_phys.0),
             VmFlags::Read | VmFlags::Write,
+            VmCacheType::Normal,
             data_end.0 - data_start.0,
         )
         .expect("Unable to map the data segment");
@@ -320,6 +323,7 @@ pub fn MEMORY_STAGE() {
                     arch::virt::get_hhdm_base() + entry.address.value(),
                     entry.address,
                     VmFlags::Read | VmFlags::Write,
+                    VmCacheType::Normal,
                     entry.length,
                 )
                 .expect("Unable to map HHDM region");
@@ -349,6 +353,7 @@ pub fn MEMORY_STAGE() {
                 (page_base.value() + page).into(),
                 BumpAllocator::alloc(1, AllocFlags::empty()).unwrap(),
                 VmFlags::Read | VmFlags::Write,
+                VmCacheType::Normal,
             )
             .unwrap();
     }

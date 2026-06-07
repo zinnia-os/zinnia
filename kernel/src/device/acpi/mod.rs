@@ -18,7 +18,7 @@ pub fn TABLES_STAGE() {
     };
 
     // Get an early table window so we can initialize e.g. HPET and MADT.
-    let mut early_mem = Box::<[u8]>::new_uninit_slice(4096);
+    let early_mem = Box::leak(Box::<[u8]>::new_uninit_slice(4096));
 
     let uacpi_status = unsafe {
         uacpi::uacpi_setup_early_table_access(

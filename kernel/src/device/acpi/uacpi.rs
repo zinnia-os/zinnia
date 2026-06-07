@@ -8,7 +8,7 @@ use crate::{
     memory::{
         free, malloc,
         pmm::KernelAlloc,
-        virt::{VmFlags, mmu::PageTable},
+        virt::{VmCacheType, VmFlags, mmu::PageTable},
     },
     util::{self, spin::SpinLock},
 };
@@ -37,6 +37,7 @@ extern "C" fn uacpi_kernel_map(addr: uacpi_phys_addr, len: uacpi_size) -> *mut c
             .map_memory::<KernelAlloc>(
                 aligned_addr.into(),
                 VmFlags::Read | VmFlags::Write,
+                VmCacheType::Normal,
                 aligned_len,
             )
             .unwrap()

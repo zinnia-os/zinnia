@@ -1,6 +1,6 @@
 use crate::{
     clock::{ClockError, ClockSource},
-    memory::{UnsafeMemoryView, view::MmioView},
+    memory::{UnsafeMemoryView, VmCacheType, view::MmioView},
 };
 use alloc::boxed::Box;
 use uacpi_sys::{
@@ -50,7 +50,13 @@ impl Hpet {
         }
 
         let hpet = unsafe { table.__bindgen_anon_1.ptr } as *const acpi_hpet;
-        let mmio = unsafe { MmioView::new(((*hpet).address.address as usize).into(), 0x1000) };
+        let mmio = unsafe {
+            MmioView::new(
+                ((*hpet).address.address as usize).into(),
+                0x1000,
+                VmCacheType::Uncacheable,
+            )
+        };
         unsafe { uacpi_table_unref(&raw mut table) };
 
         // Enable timer.

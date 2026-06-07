@@ -2,7 +2,7 @@ use crate::{
     arch,
     memory::{
         AllocFlags, KERNEL_PAGE_TABLE, KERNEL_VIRTUAL_ALLOCATOR, KernelAlloc, PageAllocator,
-        VirtAddr, VmFlags,
+        PhysAddr, VirtAddr, VmCacheType, VmFlags, virt,
     },
     posix::errno::{EResult, Errno},
 };
@@ -29,6 +29,7 @@ impl KernelStack {
                     virtual_address + i,
                     physical_page,
                     VmFlags::Read | VmFlags::Write,
+                    VmCacheType::Normal,
                 )
                 .map_err(|_| Errno::ENOMEM)?;
         }

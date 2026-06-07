@@ -7,7 +7,7 @@ use crate::{
     memory::{
         PhysAddr, free, malloc,
         pmm::KernelAlloc,
-        virt::{VmFlags, mmu::PageTable},
+        virt::{VmCacheType, VmFlags, mmu::PageTable},
     },
     uapi::termios::winsize,
 };
@@ -66,6 +66,7 @@ impl FbCon {
             .map_memory::<KernelAlloc>(
                 fb.base,
                 VmFlags::Read | VmFlags::Write,
+                VmCacheType::WriteCombine,
                 fb.pitch * fb.height,
             )
             .unwrap();

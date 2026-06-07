@@ -9,6 +9,7 @@ use zinnia::{
     clock, log,
     memory::{
         AllocFlags, KernelAlloc, MmioView, PageAllocator, PhysAddr, Register, UnsafeMemoryView,
+        VmCacheType,
     },
 };
 
@@ -51,7 +52,7 @@ impl Queue {
         // Allocate memory the completion queue.
         let cq_addr = KernelAlloc::alloc_bytes(cq_size as _, AllocFlags::empty())
             .map_err(|_| NvmeError::AllocationFailed)?;
-        let cq_view = unsafe { MmioView::new(cq_addr, cq_size as _) };
+        let cq_view = unsafe { MmioView::new(cq_addr, cq_size as _, VmCacheType::Uncacheable) };
 
         // Allocate memory for the submission queue.
         let sq_addr = match KernelAlloc::alloc_bytes(sq_size as _, AllocFlags::empty()) {
@@ -61,7 +62,7 @@ impl Queue {
                 return Err(NvmeError::AllocationFailed);
             }
         };
-        let sq_view = unsafe { MmioView::new(sq_addr, sq_size as _) };
+        let sq_view = unsafe { MmioView::new(sq_addr, sq_size as _, VmCacheType::Uncacheable) };
 
         // Calculate the offset of the doorbell registers. The stride is already precomputed here.
         let doorbells_offset = DOORBELL_OFFSET + (queue_id * 2 * doorbell_stride);

@@ -5,12 +5,14 @@ use core::sync::atomic::AtomicUsize;
 use zinnia::{
     alloc::{boxed::Box, format},
     core::sync::atomic::Ordering,
-    device::block::register_block_device,
-    device::pci::{DeviceView, Driver, PciBar, PciVariant, common},
+    device::{
+        block::register_block_device,
+        pci::{DeviceView, Driver, PciBar, PciVariant, common},
+    },
     error,
     irq::{IrqHandler, Status},
     log,
-    memory::{MmioView, PhysAddr},
+    memory::{MmioView, PhysAddr, VmCacheType},
     posix::errno::{EResult, Errno},
 };
 
@@ -60,7 +62,7 @@ fn probe(_: &PciVariant, mut view: DeviceView<'static>) -> EResult<()> {
         PciBar::Mmio64 { address, size, .. } => (address as _, size),
         _ => unreachable!("PCI NVMe devices are MMIO-only"),
     };
-    let regs = unsafe { MmioView::new(PhysAddr::new(addr as _), size) };
+    let regs = unsafe { MmioView::new(PhysAddr::new(addr as _), size, VmCacheType::Uncacheable) };
 
     let controller = match Controller::new_pci(regs) {
         Ok(x) => x,

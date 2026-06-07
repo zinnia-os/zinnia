@@ -7,7 +7,7 @@ use crate::{
     clock,
     irq::{self, IrqLine, IrqLineState, IrqMode, MsiLine, Polarity},
     memory::{
-        BitValue, PhysAddr, UnsafeMemoryView,
+        BitValue, PhysAddr, UnsafeMemoryView, VmCacheType,
         view::{MmioView, Register},
     },
     percpu::CpuData,
@@ -114,7 +114,13 @@ impl LocalApic {
                 apic_msr |= 1 << 10;
                 None
             } else {
-                Some(unsafe { MmioView::new(PhysAddr::from(apic_msr & 0xFFFFF000), 0x1000) })
+                Some(unsafe {
+                    MmioView::new(
+                        PhysAddr::from(apic_msr & 0xFFFFF000),
+                        0x1000,
+                        VmCacheType::Uncacheable,
+                    )
+                })
             }
         };
 
@@ -330,7 +336,7 @@ impl IoApic {
         let ioapic = Arc::new(Self {
             id,
             gsi_base,
-            regs: unsafe { MmioView::new(addr, 0x1000) },
+            regs: unsafe { MmioView::new(addr, 0x1000, VmCacheType::Uncacheable) },
         });
 
         let num_lines = ioapic.gsi_count();

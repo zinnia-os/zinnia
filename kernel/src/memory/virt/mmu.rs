@@ -5,7 +5,8 @@ use crate::{
             PhysAddr, VirtAddr,
             pmm::{AllocFlags, KernelAlloc, PageAllocator},
             virt::{
-                KERNEL_PAGE_TABLE, KERNEL_VIRTUAL_ALLOCATOR, PageTableError, PteFlags, VmFlags,
+                KERNEL_PAGE_TABLE, KERNEL_VIRTUAL_ALLOCATOR, PageTableError, PteFlags, VmCacheType,
+                VmFlags,
             },
         },
         util::{align_up, mutex::spin::SpinMutex},
@@ -64,6 +65,7 @@ impl PageTable {
         &self,
         phys: PhysAddr,
         flags: VmFlags,
+        cache: VmCacheType,
         length: usize,
     ) -> Result<*mut u8, AllocError> {
         let aligned_len = align_up(length, arch::virt::get_page_size());
@@ -75,7 +77,10 @@ impl PageTable {
             .allocate(len)
             .map_err(|_| AllocError)?;
 
-        if self.map_range::<P>(virt, phys, flags, aligned_len).is_err() {
+        if self
+            .map_range::<P>(virt, phys, flags, cache, aligned_len)
+            .is_err()
+        {
             _ = KERNEL_VIRTUAL_ALLOCATOR.get().lock().release(virt, len);
             return Err(AllocError);
         }
@@ -196,6 +201,7 @@ impl PageTable {
                             .as_hhdm()
                             .ok_or(PageTableError::PageTableEntryMissing)?,
                         pte_flags,
+                        VmCacheType::Normal,
                         level,
                     );
                     current_head = next_head;
@@ -224,6 +230,7 @@ impl PageTable {
         virt: VirtAddr,
         phys: PhysAddr,
         flags: VmFlags,
+        cache: VmCacheType,
     ) -> Result<(), PageTableError> {
         self.with_pte::<P, _>(virt, true, |pte| {
             *pte = PageTableEntry::new(
@@ -234,6 +241,7 @@ impl PageTable {
                     } else {
                         PteFlags::empty()
                     },
+                cache,
                 0,
             )
         })?;
@@ -241,13 +249,15 @@ impl PageTable {
         return Ok(());
     }
 
-    /// Changes the permissions on a mapping.
-    pub fn remap_single<P: PageAllocator>(
+    /// Changes the permissions on a single mapping.
+    fn remap_single_inner<P: PageAllocator>(
         &self,
         virt: VirtAddr,
         flags: VmFlags,
     ) -> Result<(), PageTableError> {
         self.with_pte::<P, _>(virt, false, |pte| {
+            // Preserve the existing caching mode.
+            let cache = pte.cache_type();
             *pte = PageTableEntry::new(
                 pte.address(),
                 flags.as_pte()
@@ -256,12 +266,22 @@ impl PageTable {
                     } else {
                         PteFlags::empty()
                     },
+                cache,
                 0,
             )
         })?;
-        crate::arch::virt::flush_tlb(virt);
+        Ok(())
+    }
 
-        return Ok(());
+
+    /// Changes the permissions on a mapping.
+    pub fn remap_single<P: PageAllocator>(
+        &self,
+        virt: VirtAddr,
+        flags: VmFlags,
+    ) -> Result<(), PageTableError> {
+        self.remap_single_inner::<P>(virt, flags)?;
+        Ok(())
     }
 
     /// Maps a range of consecutive memory in this page table.
@@ -270,6 +290,7 @@ impl PageTable {
         virt: VirtAddr,
         phys: PhysAddr,
         flags: VmFlags,
+        cache: VmCacheType,
         length: usize,
     ) -> Result<(), PageTableError> {
         // TODO: Do transactional mapping.
@@ -277,7 +298,12 @@ impl PageTable {
         let step = arch::virt::get_page_size();
 
         for offset in (0..length).step_by(step) {
-            self.map_single::<P>(VirtAddr(virt.0 + offset), PhysAddr(phys.0 + offset), flags)?;
+            self.map_single::<P>(
+                VirtAddr(virt.0 + offset),
+                PhysAddr(phys.0 + offset),
+                flags,
+                cache,
+            )?;
         }
         return Ok(());
     }

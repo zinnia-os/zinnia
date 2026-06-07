@@ -7,7 +7,7 @@ use crate::{
     arch,
     irq::{IrqLine, Polarity, TriggerMode},
     memory::{
-        Field, MmioView, PhysAddr, UnsafeMemoryView,
+        Field, MmioView, PhysAddr, UnsafeMemoryView, VmCacheType,
         view::{BitValue, MemoryView, Register},
     },
     posix::errno::{EResult, Errno},
@@ -252,7 +252,13 @@ impl<'a> DeviceView<'a> {
             _ => return Err(Errno::EINVAL),
         };
 
-        let table_view = unsafe { MmioView::new(PhysAddr::new(bar_addr + table_offset), 16) };
+        let table_view = unsafe {
+            MmioView::new(
+                PhysAddr::new(bar_addr + table_offset),
+                16,
+                VmCacheType::Uncacheable,
+            )
+        };
 
         let msi = arch::irq::allocate_msi().ok_or(Errno::ENOMEM)?;
         let line = msi.clone() as Arc<dyn IrqLine>;

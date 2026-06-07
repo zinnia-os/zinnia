@@ -1,6 +1,6 @@
 use crate::memory::{
     PhysAddr, UserAccessRegion, VirtAddr,
-    virt::{PteFlags, mmu::PageTable},
+    virt::{PteFlags, VmCacheType, mmu::PageTable},
 };
 use bitflags::bitflags;
 use core::arch::asm;
@@ -44,7 +44,14 @@ impl PageTableEntry {
         return Self { inner: 0 };
     }
 
-    pub const fn new(address: PhysAddr, flags: PteFlags, _level: usize) -> Self {
+    pub const fn new(
+        address: PhysAddr,
+        flags: PteFlags,
+        cache: VmCacheType,
+        _level: usize,
+    ) -> Self {
+        // TODO: Support caching modes via the Svpbmt extension (PBMT bits 61-62).
+        let _ = cache;
         let mut result = ((address.value() as u64 >> 2) & PPN_MASK) | PageFlags::Valid.bits();
 
         if flags.contains(PteFlags::User) {
@@ -70,6 +77,11 @@ impl PageTableEntry {
 
     pub const fn inner(&self) -> usize {
         self.inner as usize
+    }
+
+    /// Caching is not yet implemented on riscv64; always reports `Normal`.
+    pub fn cache_type(&self) -> VmCacheType {
+        VmCacheType::Normal
     }
 
     pub fn is_present(&self) -> bool {

@@ -17,7 +17,7 @@ use zinnia::{
     error, log,
     memory::{
         AllocFlags, BitValue, Field, KernelAlloc, MmioView, PageAllocator, Register,
-        UnsafeMemoryView,
+        UnsafeMemoryView, VmCacheType,
     },
     util::mutex::spin::SpinMutex,
 };
@@ -162,7 +162,7 @@ impl Controller {
         }
 
         // Read the model strings.
-        let view = unsafe { MmioView::new(identify_buffer, 4096) };
+        let view = unsafe { MmioView::new(identify_buffer, 4096, VmCacheType::Normal) };
         let mut serial = [0u8; 20];
         let mut model = [0u8; 40];
         let mut fwrev = [0u8; 8];
@@ -213,7 +213,7 @@ impl Controller {
         let identify_buffer = KernelAlloc::alloc_bytes(4096, AllocFlags::empty())
             .map_err(|_| NvmeError::AllocationFailed)?;
 
-        let identify_view = unsafe { MmioView::new(identify_buffer, 4096) };
+        let identify_view = unsafe { MmioView::new(identify_buffer, 4096, VmCacheType::Normal) };
 
         let mut nsid = 0;
         loop {

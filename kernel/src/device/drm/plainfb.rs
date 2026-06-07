@@ -13,6 +13,7 @@ use crate::{
     memory::{
         MemoryObject, MmioView, PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
+        virt::VmCacheType,
     },
     posix::errno::{EResult, Errno},
     uapi::drm::{
@@ -207,7 +208,7 @@ fn PLAINFB_STAGE() {
         height: fb.height as _,
         bpp: (fb.cpp * 8) as _,
         stride: fb.pitch as _,
-        addr: unsafe { MmioView::new(fb.base, fb.pitch * fb.height) },
+        addr: unsafe { MmioView::new(fb.base, fb.pitch * fb.height, VmCacheType::WriteCombine) },
         obj_counter: IdAllocator::new(),
     });
 

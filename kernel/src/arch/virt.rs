@@ -139,7 +139,7 @@ pub fn cstr_len_user(src: VirtAddr, max_len: usize) -> Option<usize> {
 #[allow(unused)]
 mod api {
     use super::PageTableEntry;
-    use crate::memory::{PhysAddr, virt::PteFlags};
+    use crate::memory::{PhysAddr, virt::{PteFlags, VmCacheType}};
 
     /// Returns a PTE which represents an empty slot.
     const fn pte_empty() -> PageTableEntry {
@@ -147,8 +147,18 @@ mod api {
     }
 
     /// Returns a new PTE with a set address.
-    const fn pte_new(address: PhysAddr, flags: PteFlags, level: usize) -> PageTableEntry {
-        PageTableEntry::new(address, flags, level)
+    const fn pte_new(
+        address: PhysAddr,
+        flags: PteFlags,
+        cache: VmCacheType,
+        level: usize,
+    ) -> PageTableEntry {
+        PageTableEntry::new(address, flags, cache, level)
+    }
+
+    /// Returns the caching mode of the PTE.
+    fn pte_cache_type(pte: &PageTableEntry) -> VmCacheType {
+        pte.cache_type()
     }
 
     /// Returns the inner representation of the PTE.

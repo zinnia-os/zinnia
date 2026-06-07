@@ -18,7 +18,7 @@ use crate::{
     memory::{
         PhysAddr,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
-        virt::{PteFlags, mmu::PageTable},
+        virt::{PteFlags, VmCacheType, mmu::PageTable},
     },
     percpu::{self, CpuData},
     process::{Process, task::Task},
@@ -411,6 +411,7 @@ fn INIT_APS_STAGE() {
                         i * (1 << (get_page_bits() + get_max_leaf_level() * get_level_bits())),
                     ),
                     PteFlags::Read | PteFlags::Write | PteFlags::Exec | PteFlags::Large,
+                    VmCacheType::Normal,
                     3,
                 )
                 .inner() as u64,
@@ -421,6 +422,7 @@ fn INIT_APS_STAGE() {
             PageTableEntry::new(
                 temp_l3,
                 PteFlags::Read | PteFlags::Write | PteFlags::Exec,
+                VmCacheType::Normal,
                 3,
             )
             .inner() as u64,
@@ -456,5 +458,5 @@ fn INIT_APS_STAGE() {
         KernelAlloc::dealloc(temp_l3, 1);
     }
 
-    IS_INIT.store(true, Ordering::Relaxed)
+    IS_INIT.store(true, Ordering::Relaxed);
 }

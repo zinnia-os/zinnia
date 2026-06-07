@@ -63,8 +63,10 @@ pub fn setup_bsp() {
     idt::init();
     idt::set_idt();
 
-    // Set FSGSBASE contents.
     unsafe {
+        let efer = super::asm::rdmsr(consts::MSR_EFER);
+        super::asm::wrmsr(consts::MSR_EFER, efer | consts::MSR_EFER_NXE as u64);
+
         super::asm::wrmsr(consts::MSR_KERNEL_GS_BASE, 0);
         super::asm::wrmsr(consts::MSR_GS_BASE, &raw const LD_PERCPU_START as u64);
         super::asm::wrmsr(consts::MSR_FS_BASE, 0);
@@ -88,6 +90,8 @@ pub(super) fn setup_core(context: &'static CpuData) {
         );
         super::asm::wrmsr(consts::MSR_FS_BASE, 0);
     }
+
+    super::virt::setup_pat();
 
     // Load a GDT and TSS.
     gdt::init();
