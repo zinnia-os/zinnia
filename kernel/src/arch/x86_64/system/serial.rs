@@ -1,5 +1,6 @@
 use crate::{
     arch::x86_64::asm::{read8, write8},
+    boot::BootInfo,
     device::tty::{Tty, TtyDriver},
     irq::{IrqHandler, IrqLine},
     log::{self, LoggerSink},
@@ -123,9 +124,20 @@ fn SERIAL_STAGE() {
     ],
 )]
 fn SERIAL_FILE_STAGE() {
+    if !BootInfo::get()
+        .command_line
+        .get_bool("com1")
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let Some(irq) = super::apic::get_isa_irq(4) else {
+        return;
+    };
+
     let tty = Tty::new(String::from("com1"), Arc::new(SerialTtyDriver));
 
-    let irq = super::apic::get_isa_irq(4).unwrap() as Arc<dyn IrqLine>;
+    let irq = irq as Arc<dyn IrqLine>;
     irq.attach(Box::new(SerialIrqHandler { tty: tty.clone() }));
     unsafe { write8(COM1_BASE + 1, 0x01) };
     irq.unmask();
