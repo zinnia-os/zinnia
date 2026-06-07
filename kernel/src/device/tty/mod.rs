@@ -66,6 +66,10 @@ impl LineDiscipline {
         self.termios.c_lflag & ISIG != 0
     }
 
+    fn is_tostop(&self) -> bool {
+        self.termios.c_lflag & TOSTOP != 0
+    }
+
     fn is_icrnl(&self) -> bool {
         self.termios.c_iflag & ICRNL != 0
     }
@@ -284,6 +288,47 @@ impl Tty {
         }
     }
 
+    pub fn job_control_gate(self: &Arc<Self>, is_read: bool) -> EResult<()> {
+        let proc = Scheduler::get_current().get_process();
+
+        // Job control only applies to the process's *controlling* terminal.
+        let is_ctty = proc
+            .controlling_tty
+            .lock()
+            .as_ref()
+            .is_some_and(|c| Arc::ptr_eq(c, self));
+        if !is_ctty {
+            return Ok(());
+        }
+
+        let pgrp = *proc.pgrp.lock();
+        // Foreground group (or no foreground group set) proceeds normally.
+        match *self.foreground_pgrp.lock() {
+            Some(fg) if fg != pgrp => {}
+            _ => return Ok(()),
+        }
+
+        let sig = if is_read {
+            Signal::SigTtin
+        } else {
+            Signal::SigTtou
+        };
+
+        // If the signal is blocked or ignored, a read fails with EIO while a write is allowed to proceed.
+        let ignored = proc.signal_actions.lock().get_action(sig).is_ignore();
+        let blocked = Scheduler::get_current().signal.lock().mask.is_set(sig);
+        if ignored || blocked {
+            return if is_read { Err(Errno::EIO) } else { Ok(()) };
+        }
+
+        if pgrp_is_orphaned(pgrp, *proc.session.lock()) {
+            return Err(Errno::EIO);
+        }
+
+        process::signal::send_signal_to_pgrp(pgrp, sig);
+        Err(Errno::ERESTART)
+    }
+
     /// Register this TTY as a character device under `/dev/{name}`.
     pub fn register_device(self: Arc<Self>) -> EResult<()> {
         let ops: Arc<dyn FileOps> = Arc::new(TtyFileOps { tty: self.clone() });
@@ -314,6 +359,26 @@ pub fn get_tty_by_name(name: &str) -> Option<Arc<Tty>> {
     TTYS.lock().values().find(|t| t.name == name).cloned()
 }
 
+fn pgrp_is_orphaned(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
+    let all: Vec<Arc<process::Process>> = process::PROCESS_TABLE
+        .lock()
+        .values()
+        .filter_map(alloc::sync::Weak::upgrade)
+        .collect();
+    for p in all {
+        if *p.pgrp.lock() != pgrp {
+            continue;
+        }
+        if let Some(parent) = p.get_parent()
+            && *parent.pgrp.lock() != pgrp
+            && *parent.session.lock() == session
+        {
+            return false;
+        }
+    }
+    true
+}
+
 pub struct TtyFileOps {
     pub tty: Arc<Tty>,
 }
@@ -323,6 +388,8 @@ impl FileOps for TtyFileOps {
         if buffer.is_empty() {
             return Ok(0);
         }
+
+        self.tty.job_control_gate(true)?;
 
         // Non-blocking: return data immediately or EAGAIN.
         if file.flags.lock().contains(OpenFlags::NonBlocking) {
@@ -505,6 +572,10 @@ impl FileOps for TtyFileOps {
     fn write(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
         if self.tty.is_hung_up() {
             return Err(Errno::EIO);
+        }
+
+        if self.tty.ldisc.lock().is_tostop() {
+            self.tty.job_control_gate(false)?;
         }
 
         let total = buffer.len();
