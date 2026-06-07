@@ -273,7 +273,6 @@ impl PageTable {
         Ok(())
     }
 
-
     /// Changes the permissions on a mapping.
     pub fn remap_single<P: PageAllocator>(
         &self,

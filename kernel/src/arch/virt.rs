@@ -139,7 +139,10 @@ pub fn cstr_len_user(src: VirtAddr, max_len: usize) -> Option<usize> {
 #[allow(unused)]
 mod api {
     use super::PageTableEntry;
-    use crate::memory::{PhysAddr, virt::{PteFlags, VmCacheType}};
+    use crate::memory::{
+        PhysAddr,
+        virt::{PteFlags, VmCacheType},
+    };
 
     /// Returns a PTE which represents an empty slot.
     const fn pte_empty() -> PageTableEntry {
