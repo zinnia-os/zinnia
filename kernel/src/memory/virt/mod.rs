@@ -1,6 +1,7 @@
 pub mod allocator;
 pub mod fault;
 pub mod mmu;
+pub mod shootdown;
 
 use self::allocator::VirtualAllocator;
 use super::{VirtAddr, pmm::AllocFlags};
@@ -225,14 +226,18 @@ impl AddressSpace {
             if start_page <= mapping.start_page && end_page >= mapping.end_page {
                 for p in mapping.start_page..mapping.end_page {
                     let page_addr = (p * page_size).into();
-                    _ = self.table.unmap_single::<KernelAlloc>(page_addr);
+                    _ = self
+                        .table
+                        .unmap_single_no_shootdown::<KernelAlloc>(page_addr);
                 }
             }
             // If new mapping partially shadows the old mapping.
             else {
                 for p in start_page.max(mapping.start_page)..end_page.min(mapping.end_page) {
                     let page_addr = (p * page_size).into();
-                    _ = self.table.unmap_single::<KernelAlloc>(page_addr);
+                    _ = self
+                        .table
+                        .unmap_single_no_shootdown::<KernelAlloc>(page_addr);
                 }
 
                 let overlap_end = end_page.min(mapping.end_page);
@@ -309,7 +314,10 @@ impl AddressSpace {
                 for p in mapping.start_page..mapping.end_page {
                     if self.table.is_mapped((p * page_size).into()) {
                         self.table
-                            .remap_single::<KernelAlloc>((p * page_size).into(), pte_flags)
+                            .remap_single_no_shootdown::<KernelAlloc>(
+                                (p * page_size).into(),
+                                pte_flags,
+                            )
                             .map_err(|_| Errno::ENOMEM)?;
                     }
                 }
@@ -329,7 +337,10 @@ impl AddressSpace {
                 for p in overlap_start..overlap_end {
                     if self.table.is_mapped((p * page_size).into()) {
                         self.table
-                            .remap_single::<KernelAlloc>((p * page_size).into(), pte_flags)
+                            .remap_single_no_shootdown::<KernelAlloc>(
+                                (p * page_size).into(),
+                                pte_flags,
+                            )
                             .map_err(|_| Errno::ENOMEM)?;
                     }
                 }
@@ -458,7 +469,7 @@ impl AddressSpace {
 
             for page in overlap_start..overlap_end {
                 let page_addr = (page * page_size).into();
-                if self.table.take_dirty(page_addr) {
+                if self.table.take_dirty_no_shootdown(page_addr) {
                     let object_page = mapping.offset_page + (page - mapping.start_page);
                     mapping.object.mark_dirty_page(object_page);
                 }
@@ -555,13 +566,17 @@ impl AddressSpace {
         self.allocator.clear();
     }
 
-    pub fn fork(&self) -> EResult<Self> {
+    /// Forks this address space.
+    pub fn fork(&self) -> EResult<(Self, Option<(VirtAddr, usize)>)> {
         let page_size = arch::virt::get_page_size();
         let mut result = Self {
             table: Arc::new(PageTable::new_user::<KernelAlloc>(AllocFlags::empty())),
             allocator: self.allocator.clone(),
             mappings: BTreeSet::new(),
         };
+
+        let mut shoot_lo = usize::MAX;
+        let mut shoot_hi = 0usize;
 
         // Copy over existing mappings, but make a copy of private mappings.
         for obj in self.mappings.iter() {
@@ -579,18 +594,26 @@ impl AddressSpace {
                     for p in obj.start_page..obj.end_page {
                         if self.table.is_mapped((p * page_size).into()) {
                             self.table
-                                .remap_single::<KernelAlloc>(
+                                .remap_single_no_shootdown::<KernelAlloc>(
                                     (p * page_size).into(),
                                     cow_flags & !VmFlags::Write,
                                 )
                                 .unwrap();
+                            shoot_lo = shoot_lo.min(p);
+                            shoot_hi = shoot_hi.max(p + 1);
                         }
                     }
                 }
             }
         }
 
-        Ok(result)
+        let shoot = (shoot_lo < shoot_hi).then(|| {
+            (
+                (shoot_lo * page_size).into(),
+                (shoot_hi - shoot_lo) * page_size,
+            )
+        });
+        Ok((result, shoot))
     }
 }
 

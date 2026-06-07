@@ -150,7 +150,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::MUNMAP => memory::munmap,
         numbers::MPROTECT => memory::mprotect,
         numbers::MSYNC => memory::msync,
-        numbers::MADVISE => sys_unimpl!("madvise", Err(Errno::ENOSYS)),
+        numbers::MADVISE => memory::madvise,
 
         // Signals
         numbers::SIGPROCMASK => signal::sigprocmask,

@@ -74,6 +74,34 @@ impl Context {
         self.a0 = val as _;
         self.a1 = err as _;
     }
+
+    pub fn sp(&self) -> usize {
+        self.sp as usize
+    }
+
+    pub fn return_error(&self) -> usize {
+        self.a1 as usize
+    }
+
+    pub fn snapshot_syscall(&self) -> SyscallRestart {
+        SyscallRestart {
+            arg0: self.a0 as usize,
+            arg1: self.a1 as usize,
+        }
+    }
+
+    pub fn restart_syscall(&mut self, restart: &SyscallRestart) {
+        // TODO: rewind the program counter (sepc) by the length of `ecall`
+        // once the trap frame has it.
+        self.a0 = restart.arg0 as u64;
+        self.a1 = restart.arg1 as u64;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SyscallRestart {
+    arg0: usize,
+    arg1: usize,
 }
 
 #[repr(C)]
@@ -108,6 +136,10 @@ pub unsafe fn preempt_disable() {
 pub unsafe fn preempt_enable() -> bool {
     // TODO
     true
+}
+
+pub fn broadcast_shootdown() {
+    // TODO: cross-hart shootdown is not implemented yet.
 }
 
 pub unsafe fn switch(from: *const Task, to: *const Task) -> *mut Task {
@@ -256,12 +288,7 @@ pub unsafe fn jump_to_user(ip: VirtAddr, sp: VirtAddr) {
 
 pub fn setup_signal_frame(
     _context: &mut Context,
-    _handler: usize,
-    _signal: u32,
-    _mask: SignalSet,
-    _flags: u32,
-    _restorer: usize,
-    _restart_context: Option<Context>,
+    _delivery: &crate::process::signal::SignalDelivery,
 ) {
     todo!("riscv64 signal frame setup not yet implemented")
 }

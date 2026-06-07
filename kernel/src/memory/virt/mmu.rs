@@ -1,3 +1,4 @@
+use crate::irq::lock::IrqLock;
 use crate::{
     arch::{self, virt::PageTableEntry},
     {
@@ -7,13 +8,19 @@ use crate::{
             virt::{
                 KERNEL_PAGE_TABLE, KERNEL_VIRTUAL_ALLOCATOR, PageTableError, PteFlags, VmCacheType,
                 VmFlags,
+                shootdown::{self, ShootdownState},
             },
         },
         util::{align_up, mutex::spin::SpinMutex},
     },
 };
 use alloc::{alloc::AllocError, slice};
-use core::{num::NonZeroUsize, sync::atomic::Ordering};
+use core::num::NonZeroUsize;
+
+/// Handle a TLB shootdown IPI: service any shootdowns aimed at this CPU.
+pub fn handle_shootdown_ipi() {
+    shootdown::service_shootdowns();
+}
 
 /// Represents a virtual address space.
 #[derive(Debug)]
@@ -24,6 +31,8 @@ pub struct PageTable {
     root_level: usize,
     /// `true`, if this is a user page table.
     is_user: bool,
+    /// Cross-CPU TLB shootdown state for this address space.
+    shoot: SpinMutex<ShootdownState>,
 }
 
 impl PageTable {
@@ -44,6 +53,7 @@ impl PageTable {
             head: SpinMutex::new(user_l1),
             root_level: KERNEL_PAGE_TABLE.get().root_level,
             is_user: true,
+            shoot: SpinMutex::new(ShootdownState::new()),
         }
     }
 
@@ -53,6 +63,7 @@ impl PageTable {
             head: SpinMutex::new(P::alloc(1, flags).unwrap()),
             root_level,
             is_user: false,
+            shoot: SpinMutex::new(ShootdownState::new()),
         }
     }
 
@@ -115,19 +126,35 @@ impl PageTable {
         self.root_level
     }
 
-    /// Sets this page table as the active one.
-    ///
+    /// `true` if this is a user address space.
+    pub(crate) const fn is_user_space(&self) -> bool {
+        self.is_user
+    }
+
+    /// The cross-CPU TLB shootdown state for this address space.
+    pub(crate) fn shoot(&self) -> &SpinMutex<ShootdownState> {
+        &self.shoot
+    }
+
+    /// Loads this page table into the MMU without touching the per-CPU bindings.
     /// # Safety
-    ///
+    /// All parts of the kernel must still be mapped for this call to be safe.
+    pub unsafe fn activate_raw(&self) {
+        unsafe { arch::virt::set_page_table(self) };
+    }
+
+    /// Sets this page table as the active one, updating this CPU's user binding
+    /// so cross-CPU shootdowns are tracked correctly.
+    /// # Safety
     /// All parts of the kernel must still be mapped for this call to be safe.
     pub unsafe fn set_active(&self) {
+        let cpu = crate::percpu::CpuData::get();
         if self.is_user {
-            let cpu = crate::percpu::CpuData::get();
-            cpu.active_user_table
-                .store(core::ptr::from_ref(self).cast_mut(), Ordering::Release);
-        }
-        unsafe {
-            arch::virt::set_page_table(self);
+            cpu.user_binding.rebind(self);
+        } else {
+            let _irq = IrqLock::lock();
+            unsafe { arch::virt::set_page_table(self) };
+            cpu.user_binding.release();
         }
     }
 
@@ -273,6 +300,15 @@ impl PageTable {
         Ok(())
     }
 
+    /// Changes the permissions on a mapping without flushing the TLB.
+    pub(crate) fn remap_single_no_shootdown<P: PageAllocator>(
+        &self,
+        virt: VirtAddr,
+        flags: VmFlags,
+    ) -> Result<(), PageTableError> {
+        self.remap_single_inner::<P>(virt, flags)
+    }
+
     /// Changes the permissions on a mapping.
     pub fn remap_single<P: PageAllocator>(
         &self,
@@ -280,6 +316,7 @@ impl PageTable {
         flags: VmFlags,
     ) -> Result<(), PageTableError> {
         self.remap_single_inner::<P>(virt, flags)?;
+        shootdown::submit_shootdown(self, virt.value(), arch::virt::get_page_size());
         Ok(())
     }
 
@@ -318,14 +355,25 @@ impl PageTable {
         let length = align_up(length, arch::virt::get_page_size());
         let step = arch::virt::get_page_size();
 
+        let mut remapped_any = false;
+        let mut result = Ok(());
         for offset in (0..length).step_by(step) {
-            self.remap_single::<P>(VirtAddr(virt.0 + offset), flags)?;
+            match self.remap_single_inner::<P>(VirtAddr(virt.0 + offset), flags) {
+                Ok(()) => remapped_any = true,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
         }
-        return Ok(());
+        if remapped_any {
+            shootdown::submit_shootdown(self, virt.value(), length);
+        }
+        result
     }
 
     /// Un-maps a page from this page table.
-    pub fn unmap_single<P: PageAllocator>(&self, virt: VirtAddr) -> Result<(), PageTableError> {
+    fn unmap_single_inner<P: PageAllocator>(&self, virt: VirtAddr) -> Result<(), PageTableError> {
         let head = self.head.lock();
         let mut current_head: *mut PageTableEntry = head.as_hhdm();
 
@@ -355,8 +403,21 @@ impl PageTable {
         unsafe {
             pte.write_volatile(PageTableEntry::empty());
         };
-        crate::arch::virt::flush_tlb(virt);
+        Ok(())
+    }
 
+    pub(crate) fn unmap_single_no_shootdown<P: PageAllocator>(
+        &self,
+        virt: VirtAddr,
+    ) -> Result<(), PageTableError> {
+        self.unmap_single_inner::<P>(virt)
+    }
+
+    /// Un-maps a page from this page table.
+    pub fn unmap_single<P: PageAllocator>(&self, virt: VirtAddr) -> Result<(), PageTableError> {
+        // The shootdown must run with no page-table lock held.
+        self.unmap_single_inner::<P>(virt)?;
+        shootdown::submit_shootdown(self, virt.value(), arch::virt::get_page_size());
         Ok(())
     }
 
@@ -369,10 +430,22 @@ impl PageTable {
         // TODO: Do transactional mapping.
         let length = align_up(length, arch::virt::get_page_size());
         let step = arch::virt::get_page_size();
+
+        let mut unmapped_any = false;
+        let mut result = Ok(());
         for offset in (0..length).step_by(step) {
-            self.unmap_single::<P>(VirtAddr(virt.0 + offset))?;
+            match self.unmap_single_inner::<P>(VirtAddr(virt.0 + offset)) {
+                Ok(()) => unmapped_any = true,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
         }
-        return Ok(());
+        if unmapped_any {
+            shootdown::submit_shootdown(self, virt.value(), length);
+        }
+        result
     }
 
     /// Checks if the address (may be unaligned) is mapped in this page table.
@@ -385,17 +458,26 @@ impl PageTable {
         self.with_pte::<KernelAlloc, _>(virt, false, |pte| pte.is_present().then(|| pte.address()))
     }
 
-    pub fn take_dirty(&self, virt: VirtAddr) -> bool {
+    /// Clears the dirty bit of a single page without flushing the TLB.
+    /// The caller must shoot down the page afterwards so the dirty bit is re-armed.
+    pub(crate) fn take_dirty_no_shootdown(&self, virt: VirtAddr) -> bool {
         self.with_pte::<KernelAlloc, _>(virt, false, |pte| {
             if !pte.is_present() || !pte.is_dirty() {
                 return false;
             }
 
             pte.clear_dirty();
-            crate::arch::virt::flush_tlb(virt);
             true
         })
         .unwrap_or(false)
+    }
+
+    pub fn take_dirty(&self, virt: VirtAddr) -> bool {
+        let taken = self.take_dirty_no_shootdown(virt);
+        if taken {
+            shootdown::submit_shootdown(self, virt.value(), arch::virt::get_page_size());
+        }
+        taken
     }
 }
 

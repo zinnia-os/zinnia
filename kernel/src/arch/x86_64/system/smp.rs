@@ -196,13 +196,16 @@ struct InfoData {
 }
 
 extern "C" fn ap_entry(info: PhysAddr) -> ! {
-    unsafe { PageTable::get_kernel().set_active() };
+    unsafe { PageTable::get_kernel().activate_raw() };
 
     let info = unsafe { (info.as_hhdm() as *mut InfoData).as_mut().unwrap() };
 
     super::super::cpu::setup_core(unsafe {
         (info.percpu_data as *const CpuData).as_ref().unwrap()
     });
+
+    // Bind this CPU's global binding to the kernel space so it services shootdowns.
+    crate::memory::virt::shootdown::init_cpu();
 
     // Create a new idle task for this CPU.
     let idle_task =
@@ -344,6 +347,9 @@ static FOUND_APS: SpinMutex<Vec<u32>> = SpinMutex::new(Vec::new());
 fn DISCOVER_APS_STAGE() {
     // Setup BSP.
     super::super::cpu::setup_core(CpuData::get());
+
+    // Bind the BSP's global binding to the kernel space before any AP comes online.
+    crate::memory::virt::shootdown::init_cpu();
 
     // Parse the MADT to discover LAPICs.
     unsafe {

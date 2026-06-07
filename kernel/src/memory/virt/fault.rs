@@ -3,7 +3,7 @@ use crate::{
     memory::{
         MemoryObject, PagedMemoryObject, VirtAddr,
         pmm::KernelAlloc,
-        virt::{VmCacheType, VmFlags},
+        virt::{VmCacheType, VmFlags, shootdown},
     },
     process::signal::{self, SigInfoData, Signal},
     sched::Scheduler,
@@ -155,6 +155,11 @@ pub fn handler(info: &PageFaultInfo) -> bool {
         .map_single::<KernelAlloc>(info.addr, install_phys, resolved.map_flags, resolved.cache)
         .expect("Failed to map a demand-loaded page");
 
+    if resolved.cow_write {
+        let table = space.table.clone();
+        drop(space);
+        shootdown::submit_shootdown(&table, faulty_page * page_size, page_size);
+    }
     true
 }
 

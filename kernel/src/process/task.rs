@@ -53,6 +53,8 @@ pub struct Task {
     pub queued: AtomicBool,
     /// Set by [`Scheduler::add_task`] when a wakeup arrives while this task is still `Running`.
     pub wake_pending: AtomicBool,
+    /// True while this task's saved context is owned by a CPU.
+    pub on_cpu: AtomicBool,
     /// Saved arch context. Touched only by the CPU running this task
     /// (and by `init_context` before the task is published).
     pub task_context: SyncUnsafeCell<arch::sched::TaskContext>,
@@ -182,6 +184,7 @@ impl Task {
             state: SpinMutex::new(State::Ready),
             queued: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
+            on_cpu: AtomicBool::new(false),
             task_context: SyncUnsafeCell::new(arch::sched::TaskContext::default()),
             kernel_stack: KernelStack::new()?,
             user_stack: AtomicUsize::new(0),

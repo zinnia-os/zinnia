@@ -53,7 +53,7 @@ pub fn mmap(
         space.find_mmap_addr(len)?
     };
 
-    crate::vfs::mmap(
+    let mapped = crate::vfs::mmap(
         file.map(|x| x.file.clone()),
         &mut space,
         addr,
@@ -61,8 +61,13 @@ pub fn mmap(
         vm_prot,
         flags,
         offset,
-    )
-    .map(|x| x.value())
+    )?;
+
+    let table = space.table.clone();
+    drop(space);
+    crate::memory::virt::shootdown::submit_shootdown(&table, mapped.value(), len.get());
+
+    Ok(mapped.value())
 }
 
 #[wrap_syscall]
@@ -73,11 +78,13 @@ pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
     vm_prot.set(VmFlags::Exec, prot & PROT_EXEC != 0);
 
     let task = Scheduler::get_current();
-    task.address_space.lock().protect(
-        addr,
-        NonZeroUsize::new(size).ok_or(Errno::EINVAL)?,
-        vm_prot,
-    )?;
+    let size = NonZeroUsize::new(size).ok_or(Errno::EINVAL)?;
+    let table = {
+        let mut space = task.address_space.lock();
+        space.protect(addr, size, vm_prot)?;
+        space.table.clone()
+    };
+    crate::memory::virt::shootdown::submit_shootdown(&table, addr.value(), size.get());
 
     Ok(0)
 }
@@ -85,10 +92,21 @@ pub fn mprotect(addr: VirtAddr, size: usize, prot: u32) -> EResult<usize> {
 #[wrap_syscall]
 pub fn munmap(addr: VirtAddr, size: usize) -> EResult<usize> {
     let task = Scheduler::get_current();
-    let mut space = task.address_space.lock();
-    space
-        .unmap(addr, NonZeroUsize::new(size).ok_or(Errno::EINVAL)?)
-        .map(|_| 0)
+    let size = NonZeroUsize::new(size).ok_or(Errno::EINVAL)?;
+    let table = {
+        let mut space = task.address_space.lock();
+        space.unmap(addr, size)?;
+        space.table.clone()
+    };
+    crate::memory::virt::shootdown::submit_shootdown(&table, addr.value(), size.get());
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn madvise(_addr: VirtAddr, _size: usize, _advice: i32) -> EResult<usize> {
+    // TODO: Actually do something with it.
+    Ok(0)
 }
 
 #[wrap_syscall]
@@ -101,9 +119,13 @@ pub fn msync(addr: VirtAddr, size: usize, flags: i32) -> EResult<usize> {
     }
 
     let task = Scheduler::get_current();
-    task.address_space
-        .lock()
-        .sync_dirty_range(addr, NonZeroUsize::new(size).ok_or(Errno::EINVAL)?)?;
+    let size = NonZeroUsize::new(size).ok_or(Errno::EINVAL)?;
+    let table = {
+        let space = task.address_space.lock();
+        space.sync_dirty_range(addr, size)?;
+        space.table.clone()
+    };
+    crate::memory::virt::shootdown::submit_shootdown(&table, addr.value(), size.get());
 
     Ok(0)
 }

@@ -6,7 +6,11 @@ use crate::{
     memory::{
         self,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
-        virt::{VmCacheType, VmFlags, mmu::PageTable},
+        virt::{
+            VmCacheType, VmFlags,
+            mmu::PageTable,
+            shootdown::{GLOBAL_BINDING_ID, PageBinding, USER_BINDING_ID},
+        },
     },
     posix::errno::{EResult, Errno},
 };
@@ -27,8 +31,10 @@ pub struct CpuData {
     pub online: AtomicBool,
     /// Whether this CPU is physically present.
     pub present: AtomicBool,
-    /// User page table currently loaded on this CPU, or null.
-    pub active_user_table: AtomicPtr<PageTable>,
+    /// This CPU's binding to the currently active user address space.
+    pub user_binding: PageBinding,
+    /// This CPU's binding to the global (kernel) address space.
+    pub global_binding: PageBinding,
     /// A scheduler instance on this CPU.
     pub scheduler: Scheduler,
 }
@@ -142,7 +148,8 @@ pub(crate) static CPU_DATA: PerCpuData<CpuData> = PerCpuData::new(CpuData {
     user_stack: AtomicUsize::new(0),
     online: AtomicBool::new(false),
     present: AtomicBool::new(true), // BSP is always present at boot.
-    active_user_table: AtomicPtr::new(core::ptr::null_mut()),
+    user_binding: PageBinding::new(USER_BINDING_ID),
+    global_binding: PageBinding::new(GLOBAL_BINDING_ID),
     scheduler: Scheduler::new_for_cpu(0),
 });
 
@@ -178,7 +185,8 @@ pub(crate) fn allocate_cpu() -> EResult<&'static CpuData> {
             user_stack: AtomicUsize::new(0),
             online: AtomicBool::new(false),
             present: AtomicBool::new(false),
-            active_user_table: AtomicPtr::new(core::ptr::null_mut()),
+            user_binding: PageBinding::new(USER_BINDING_ID),
+            global_binding: PageBinding::new(GLOBAL_BINDING_ID),
             scheduler: Scheduler::new_for_cpu(id),
         });
         let new_context = this_ptr.as_ref().unwrap();

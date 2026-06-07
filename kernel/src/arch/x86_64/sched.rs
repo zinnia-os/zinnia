@@ -355,14 +355,30 @@ pub(in crate::arch) unsafe fn preempt_enable() -> bool {
 }
 
 pub unsafe fn remote_reschedule(cpu: u32) {
+    unsafe { send_ipi_to(cpu, consts::IDT_IPI_RESCHED) };
+}
+
+pub fn broadcast_shootdown() {
+    LAPIC.get().send_ipi(
+        apic::IpiTarget::AllButThisCpu,
+        consts::IDT_IPI_SHOOTDOWN,
+        apic::DeliveryMode::Fixed,
+        apic::DestinationMode::Physical,
+        apic::DeliveryStatus::Idle,
+        apic::Level::Assert,
+        apic::TriggerMode::Edge,
+    );
+}
+
+unsafe fn send_ipi_to(cpu: u32, vector: u8) {
     let lapic = LAPIC.get();
     let target_lapic_id = LAPIC.get_for(CpuData::get_for(cpu).unwrap()).cached_id();
     lapic.send_ipi(
         apic::IpiTarget::Specific(target_lapic_id),
-        consts::IDT_IPI_RESCHED,
+        vector,
         apic::DeliveryMode::Fixed,
         apic::DestinationMode::Physical,
-        apic::DeliveryStatus::Pending,
+        apic::DeliveryStatus::Idle,
         apic::Level::Assert,
         apic::TriggerMode::Edge,
     );

@@ -6,6 +6,7 @@ use crate::{
     },
     posix::errno::{EResult, Errno},
 };
+use alloc::vec::Vec;
 use core::num::NonZero;
 
 pub struct KernelStack {
@@ -49,12 +50,19 @@ impl Drop for KernelStack {
     fn drop(&mut self) {
         let page_size = arch::virt::get_page_size();
         let page_table = KERNEL_PAGE_TABLE.get();
+        let mut pages = Vec::<PhysAddr>::new();
 
         for i in (page_size..Self::SIZE.get()).step_by(page_size) {
             let phys = page_table.get_mapping(self.base + i).unwrap().unwrap();
             page_table
-                .unmap_single::<KernelAlloc>(self.base + i)
+                .unmap_single_no_shootdown::<KernelAlloc>(self.base + i)
                 .unwrap();
+            pages.push(phys);
+        }
+
+        virt::shootdown::submit_shootdown(page_table, self.base.value(), Self::SIZE.get());
+
+        for phys in pages {
             unsafe { KernelAlloc::dealloc(phys, 1) };
         }
 

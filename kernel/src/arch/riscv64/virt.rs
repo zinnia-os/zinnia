@@ -113,6 +113,12 @@ pub(in crate::arch) fn flush_tlb(addr: VirtAddr) {
     }
 }
 
+pub(in crate::arch) fn flush_tlb_all() {
+    unsafe {
+        asm!("sfence.vma");
+    }
+}
+
 pub(in crate::arch) unsafe fn set_page_table(pt: &PageTable) {
     let satp = (pt.get_head_addr().value() >> 12)
         | (match pt.root_level() {

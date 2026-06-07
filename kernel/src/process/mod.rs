@@ -55,7 +55,7 @@ pub struct Process {
     /// The unique identifier of this process.
     id: uapi::pid_t,
     /// The display name of this process.
-    name: String,
+    name: SpinMutex<String>,
     /// The parent of this process, or [`None`], if this is the init process.
     parent: SpinMutex<Option<Weak<Process>>>,
     /// A list of [`Task`]s associated with this process.
@@ -109,8 +109,12 @@ impl Process {
         self.id
     }
 
-    pub fn get_name(&self) -> &str {
-        &self.name
+    pub fn get_name(&self) -> String {
+        self.name.lock().clone()
+    }
+
+    pub fn set_name(&self, name: String) {
+        *self.name.lock() = name;
     }
 
     pub fn get_real_timer(&self, now: usize) -> uapi::time::itimerval {
@@ -145,11 +149,22 @@ impl Process {
     pub fn fork(self: Arc<Self>, context: &Context) -> EResult<(Arc<Self>, Arc<Task>)> {
         let forked_space = {
             let parent_space = self.address_space.lock().clone();
-            Arc::new(Mutex::new(parent_space.lock().fork()?))
+            let (forked, shoot) = {
+                let parent_guard = parent_space.lock();
+                let (forked, range) = parent_guard.fork()?;
+                let table = parent_guard.table.clone();
+                (forked, range.map(|(addr, len)| (table, addr, len)))
+            };
+            // Flush the parent's newly copy-on-write pages with the address-space
+            // lock released (the shootdown may block waiting for remote CPUs).
+            if let Some((table, addr, len)) = shoot {
+                crate::memory::virt::shootdown::submit_shootdown(&table, addr.value(), len);
+            }
+            Arc::new(Mutex::new(forked))
         };
         let forked = Arc::new(Self {
             id: PID_COUNTER.fetch_add(1, Ordering::Acquire) as _,
-            name: self.name.clone(),
+            name: SpinMutex::new(self.name.lock().clone()),
             parent: SpinMutex::new(Some(Arc::downgrade(&self))),
             threads: SpinMutex::new(Vec::new()),
             address_space: SpinMutex::new(forked_space),
@@ -224,7 +239,7 @@ impl Process {
 
         Ok(Self {
             id,
-            name,
+            name: SpinMutex::new(name),
             parent: SpinMutex::new(parent.map(|x| Arc::downgrade(&x))),
             threads: SpinMutex::new(Vec::new()),
             address_space: SpinMutex::new(Arc::new(Mutex::new(space))),
@@ -284,7 +299,16 @@ impl Process {
             init_task.address_space = new_address_space.clone();
             let init = Arc::try_new(init_task)?;
 
-            // If we get here, then the loading of the executable was successful.
+            // Adopt the new executable's basename as the name.
+            if let Some(basename) = info
+                .exec_path
+                .rsplit(|&b| b == b'/')
+                .next()
+                .filter(|s| !s.is_empty())
+            {
+                self.set_name(String::from_utf8_lossy(basename).into_owned());
+            }
+
             let mut threads = self.threads.lock();
             old_threads = mem::take(&mut *threads);
             for thread in &old_threads {

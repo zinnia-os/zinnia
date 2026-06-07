@@ -263,6 +263,13 @@ pub fn MEMORY_STAGE() {
         Ordering::Relaxed,
     );
 
+    let highest_usable = memory_map
+        .iter()
+        .filter(|x| x.usage == PhysMemoryUsage::Usable || x.usage == PhysMemoryUsage::Reclaimable)
+        .map(|x| x.address.value() + x.length)
+        .max()
+        .unwrap_or(0);
+
     // Now we can start making page allocations!
     // ------------------------------------
 
@@ -338,12 +345,16 @@ pub fn MEMORY_STAGE() {
     // This array is contiguous in virtual memory so it can be represented as
     // an ordinary Rust slice by the physical allocator.
 
-    // The offset where we start mapping the page array.
-    log!("Highest physical address is {:#018x}", highest_phys.0);
+    // Size the PFN database from the highest usable frame, not the top of the map.
     let page_base = arch::virt::get_pfndb_base();
     let page_size = get_page_size();
-    let page_length = divide_up(highest_phys.0, page_size);
+    let page_length = divide_up(highest_usable, page_size);
     let page_array_len = align_up(page_length * size_of::<Page>(), page_size);
+    log!(
+        "Highest physical address is {:#018x} (usable {:#018x})",
+        highest_phys.0,
+        highest_usable
+    );
 
     // The physical allocator keeps the PFN database as a Rust slice, which
     // requires the whole range to be mapped and backed by memory.
@@ -364,7 +375,7 @@ pub fn MEMORY_STAGE() {
     );
 
     // Activate the new page table.
-    unsafe { table.set_active() };
+    unsafe { table.activate_raw() };
     log!("Kernel map is now active");
 
     unsafe { HHDM_START.init(arch::virt::get_hhdm_base()) };

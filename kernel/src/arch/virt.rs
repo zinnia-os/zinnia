@@ -62,6 +62,11 @@ pub fn flush_tlb(addr: VirtAddr) {
     internal::virt::flush_tlb(addr);
 }
 
+/// Invalidates the entire (non-global) TLB of the current CPU.
+pub fn flush_tlb_all() {
+    internal::virt::flush_tlb_all();
+}
+
 /// Returns true if the virtual address is a valid userspace address.
 pub fn is_user_addr(addr: VirtAddr) -> bool {
     internal::virt::is_user_addr(addr)

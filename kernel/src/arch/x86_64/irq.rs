@@ -283,11 +283,11 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
             halt();
         }
         consts::IDT_TIMER => {
+            LAPIC.get().eoi();
             if CpuData::get().id == 0 {
                 clock::handle_tick();
             }
             let should_reschedule = CpuData::get().scheduler.tick();
-            LAPIC.get().eoi();
             if should_reschedule {
                 CpuData::get().scheduler.request_reschedule();
             }
@@ -295,6 +295,10 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
         consts::IDT_IPI_RESCHED => {
             LAPIC.get().eoi();
             CpuData::get().scheduler.handle_remote_reschedule(from_user);
+        }
+        consts::IDT_IPI_SHOOTDOWN => {
+            LAPIC.get().eoi();
+            crate::memory::virt::mmu::handle_shootdown_ipi();
         }
         // Any other ISR is an IRQ with a dynamic handler.
         _ => {

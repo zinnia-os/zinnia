@@ -378,10 +378,35 @@ impl Scheduler {
         least_loaded_cpu.scheduler.add_task(task);
     }
 
+    /// Picks where to enqueue a woken task.
+    fn wake_target(task: &Task, preferred: &'static CpuData) -> &'static CpuData {
+        if task.on_cpu.load(Ordering::Acquire)
+            && let Some(home) = CpuData::get_for(task.last_cpu.load(Ordering::Acquire))
+            && home.online.load(Ordering::Acquire)
+        {
+            return home;
+        }
+        preferred
+    }
+
     /// Wakes a task on the CPU it was last assigned to.
     /// Falls back to the local CPU if it has never run or the recorded CPU is offline.
     pub fn wake_task(task: Arc<Task>) {
-        let target_cpu = Self::choose_target_cpu(&task, true);
+        let target_cpu = Self::wake_target(&task, Self::choose_target_cpu(&task, true));
+        target_cpu.scheduler.add_task(task);
+    }
+
+    /// Wakes a task on a specific CPU when the waiter has CPU-owned completion
+    /// state, such as a remote TLB shootdown initiated from that CPU.
+    pub fn wake_task_on_cpu(cpu_id: u32, task: Arc<Task>) {
+        let Some(target_cpu) =
+            CpuData::get_for(cpu_id).filter(|cpu| cpu.online.load(Ordering::Acquire))
+        else {
+            Self::wake_task(task);
+            return;
+        };
+
+        let target_cpu = Self::wake_target(&task, target_cpu);
         target_cpu.scheduler.add_task(task);
     }
 
@@ -399,6 +424,10 @@ impl Scheduler {
         let result = task.clone();
         mem::forget(task);
         result
+    }
+
+    pub(crate) fn has_current(&self) -> bool {
+        !self.current.load(Ordering::Acquire).is_null()
     }
 
     fn next(&self) -> Option<Arc<Task>> {

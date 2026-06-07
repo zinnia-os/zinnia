@@ -48,6 +48,11 @@ pub unsafe fn remote_reschedule(cpu: u32) {
     unsafe { internal::sched::remote_reschedule(cpu) }
 }
 
+/// Sends a TLB shootdown IPI to every online CPU except the current one.
+pub fn broadcast_shootdown() {
+    internal::sched::broadcast_shootdown()
+}
+
 /// Initializes a new task.
 pub fn init_task(
     task: &mut TaskContext,

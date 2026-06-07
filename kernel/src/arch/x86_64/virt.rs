@@ -143,6 +143,14 @@ pub(in crate::arch) fn flush_tlb(addr: VirtAddr) {
     }
 }
 
+pub(in crate::arch) fn flush_tlb_all() {
+    unsafe {
+        let cr3: u64;
+        asm!("mov {cr3}, cr3", cr3 = out(reg) cr3);
+        asm!("mov cr3, {cr3}", cr3 = in(reg) cr3);
+    }
+}
+
 pub(in crate::arch) unsafe fn set_page_table(pt: &PageTable) {
     unsafe {
         asm!("mov cr3, {addr}", addr = in(reg) pt.get_head_addr().value());
