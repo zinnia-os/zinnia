@@ -278,8 +278,8 @@ pub(crate) fn dispatch(frame: &mut Context) {
 
         // Limits
         numbers::GETRUSAGE => sys_unimpl!("getrusage", Err(Errno::ENOSYS)),
-        numbers::GETRLIMIT => sys_unimpl!("getrlimit", Err(Errno::ENOSYS)),
-        numbers::SETRLIMIT => sys_unimpl!("setrlimit", Err(Errno::ENOSYS)),
+        numbers::GETRLIMIT => system::getrlimit,
+        numbers::SETRLIMIT => system::setrlimit,
 
         // Futexes
         numbers::FUTEX_WAIT => system::futex_wait,

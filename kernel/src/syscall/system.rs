@@ -4,10 +4,11 @@ use crate::{
     percpu::CpuData,
     posix::{
         errno::{EResult, Errno},
+        resource::Limits,
         utsname::UTSNAME,
     },
     sched::Scheduler,
-    uapi::{self, reboot::*, time::*},
+    uapi::{self, reboot::*, resource::*, time::*},
     util::{event::Event, mutex::spin::SpinMutex},
     wrap_syscall,
 };
@@ -181,6 +182,31 @@ pub fn itimer_set(which: usize, new_value: VirtAddr, old_value: VirtAddr) -> ERe
         old_value.write(old).ok_or(Errno::EFAULT)?;
     }
 
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn getrlimit(resource: u32, rlim: VirtAddr) -> EResult<usize> {
+    // TODO: Implement properly
+    let limits = Limits::default();
+    let value = match resource {
+        RLIMIT_NOFILE => limits.open_max,
+        RLIMIT_CORE => limits.core_size,
+        _ => rlimit {
+            rlim_cur: RLIM_INFINITY,
+            rlim_max: RLIM_INFINITY,
+        },
+    };
+
+    let mut rlim = UserPtr::<rlimit>::new(rlim);
+    rlim.write(value).ok_or(Errno::EFAULT)?;
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn setrlimit(resource: u32, rlim: VirtAddr) -> EResult<usize> {
+    let _ = (resource, rlim);
     Ok(0)
 }
 
