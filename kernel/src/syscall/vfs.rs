@@ -1642,28 +1642,33 @@ pub fn epoll_pwait(
         None
     };
 
-    let registrations = epoll.snapshot();
-
-    let mut wait_files: Vec<Arc<File>> = Vec::new();
-    if !is_nonblocking {
-        for (_, _, _, file) in &registrations {
-            if let Ok(inner) = Arc::downcast::<EpollFile>(file.ops.clone()) {
-                inner.get_children(&mut wait_files);
-            } else {
-                wait_files.push(file.clone());
-            }
-        }
-    }
     let mut out: Vec<epoll_event> = Vec::with_capacity(maxevents);
     let mut oneshot_fired: Vec<i32> = Vec::new();
 
     loop {
+        let registrations = epoll.snapshot();
+
+        let mut wait_files: Vec<Arc<File>> = Vec::new();
+        if !is_nonblocking {
+            for (_, _, _, file) in &registrations {
+                if let Ok(inner) = Arc::downcast::<EpollFile>(file.ops.clone()) {
+                    inner.get_children(&mut wait_files);
+                } else {
+                    wait_files.push(file.clone());
+                }
+            }
+        }
+
         let guards: Vec<_> = if is_nonblocking {
             Vec::new()
         } else {
             let mut guards = Vec::new();
             for file in &wait_files {
-                for ev in file.ops.poll_events(file, PollFlags::Read).iter() {
+                for ev in file
+                    .ops
+                    .poll_events(file, PollFlags::Read | PollFlags::Write)
+                    .iter()
+                {
                     guards.push(ev.guard());
                 }
             }

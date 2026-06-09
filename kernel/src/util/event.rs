@@ -45,17 +45,45 @@ impl Event {
         }
     }
 
-    pub fn wake_one(&self) -> usize {
+    /// Registers a waiter only if `should_wait` returns true.
+    pub fn guard_if(&self, should_wait: impl FnOnce() -> bool) -> Option<EventGuard<'_>> {
+        let waiter = Box::pin(Waiter {
+            waiters_link: LinkedListAtomicLink::new(),
+            task: Scheduler::get_current(),
+            woken: AtomicBool::new(false),
+        });
+
         let mut waiters = self.waiters.lock();
-        if let Some(waiter) = waiters.pop_front() {
-            waiter.woken.store(true, Ordering::Release);
-            Scheduler::wake_task(waiter.task.clone());
-            1
-        } else {
-            0
+
+        if !should_wait() {
+            return None;
         }
+
+        waiters.push_back(unsafe { UnsafeRef::from_raw(&*waiter as *const Waiter) });
+
+        Some(EventGuard {
+            parent: self,
+            waiter,
+        })
     }
 
+    /// Wakes up to `count` waiters, returning the number actually woken.
+    #[track_caller]
+    pub fn wake_n(&self, count: usize) -> usize {
+        let mut waiters = self.waiters.lock();
+        let mut woke = 0;
+        while woke < count {
+            let Some(waiter) = waiters.pop_front() else {
+                break;
+            };
+            waiter.woken.store(true, Ordering::Release);
+            Scheduler::wake_task(waiter.task.clone());
+            woke += 1;
+        }
+        woke
+    }
+
+    #[track_caller]
     pub fn wake_all(&self) -> usize {
         let mut waiters = self.waiters.lock();
         let mut woke = 0;
@@ -83,6 +111,7 @@ unsafe impl Send for EventGuard<'_> {}
 unsafe impl Sync for EventGuard<'_> {}
 
 impl<'n> EventGuard<'n> {
+    #[track_caller]
     pub fn wait(&self) {
         if self.waiter.woken.load(Ordering::Acquire) {
             return;

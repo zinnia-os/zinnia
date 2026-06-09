@@ -143,10 +143,10 @@ pub fn futex_wake(pointer: VirtAddr, count: u32) -> EResult<usize> {
         return Ok(0);
     };
 
-    let woken = if count == 1 {
-        queue.event.wake_one()
-    } else {
+    let woken = if count == u32::MAX {
         queue.event.wake_all()
+    } else {
+        queue.event.wake_n(count as usize)
     };
     Ok(woken)
 }
