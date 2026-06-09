@@ -49,27 +49,29 @@ pub fn get_elapsed() -> usize {
 
 /// Switches to a new clock source if it is of higher priority.
 pub fn switch(mut new_source: Box<dyn ClockSource>) -> Result<(), ClockError> {
-    // Determine if we should make the switch.
-    if let Some(x) = &CLOCK.lock().current {
-        let prio = x.get_priority();
-        if new_source.get_priority() > prio {
-            Ok(())
-        } else {
-            Err(ClockError::LowerPriority)
+    let name = new_source.name();
+
+    let old_source = {
+        let mut clock = CLOCK.lock();
+        if let Some(current) = &clock.current
+            && new_source.get_priority() <= current.get_priority()
+        {
+            return Err(ClockError::LowerPriority);
         }
-    } else {
-        Ok(())
-    }?;
 
-    log!("Switching to clock source \"{}\"", new_source.name());
+        // Save the current counter without recursively taking CLOCK.
+        let elapsed = match &clock.current {
+            Some(current) => current.get_elapsed_ns() + clock.counter_base,
+            None => 0,
+        };
 
-    // Save the current counter.
-    let elapsed = get_elapsed();
-    let mut clock = CLOCK.lock();
-    clock.counter_base = elapsed;
+        clock.counter_base = elapsed;
+        new_source.reset();
+        clock.current.replace(new_source)
+    };
 
-    new_source.reset();
-    clock.current = Some(new_source);
+    drop(old_source);
+    log!("Switching to clock source \"{}\"", name);
     return Ok(());
 }
 
