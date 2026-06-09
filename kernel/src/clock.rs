@@ -138,15 +138,16 @@ pub fn block_ns(time: usize) -> Result<(), ClockError> {
 
 fn wake_timeout_waiters(now: usize) {
     let mut expired = Vec::new();
+    let mut removed = Vec::new();
 
     {
         let mut waiters = TIMEOUT_WAITERS.lock();
-        waiters.retain(|waiter| {
-            if !waiter.active.load(Ordering::Acquire) {
-                return false;
-            }
-
-            if waiter.deadline <= now
+        let mut i = 0;
+        while i < waiters.len() {
+            let waiter = &waiters[i];
+            let remove = if !waiter.active.load(Ordering::Acquire) {
+                true
+            } else if waiter.deadline <= now
                 && waiter
                     .active
                     .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
@@ -154,13 +155,20 @@ fn wake_timeout_waiters(now: usize) {
             {
                 waiter.fired.store(true, Ordering::Release);
                 expired.push(waiter.task.clone());
-                return false;
-            }
+                true
+            } else {
+                false
+            };
 
-            true
-        });
+            if remove {
+                removed.push(waiters.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
     }
 
+    drop(removed);
     for task in expired {
         Scheduler::wake_task(task);
     }
