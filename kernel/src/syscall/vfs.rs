@@ -188,7 +188,17 @@ pub fn close(fd: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
 
     let removed = proc.open_files.lock().close(fd);
-    removed.ok_or(Errno::EBADF)?;
+    let removed = removed.ok_or(Errno::EBADF)?;
+
+    let result = removed.file.flush_on_close();
+    drop(removed);
+    result?;
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn sync() -> EResult<usize> {
+    crate::vfs::fs::sync_all()?;
     Ok(0)
 }
 

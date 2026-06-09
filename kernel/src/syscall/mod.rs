@@ -222,7 +222,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::PPOLL => vfs::ppoll,
         numbers::DUP => vfs::dup,
         numbers::DUP3 => vfs::dup3,
-        numbers::SYNC => sys_unimpl!("sync", Err(Errno::ENOSYS)),
+        numbers::SYNC => vfs::sync,
         numbers::FSYNC => vfs::fsync,
         numbers::FDATASYNC => vfs::fdatasync,
         numbers::CHROOT => vfs::chroot,

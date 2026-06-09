@@ -536,6 +536,14 @@ impl File {
         self.ops.sync(self, data_only)
     }
 
+    pub fn flush_on_close(&self) -> EResult<()> {
+        let flags = *self.flags.lock();
+        if flags.intersects(OpenFlags::Write | OpenFlags::ReadWrite) {
+            self.sync(false)?;
+        }
+        Ok(())
+    }
+
     pub fn seek(&self, offset: SeekAnchor) -> EResult<u64> {
         match self.inode.as_ref().ok_or(Errno::ESPIPE)?.node_ops {
             NodeOps::CharacterDevice(_) | NodeOps::Socket(_) | NodeOps::FIFO(_) => {

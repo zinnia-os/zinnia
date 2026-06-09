@@ -9,7 +9,7 @@ use crate::{
     util::mutex::spin::SpinMutex,
     vfs::{PathNode, cache::Entry},
 };
-use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug};
 
 /// A mounted file system.
@@ -77,10 +77,34 @@ pub fn register(fs: &'static dyn FileSystem) {
     );
 }
 
+static MOUNTED_SUPERS: SpinMutex<Vec<Arc<dyn SuperBlock>>> = SpinMutex::new(Vec::new());
+
+pub fn sync_all() -> EResult<()> {
+    let supers = MOUNTED_SUPERS.lock().clone();
+    let mut result = Ok(());
+    for sb in supers {
+        if let Err(e) = sb.sync() {
+            result = Err(e);
+        }
+    }
+    result
+}
+
 /// Mounts a file system at path `source` on `target`.
 pub fn mount(fs_name: &[u8], flags: MountFlags, arg: UserPtr<()>) -> EResult<Arc<Mount>> {
-    let table = FS_TABLE.lock();
-    let fs = table.get(fs_name).ok_or(Errno::ENODEV)?;
+    let fs = {
+        let table = FS_TABLE.lock();
+        *table.get(fs_name).ok_or(Errno::ENODEV)?
+    };
 
-    fs.mount(flags, arg)
+    let mount = fs.mount(flags, arg)?;
+
+    if let Some(sb) = mount.root.get_inode().and_then(|inode| inode.sb.clone()) {
+        let mut supers = MOUNTED_SUPERS.lock();
+        if !supers.iter().any(|s| Arc::ptr_eq(s, &sb)) {
+            supers.push(sb);
+        }
+    }
+
+    Ok(mount)
 }

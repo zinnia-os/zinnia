@@ -263,9 +263,16 @@ pub fn reboot(magic: u32, cmd: u32) -> EResult<usize> {
     }
 
     let proc = Scheduler::get_current().get_process();
-    let identity = proc.identity.lock();
-    if identity.user_id != 0 {
-        return Err(Errno::EPERM);
+
+    {
+        let identity = proc.identity.lock();
+        if identity.user_id != 0 {
+            return Err(Errno::EPERM);
+        }
+    }
+
+    if let Err(e) = crate::vfs::fs::sync_all() {
+        warn!("reboot: failed to sync file systems: {e:?}");
     }
 
     match cmd {
