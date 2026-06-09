@@ -371,13 +371,16 @@ pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> 
         envs.push(env);
     }
 
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
     let file = File::open(
-        proc.root_dir.lock().clone(),
-        proc.working_dir.lock().clone(),
+        root,
+        cwd,
         &path_str,
         OpenFlags::Read | OpenFlags::Executable,
         Mode::empty(),
-        &proc.identity.lock(),
+        &identity,
     )?;
 
     proc.fexecve(file, path_str, args, envs)?;

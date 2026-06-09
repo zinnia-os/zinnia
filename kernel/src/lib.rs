@@ -62,7 +62,7 @@ use crate::{
     vfs::{
         File,
         file::{FileDescription, OpenFlags},
-        fs::{devtmpfs, initramfs},
+        fs::initramfs,
         inode::Mode,
     },
 };
@@ -169,11 +169,13 @@ pub extern "C" fn main(_: usize, _: usize) {
     // Open tty for stdio for init.
     {
         let mut open_files = init_proc.open_files.lock();
-        let dev = devtmpfs::get_root();
+        let root = init_proc.root_dir.lock().clone();
+        let cwd = init_proc.working_dir.lock().clone();
+        let console_path = format!("/dev/{console_name}");
         let console = File::open(
-            dev.clone(),
-            dev,
-            console_name.as_bytes(),
+            root,
+            cwd,
+            console_path.as_bytes(),
             OpenFlags::ReadWrite,
             Mode::empty(),
             Identity::get_kernel(),

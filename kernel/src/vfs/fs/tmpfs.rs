@@ -114,6 +114,7 @@ impl DirectoryOps for TmpDir {
     ) -> EResult<Arc<File>> {
         let file = File {
             path: Some(path),
+            abs_path: None,
             ops: node.file_ops(),
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),

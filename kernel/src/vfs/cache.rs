@@ -262,6 +262,51 @@ impl PathNode {
         });
     }
 
+    /// Resolve the absolute path of this node as seen from `root`.
+    pub fn absolute_path(&self, root: &Self) -> EResult<Vec<u8>> {
+        let mut buffer = alloc::vec![0u8; PATH_MAX as usize];
+        let mut cursor = buffer.len();
+        let mut mount = self.mount.clone();
+        let mut entry = self.entry.clone();
+
+        loop {
+            if Arc::ptr_eq(&entry, &root.entry) && Arc::ptr_eq(&mount, &root.mount) {
+                break;
+            }
+
+            // At the root of a mounted filesystem we must step into the parent filesystem.
+            if Arc::ptr_eq(&entry, &mount.root) {
+                let mount_point = mount.mount_point.lock().clone();
+                if let Some(mount_point) = mount_point {
+                    mount = mount_point.mount;
+                    entry = mount_point.entry;
+                    continue;
+                }
+                // Global root with no parent: `root` was not an ancestor.
+                return Err(Errno::ENOENT);
+            }
+
+            let name = &entry.name;
+            if !name.is_empty() {
+                cursor -= name.len();
+                buffer[cursor..cursor + name.len()].copy_from_slice(name);
+                cursor -= 1;
+                buffer[cursor] = b'/';
+            }
+
+            entry = entry.parent.clone().ok_or(Errno::ENOENT)?;
+        }
+
+        // The root itself resolves to "/".
+        if cursor == buffer.len() {
+            cursor -= 1;
+            buffer[cursor] = b'/';
+        }
+
+        buffer.drain(..cursor);
+        Ok(buffer)
+    }
+
     fn resolve_symlink(
         &self,
         root: Self,

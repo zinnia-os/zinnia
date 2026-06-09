@@ -588,7 +588,7 @@ impl FileOps for TtyFileOps {
         Ok(total as isize)
     }
 
-    fn ioctl(&self, _file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
+    fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         match request as u32 {
             uapi::ioctls::TCGETS => {
                 let ldisc = self.tty.ldisc.lock();
@@ -642,14 +642,12 @@ impl FileOps for TtyFileOps {
                 *proc.controlling_tty.lock() = None;
             }
             uapi::ioctls::TIOCGNAME => {
-                let name = self.tty.name.as_bytes();
-                let ptr: UserPtr<u8> = UserPtr::new(arg);
-                // Write the name + NUL terminator.
-                for (i, &b) in name.iter().chain(core::iter::once(&0u8)).enumerate() {
+                let path = file.abs_path.as_deref().ok_or(Errno::ENOENT)?;
+                // Write the path + NUL terminator.
+                for (i, &b) in path.iter().chain(core::iter::once(&0u8)).enumerate() {
                     let mut p: UserPtr<u8> = UserPtr::new(arg + i);
                     p.write(b).ok_or(Errno::EFAULT)?;
                 }
-                let _ = ptr;
             }
             uapi::ioctls::TIOCGSID => {
                 let sid = self.tty.session.lock().unwrap_or(0);

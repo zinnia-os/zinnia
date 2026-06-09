@@ -13,7 +13,7 @@ use crate::{
         inode::{Mode, NodeOps},
     },
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     any::Any,
     fmt::Debug,
@@ -85,6 +85,8 @@ pub enum SeekAnchor {
 pub struct File {
     /// The cached entry for this file.
     pub path: Option<PathNode>,
+    /// Absolute path resolved at open time.
+    pub abs_path: Option<Vec<u8>>,
     /// Operations that can be performed on this file.
     pub ops: Arc<dyn FileOps>,
     /// The opened inode.
@@ -315,7 +317,7 @@ impl File {
 
         let file_path = PathNode::lookup(root.clone(), cwd, path, identity, lookup_flags)?;
         match file_path.entry.get_inode() {
-            Some(x) => Self::do_open_inode(file_path, &x, flags, identity),
+            Some(x) => Self::do_open_inode(&root, file_path, &x, flags, identity),
             None => {
                 // If the lookup was successful, we expect that the entry is positive.
                 if !flags.contains(OpenFlags::Create) {
@@ -344,7 +346,7 @@ impl File {
                 };
 
                 let file_node = file_path.entry.get_inode().unwrap();
-                Self::do_open_inode(file_path, &file_node, flags, identity)
+                Self::do_open_inode(&root, file_path, &file_node, flags, identity)
             }
         }
     }
@@ -352,6 +354,7 @@ impl File {
     pub fn open_disconnected(ops: Arc<dyn FileOps>, flags: OpenFlags) -> EResult<Arc<File>> {
         let file = File {
             path: None,
+            abs_path: None,
             ops,
             inode: None,
             flags: SpinMutex::new(flags),
@@ -362,6 +365,7 @@ impl File {
     }
 
     fn do_open_inode(
+        root: &PathNode,
         file_path: PathNode,
         inode: &Arc<INode>,
         flags: OpenFlags,
@@ -387,6 +391,7 @@ impl File {
 
                 let result = File {
                     path: Some(file_path),
+                    abs_path: None,
                     ops: x.clone(),
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
@@ -396,8 +401,11 @@ impl File {
             }
             NodeOps::Directory(dir) => dir.open(inode, file_path, flags, identity)?,
             NodeOps::BlockDevice(x) => {
+                // Capture the absolute path now, while the opening namespace is still reachable.
+                let abs_path = file_path.absolute_path(root).ok();
                 let result = File {
                     path: Some(file_path),
+                    abs_path,
                     ops: x.clone().open(flags)?,
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),
@@ -406,8 +414,11 @@ impl File {
                 Arc::try_new(result)?
             }
             NodeOps::CharacterDevice(x) => {
+                // Capture the absolute path now, while the opening namespace is still reachable.
+                let abs_path = file_path.absolute_path(root).ok();
                 let result = File {
                     path: Some(file_path),
+                    abs_path,
                     ops: x.clone().open(flags)?,
                     inode: Some(inode.clone()),
                     flags: SpinMutex::new(flags),

@@ -583,6 +583,7 @@ impl DirectoryOps for Ext2Dir {
             inode: Some(node.clone()),
             flags: SpinMutex::new(flags),
             position: FilePosition::AtomicPosition(Mutex::new(0)),
+            abs_path: None,
         };
         Ok(Arc::new(file))
     }

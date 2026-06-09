@@ -15,19 +15,14 @@ pub fn module_insert(path: VirtAddr, cmdline: VirtAddr) -> EResult<()> {
     let task = Scheduler::get_current();
     let proc = task.get_process();
 
-    let ident = proc.identity.lock();
+    let ident = proc.identity.lock().clone();
     if !ident.is_effective_superuser() {
         return Err(Errno::EPERM);
     }
 
-    let file = File::open(
-        proc.root_dir.lock().clone(),
-        proc.working_dir.lock().clone(),
-        &path,
-        OpenFlags::Read,
-        Mode::empty(),
-        &ident,
-    )?;
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let file = File::open(root, cwd, &path, OpenFlags::Read, Mode::empty(), &ident)?;
 
     let file_len: usize = file.inode.clone().ok_or(Errno::EBADF)?.len();
     let mut data = vec![0u8; file_len];

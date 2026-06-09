@@ -711,6 +711,15 @@ impl Ext2Super {
 
 impl SuperBlock for Ext2Super {
     fn sync(self: Arc<Self>) -> EResult<()> {
+        let cached: Vec<Arc<INode>> = self.inode_cache.lock().values().cloned().collect();
+        for inode in cached {
+            if let NodeOps::Regular(ops) = &inode.node_ops
+                && let Ok(reg) = Arc::downcast::<Ext2Regular>(ops.clone())
+            {
+                reg.cache.sync()?;
+            }
+        }
+
         self.sync_metadata()
     }
 

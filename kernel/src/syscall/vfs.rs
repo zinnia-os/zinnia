@@ -145,15 +145,17 @@ pub fn openat(fd: i32, path: UserCStr, oflag: usize, mode: mode_t) -> EResult<i3
     };
 
     let umask = proc.umask.load(core::sync::atomic::Ordering::Relaxed);
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
     let file = File::open(
-        proc.root_dir.lock().clone(),
+        root,
         parent,
         &v,
         // O_CLOEXEC doesn't apply to a file, but rather its individual FD.
         // This means that dup'ing a file doesn't share this flag.
         oflag & !OpenFlags::CloseOnExec,
         Mode::from_bits_truncate(mode & !umask),
-        &proc.identity.lock(),
+        &identity,
     )?;
 
     proc.open_files
@@ -227,55 +229,16 @@ pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
     let mut user_buf = UserPtr::new(user_buf);
     let proc = Scheduler::get_current().get_process();
 
-    let mut buffer = vec![0u8; PATH_MAX as _];
-    let mut cursor = PATH_MAX;
-    let mut current = proc.working_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
     let root = proc.root_dir.lock().clone();
-    let mut reached_root = false;
+    let path = cwd.absolute_path(&root)?;
 
-    // Walk up until we reach this process' root.
-    loop {
-        if Arc::ptr_eq(&current.entry, &root.entry) && Arc::ptr_eq(&current.mount, &root.mount) {
-            reached_root = true;
-            break;
-        }
-
-        let Ok(parent) = current.lookup_parent() else {
-            break;
-        };
-
-        let name = &current.entry.name;
-        if !name.is_empty() {
-            // Copy name
-            let len = name.len();
-            cursor -= len;
-            buffer[cursor..cursor + len].copy_from_slice(name);
-
-            // Prepend slash
-            cursor -= 1;
-            buffer[cursor] = b'/';
-        }
-        current = parent;
-    }
-
-    if !reached_root {
-        return Err(Errno::ENOENT);
-    }
-
-    // Special case: root directory
-    if cursor == PATH_MAX {
-        cursor -= 1;
-        buffer[cursor] = b'/';
-    }
-
-    let path_len = buffer.len() - cursor;
+    let path_len = path.len();
     if path_len + 1 > len {
         return Err(Errno::ERANGE);
     }
 
-    user_buf
-        .write_slice(&buffer[cursor..])
-        .ok_or(Errno::EFAULT)?;
+    user_buf.write_slice(&path).ok_or(Errno::EFAULT)?;
     user_buf.offset(path_len).write(0).ok_or(Errno::EFAULT)?; // NUL terminator
 
     Ok(path_len + 1)
@@ -401,11 +364,13 @@ pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> ERes
             .clone()
     };
 
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
     let node = PathNode::lookup(
-        proc.root_dir.lock().clone(),
+        root,
         parent,
         &v,
-        &proc.identity.lock(),
+        &identity,
         LookupFlags::MustExist
             | if (flags & (AT_SYMLINK_NOFOLLOW as usize)) != 0 {
                 LookupFlags::empty()
@@ -485,12 +450,14 @@ pub fn mkdirat(fd: i32, path: VirtAddr, mode: mode_t) -> EResult<i32> {
             .clone()
     };
     let umask = proc.umask.load(core::sync::atomic::Ordering::Relaxed);
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
     vfs::mkdir(
-        proc.root_dir.lock().clone(),
+        root,
         parent,
         &v,
         Mode::from_bits_truncate(mode & !umask),
-        &proc.identity.lock(),
+        &identity,
     )?;
 
     Ok(0)
@@ -502,13 +469,14 @@ pub fn chdir(path: VirtAddr) -> EResult<()> {
     let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
     let proc = Scheduler::get_current().get_process();
-    let root = proc.root_dir.lock();
-    let mut cwd = proc.working_dir.lock();
+    let root = proc.root_dir.lock().clone();
+    let cwd = proc.working_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
     let node = PathNode::lookup(
-        root.clone(),
-        cwd.clone(),
+        root,
+        cwd,
         &v,
-        &proc.identity.lock(),
+        &identity,
         LookupFlags::MustExist | LookupFlags::FollowSymlinks,
     )?;
     let inode = node.entry.get_inode().ok_or(Errno::ENOENT)?;
@@ -516,7 +484,7 @@ pub fn chdir(path: VirtAddr) -> EResult<()> {
         return Err(Errno::ENOTDIR);
     }
 
-    *cwd = node;
+    *proc.working_dir.lock() = node;
 
     Ok(())
 }
@@ -562,7 +530,8 @@ pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
         len / size_of::<dirent>()
     ];
 
-    let to_write = vfs::get_dir_entries(dir, &mut buffer, &proc.identity.lock())?;
+    let identity = proc.identity.lock().clone();
+    let to_write = vfs::get_dir_entries(dir, &mut buffer, &identity)?;
     let mut addr = UserPtr::new(addr);
     addr.write_slice(&buffer[0..to_write])
         .ok_or(Errno::EFAULT)?;
@@ -880,11 +849,13 @@ pub fn faccessat(fd: i32, path: UserCStr, amode: usize, flag: usize) -> EResult<
                 .clone()
         };
 
+        let root = proc.root_dir.lock().clone();
+        let identity = proc.identity.lock().clone();
         let path_node = PathNode::lookup(
-            proc.root_dir.lock().clone(),
+            root,
             parent,
             &path,
-            &proc.identity.lock(),
+            &identity,
             LookupFlags::MustExist
                 | if flag as u32 & AT_SYMLINK_NOFOLLOW != 0 {
                     LookupFlags::empty()
@@ -1425,13 +1396,9 @@ pub fn readlinkat(at: i32, path: VirtAddr, buf: VirtAddr, buf_len: usize) -> ERe
     };
 
     let path = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EINVAL)?;
-    let node = PathNode::lookup(
-        proc.root_dir.lock().clone(),
-        at,
-        &path,
-        &proc.identity.lock(),
-        LookupFlags::MustExist,
-    )?;
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    let node = PathNode::lookup(root, at, &path, &identity, LookupFlags::MustExist)?;
     let inode = node.entry.get_inode().ok_or(Errno::EBADF)?;
     let ops = match &inode.node_ops {
         NodeOps::SymbolicLink(x) => x,
