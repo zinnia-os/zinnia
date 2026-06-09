@@ -68,6 +68,64 @@ static PMM: SpinMutex<Pmm> = SpinMutex::new(Pmm {
     pages: &mut [],
 });
 
+impl Pmm {
+    fn free_region(&mut self, idx: usize, pages: usize) {
+        debug_assert!(pages > 0);
+        debug_assert!(self.pages[idx].count == 0);
+
+        let mut prev: Option<usize> = None;
+        let mut cur = self.head;
+        while cur != NO_PAGE && cur < idx {
+            prev = Some(cur);
+            cur = self.pages[cur].next;
+        }
+        let next = if cur == NO_PAGE { None } else { Some(cur) };
+        debug_assert!(next != Some(idx));
+
+        // The previous region ends exactly where this one starts.
+        if let Some(p) = prev
+            && p + self.pages[p].count == idx
+        {
+            self.pages[p].count += pages;
+            self.pages[idx].next = NO_PAGE;
+
+            // Having grown `p`, it may now also be adjacent to `next`.
+            if let Some(n) = next
+                && p + self.pages[p].count == n
+            {
+                self.pages[p].count += self.pages[n].count;
+                self.pages[p].next = self.pages[n].next;
+                self.pages[n].count = 0;
+                self.pages[n].next = NO_PAGE;
+            }
+            return;
+        }
+
+        if let Some(n) = next
+            && idx + pages == n
+        {
+            let n_count = self.pages[n].count;
+            let n_next = self.pages[n].next;
+            self.pages[idx].count = pages + n_count;
+            self.pages[idx].next = n_next;
+            self.pages[n].count = 0;
+            self.pages[n].next = NO_PAGE;
+            match prev {
+                Some(p) => self.pages[p].next = idx,
+                None => self.head = idx,
+            }
+            return;
+        }
+
+        self.pages[idx].count = pages;
+        self.pages[idx].next = next.unwrap_or(NO_PAGE);
+        match prev {
+            Some(p) => self.pages[p].next = idx,
+            None => self.head = idx,
+        }
+    }
+}
+
 pub struct KernelAlloc;
 impl KernelAlloc {
     fn dealloc_inner(addr: PhysAddr, pages: usize) {
@@ -78,15 +136,11 @@ impl KernelAlloc {
 
         let mut pmm = PMM.lock();
         let idx = Page::idx_from_addr(addr);
-        let old_head = pmm.head;
-        let page = pmm.pages.get_mut(idx).unwrap();
 
-        debug_assert!(page.count == 0);
-        debug_assert!(page.next == NO_PAGE);
+        debug_assert!(pmm.pages[idx].count == 0);
+        debug_assert!(pmm.pages[idx].next == NO_PAGE);
 
-        page.count = pages;
-        page.next = old_head;
-        pmm.head = idx;
+        pmm.free_region(idx, pages);
     }
 }
 
@@ -141,7 +195,6 @@ impl PageAllocator for KernelAlloc {
             break;
         }
 
-        // TODO: Merge adjacent regions if we didn't find anything.
         debug_assert!(addr.is_some());
 
         match addr {
@@ -201,11 +254,8 @@ pub fn init(memory_map: &[PhysMemory], pages: &'static mut [Page]) {
         }
 
         let idx = Page::idx_from_addr(entry.address);
-        let old_head = pmm.head;
-        let page = pmm.pages.get_mut(idx).unwrap();
-        page.count = entry.length / arch::virt::get_page_size();
-        page.next = old_head;
-        pmm.head = idx;
+        let count = entry.length / arch::virt::get_page_size();
+        pmm.free_region(idx, count);
 
         total_memory += entry.length;
     }
