@@ -26,7 +26,7 @@ pub const _VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 pub const _VIRTIO_GPU_CMD_SET_SCANOUT_BLOB: u32 = 0x010d;
 
 // Cursor queue command types
-pub const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
+pub const _VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
 pub const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
 
 // Response types
