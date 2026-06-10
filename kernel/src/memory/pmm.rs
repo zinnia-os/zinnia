@@ -1,10 +1,9 @@
 use super::PhysAddr;
 use crate::{
     arch,
-    {
-        boot::{PhysMemory, PhysMemoryUsage},
-        util::{divide_up, mutex::spin::SpinMutex},
-    },
+    boot::{PhysMemory, PhysMemoryUsage},
+    posix::errno::{EResult, Errno},
+    util::{divide_up, mutex::spin::SpinMutex},
 };
 use alloc::alloc::AllocError;
 use bitflags::bitflags;
@@ -261,4 +260,33 @@ pub fn init(memory_map: &[PhysMemory], pages: &'static mut [Page]) {
     }
 
     log!("Total available memory: {} MiB", total_memory / 1024 / 1024);
+}
+
+/// A safe wrapper around an owned physical memory allocation.
+pub struct PhysPageAllocation {
+    base_addr: PhysAddr,
+    pages: usize,
+}
+
+impl PhysPageAllocation {
+    pub fn new(pages: usize, flags: AllocFlags) -> EResult<Self> {
+        let base_addr = KernelAlloc::alloc(pages, flags).map_err(|_| Errno::ENOMEM)?;
+        Ok(Self { base_addr, pages })
+    }
+
+    pub fn phys(&self) -> PhysAddr {
+        self.base_addr
+    }
+
+    pub fn as_hhdm<T>(&self) -> *mut T {
+        self.base_addr.as_hhdm::<T>()
+    }
+}
+
+impl Drop for PhysPageAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            KernelAlloc::dealloc(self.base_addr, self.pages);
+        }
+    }
 }
