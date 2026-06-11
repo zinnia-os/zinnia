@@ -11,7 +11,7 @@ use zinnia::{
     error,
     irq::{IrqHandler, Status},
     log,
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr, Register, UnsafeMemoryView},
+    memory::{AllocFlags, OwnedPhysPages, Register, UnsafeMemoryView},
     posix::errno::{EResult, Errno},
     util::{event::Event, mutex::spin::SpinMutex},
 };
@@ -27,43 +27,13 @@ const VIRTIO_NET_HDR_LEN: usize = 12;
 /// Maximum supported frame size (no MTU feature negotiated: standard Ethernet).
 const MAX_FRAME_LEN: usize = 1518;
 
-/// Owns a contiguous physical page allocation. Frees on drop.
-struct PhysPageAllocation {
-    base_addr: PhysAddr,
-    pages: usize,
-}
-
-impl PhysPageAllocation {
-    fn new(pages: usize) -> EResult<Self> {
-        let base_addr =
-            KernelAlloc::alloc(pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-        Ok(Self { base_addr, pages })
-    }
-
-    fn phys(&self) -> PhysAddr {
-        self.base_addr
-    }
-
-    fn as_hhdm<T>(&self) -> *mut T {
-        self.base_addr.as_hhdm::<T>()
-    }
-}
-
-impl Drop for PhysPageAllocation {
-    fn drop(&mut self) {
-        unsafe {
-            KernelAlloc::dealloc(self.base_addr, self.pages);
-        }
-    }
-}
-
 struct Controller {
     virtio: SpinMutex<VirtioDevice>,
     recv_queue: SpinMutex<VirtQueue>,
     send_queue: SpinMutex<VirtQueue>,
     tx_buffers: SpinMutex<Vec<TxBuffer>>,
     /// One physical page per RX descriptor, indexed by descriptor head id.
-    rx_buffers: Vec<PhysPageAllocation>,
+    rx_buffers: Vec<OwnedPhysPages>,
     page_size: usize,
     rx_event: Event,
     mac: MacAddr,
@@ -71,7 +41,7 @@ struct Controller {
 
 struct TxBuffer {
     desc_id: u32,
-    _buffer: PhysPageAllocation,
+    _buffer: OwnedPhysPages,
 }
 
 impl Controller {
@@ -137,7 +107,7 @@ impl NicDevice for Controller {
         }
 
         // One page is enough for header + max frame.
-        let buf = PhysPageAllocation::new(1)?;
+        let buf = OwnedPhysPages::new(1, AllocFlags::empty())?;
         let hdr = spec::VirtHeader::default();
 
         unsafe {
@@ -254,9 +224,9 @@ fn probe(_variant: &PciVariant, mut access: DeviceView<'static>) -> EResult<()> 
 
     // Pre-populate the RX queue with one page per descriptor.
     let qs = recv_queue.queue_size() as usize;
-    let mut rx_buffers: Vec<PhysPageAllocation> = Vec::with_capacity(qs);
+    let mut rx_buffers: Vec<OwnedPhysPages> = Vec::with_capacity(qs);
     for _ in 0..qs {
-        let buf = PhysPageAllocation::new(1)?;
+        let buf = OwnedPhysPages::new(1, AllocFlags::empty())?;
         recv_queue.add_buffer(&[(buf.phys(), page_size, true)])?;
         rx_buffers.push(buf);
     }

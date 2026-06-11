@@ -1,16 +1,13 @@
 use crate::spec::*;
 use core::any::Any;
 use virtio::{VirtQueue, VirtioDevice};
-use zinnia::alloc::vec;
-use zinnia::device::drm::DeviceState;
-use zinnia::device::drm::modes::DMT_MODES;
-use zinnia::uapi::drm::drm_mode_connector_type;
 use zinnia::{
-    alloc::{sync::Arc, vec::Vec},
+    alloc::{sync::Arc, vec, vec::Vec},
     arch,
     core::sync::atomic::{AtomicU32, Ordering},
     device::drm::{
-        Device, DrmFile, IdAllocator,
+        Device, DeviceState, DrmFile, IdAllocator,
+        modes::DMT_MODES,
         object::{AtomicState, BufferObject, Connector, Crtc, Encoder, Framebuffer, Plane},
     },
     error, log,
@@ -22,6 +19,7 @@ use zinnia::{
     },
     util::mutex::spin::SpinMutex,
 };
+use zinnia::{memory::OwnedPhysPages, uapi::drm::drm_mode_connector_type};
 
 pub struct VirtioGpuDevice {
     state: DeviceState,
@@ -37,41 +35,6 @@ pub struct VirtioGpuDevice {
     cursor_y: AtomicU32,
     cursor_hot_x: AtomicU32,
     cursor_hot_y: AtomicU32,
-}
-
-struct PhysPageAllocation {
-    base_addr: PhysAddr,
-    pages: usize,
-}
-
-impl PhysPageAllocation {
-    fn new(pages: usize) -> EResult<Self> {
-        let base_addr =
-            KernelAlloc::alloc(pages, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
-        Ok(Self { base_addr, pages })
-    }
-
-    fn phys(&self) -> PhysAddr {
-        self.base_addr
-    }
-
-    fn as_hhdm<T>(&self) -> *mut T {
-        self.base_addr.as_hhdm::<T>()
-    }
-
-    fn into_phys(self) -> PhysAddr {
-        let phys = self.base_addr;
-        core::mem::forget(self);
-        phys
-    }
-}
-
-impl Drop for PhysPageAllocation {
-    fn drop(&mut self) {
-        unsafe {
-            KernelAlloc::dealloc(self.base_addr, self.pages);
-        }
-    }
 }
 
 struct ScanoutInfo {
@@ -121,14 +84,14 @@ impl VirtioGpuDevice {
         let page_size = arch::virt::get_page_size();
         let cmd_size = core::mem::size_of::<T>();
         let cmd_pages = cmd_size.div_ceil(page_size);
-        let cmd_buffer = PhysPageAllocation::new(cmd_pages)?;
+        let cmd_buffer = OwnedPhysPages::new(cmd_pages, AllocFlags::empty())?;
         let cmd_ptr = cmd_buffer.as_hhdm::<T>();
         unsafe {
             core::ptr::write_volatile(cmd_ptr, *cmd);
         }
 
         // Allocate response buffer
-        let resp = PhysPageAllocation::new(1)?;
+        let resp = OwnedPhysPages::new(1, AllocFlags::empty())?;
         let resp_ptr = resp.as_hhdm::<R>();
 
         let buffers = vec![
@@ -278,7 +241,7 @@ impl VirtioGpuDevice {
         let cmd_size = core::mem::size_of::<VirtioGpuResourceAttachBacking>()
             + pages.len() * core::mem::size_of::<VirtioGpuMemEntry>();
         let cmd_pages = cmd_size.div_ceil(page_size);
-        let cmd = PhysPageAllocation::new(cmd_pages)?;
+        let cmd = OwnedPhysPages::new(cmd_pages, AllocFlags::empty())?;
         let cmd_ptr = cmd.as_hhdm::<u8>();
 
         unsafe {
@@ -298,7 +261,7 @@ impl VirtioGpuDevice {
         }
 
         // Allocate response buffer
-        let resp = PhysPageAllocation::new(1)?;
+        let resp = OwnedPhysPages::new(1, AllocFlags::empty())?;
         let resp_ptr = resp.as_hhdm::<VirtioGpuCtrlHdr>();
 
         let buffers = vec![
@@ -499,7 +462,7 @@ impl VirtioGpuDevice {
     }
 
     fn send_cursor_command(&self, cmd: &VirtioGpuUpdateCursor) -> EResult<()> {
-        let cmd_buffer = PhysPageAllocation::new(1)?;
+        let cmd_buffer = OwnedPhysPages::new(1, AllocFlags::empty())?;
         let cmd_ptr = cmd_buffer.as_hhdm::<VirtioGpuUpdateCursor>();
         unsafe {
             core::ptr::write_volatile(cmd_ptr, *cmd);
@@ -565,7 +528,7 @@ impl Device for VirtioGpuDevice {
 
         let num_pages = size.div_ceil(page_size);
         log!("Allocating {} pages for buffer (size={})", num_pages, size);
-        let allocation = PhysPageAllocation::new(num_pages)?;
+        let allocation = OwnedPhysPages::new(num_pages, AllocFlags::empty())?;
         let base_addr = allocation.phys();
 
         let resource_id = self.alloc_resource_id();

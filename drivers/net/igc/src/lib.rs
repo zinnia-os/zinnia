@@ -11,7 +11,7 @@ use zinnia::{
     error,
     irq::{IrqHandler, Status},
     log,
-    memory::{AllocFlags, BitValue, MmioView, PhysAddr, PhysPageAllocation, VmCacheType},
+    memory::{AllocFlags, BitValue, MmioView, OwnedPhysPages, PhysAddr, VmCacheType},
     posix::errno::{EResult, Errno},
     util::{event::Event, mutex::spin::SpinMutex},
     warn,
@@ -28,19 +28,19 @@ const BUF_SIZE: usize = 2048;
 const MAX_FRAME_LEN: usize = 1518;
 
 struct Ring {
-    descs: PhysPageAllocation,
-    bufs: PhysPageAllocation,
+    descs: OwnedPhysPages,
+    bufs: OwnedPhysPages,
 }
 
 impl Ring {
     fn new() -> EResult<Self> {
         let page_size = arch::virt::get_page_size();
         Ok(Self {
-            descs: PhysPageAllocation::new(
+            descs: OwnedPhysPages::new(
                 (RING_SIZE * DESC_SIZE).div_ceil(page_size),
                 AllocFlags::empty(),
             )?,
-            bufs: PhysPageAllocation::new(
+            bufs: OwnedPhysPages::new(
                 (RING_SIZE * BUF_SIZE).div_ceil(page_size),
                 AllocFlags::empty(),
             )?,

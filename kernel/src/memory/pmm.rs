@@ -263,12 +263,12 @@ pub fn init(memory_map: &[PhysMemory], pages: &'static mut [Page]) {
 }
 
 /// A safe wrapper around an owned physical memory allocation.
-pub struct PhysPageAllocation {
+pub struct OwnedPhysPages {
     base_addr: PhysAddr,
     pages: usize,
 }
 
-impl PhysPageAllocation {
+impl OwnedPhysPages {
     pub fn new(pages: usize, flags: AllocFlags) -> EResult<Self> {
         let base_addr = KernelAlloc::alloc(pages, flags).map_err(|_| Errno::ENOMEM)?;
         Ok(Self { base_addr, pages })
@@ -281,9 +281,16 @@ impl PhysPageAllocation {
     pub fn as_hhdm<T>(&self) -> *mut T {
         self.base_addr.as_hhdm::<T>()
     }
+
+    /// Returns the inner physical address of this allocation and forgets it.
+    pub fn into_phys(self) -> PhysAddr {
+        let phys = self.base_addr;
+        core::mem::forget(self);
+        phys
+    }
 }
 
-impl Drop for PhysPageAllocation {
+impl Drop for OwnedPhysPages {
     fn drop(&mut self) {
         unsafe {
             KernelAlloc::dealloc(self.base_addr, self.pages);
