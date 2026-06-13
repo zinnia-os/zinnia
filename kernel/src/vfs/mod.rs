@@ -114,6 +114,38 @@ pub fn unlink(root: PathNode, cwd: PathNode, path: &[u8], identity: &Identity) -
     }
 }
 
+/// Removes an empty directory from the VFS.
+pub fn rmdir(root: PathNode, cwd: PathNode, path: &[u8], identity: &Identity) -> EResult<()> {
+    let node = PathNode::lookup(root, cwd, path, identity, LookupFlags::MustExist)?;
+    let inode = node.entry.get_inode().ok_or(Errno::ENOENT)?;
+
+    let dir = match &inode.node_ops {
+        NodeOps::Directory(x) => x,
+        _ => return Err(Errno::ENOTDIR),
+    };
+
+    // Populate the namecache, then refuse to remove a non-empty directory.
+    dir.lookup(&inode, &node)?;
+    if node
+        .entry
+        .children
+        .lock()
+        .values()
+        .any(|c| c.get_inode().is_some())
+    {
+        return Err(Errno::ENOTEMPTY);
+    }
+
+    let parent = node.lookup_parent()?;
+    let parent_inode = parent.entry.get_inode().ok_or(Errno::ENOENT)?;
+    parent_inode.try_access(identity, OpenFlags::Write, false)?;
+
+    match &parent_inode.node_ops {
+        NodeOps::Directory(x) => x.unlink(&parent_inode, &node, identity),
+        _ => Err(Errno::ENOTDIR),
+    }
+}
+
 /// Creates a new node in the VFS.
 pub fn mknod(
     root: PathNode,

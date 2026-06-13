@@ -1227,8 +1227,38 @@ pub fn unlinkat(fd: i32, path: VirtAddr, flags: usize) -> EResult<()> {
         return Err(Errno::EINVAL);
     }
 
+    let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+    let parent = if fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        files
+            .get_fd(fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+    drop(files);
+
     if flags & (AT_REMOVEDIR as usize) != 0 {
-        return Err(Errno::ENOSYS);
+        vfs::rmdir(root, parent, &path_buf, &identity)
+    } else {
+        vfs::unlink(root, parent, &path_buf, &identity)
+    }
+}
+
+#[wrap_syscall]
+pub fn rmdirat(fd: i32, path: VirtAddr) -> EResult<()> {
+    if path == VirtAddr::null() {
+        return Err(Errno::EINVAL);
     }
 
     let path_buf = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
@@ -1252,7 +1282,7 @@ pub fn unlinkat(fd: i32, path: VirtAddr, flags: usize) -> EResult<()> {
     let identity = proc.identity.lock().clone();
     drop(files);
 
-    vfs::unlink(root, parent, &path_buf, &identity)
+    vfs::rmdir(root, parent, &path_buf, &identity)
 }
 
 #[wrap_syscall]

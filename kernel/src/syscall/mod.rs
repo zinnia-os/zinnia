@@ -208,7 +208,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::CHDIR => vfs::chdir,
         numbers::FCHDIR => vfs::fchdir,
         numbers::MKDIRAT => vfs::mkdirat,
-        numbers::RMDIRAT => sys_unimpl!("rmdirat", Err(Errno::ENOSYS)),
+        numbers::RMDIRAT => vfs::rmdirat,
         numbers::GETDENTS => vfs::getdents,
         numbers::RENAMEAT => vfs::renameat,
         numbers::FCHMOD => vfs::fchmod,
