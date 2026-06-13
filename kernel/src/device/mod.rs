@@ -20,6 +20,7 @@ pub mod memfiles;
 pub mod net;
 pub mod pci;
 pub mod tty;
+pub mod usb;
 pub mod vt;
 
 use crate::{

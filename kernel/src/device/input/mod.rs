@@ -7,7 +7,7 @@ use crate::{
     sched::Scheduler,
     uapi::{
         self,
-        input::{self, InputEvent, InputId},
+        input::{self, InputAbsinfo, InputEvent, InputId},
         ioctls,
     },
     util::{event::Event, mutex::spin::SpinMutex},
@@ -46,6 +46,23 @@ pub trait EventDeviceOps: Send + Sync {
     /// Bitmap of supported REL_* axes. Up to REL_CNT bits.
     fn supported_rel(&self) -> &[u8] {
         &[]
+    }
+
+    /// Bitmap of supported ABS_* axes. Up to ABS_CNT bits.
+    fn supported_abs(&self) -> &[u8] {
+        &[]
+    }
+
+    /// Range/initial value for an `ABS_*` axis (for EVIOCGABS).
+    fn abs_info(&self, _code: u16) -> InputAbsinfo {
+        InputAbsinfo {
+            value: 0,
+            minimum: 0,
+            maximum: 0,
+            fuzz: 0,
+            flat: 0,
+            resolution: 0,
+        }
     }
 }
 
@@ -209,8 +226,15 @@ impl EventDevice {
                 }
                 Ok(size)
             }
+            // EVIOCGABS(abs)
+            0x40..=0x7f => {
+                let code = (nr - 0x40) as u16;
+                let mut ptr: UserPtr<InputAbsinfo> = UserPtr::new(arg);
+                ptr.write(self.ops.abs_info(code)).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
             // EVIOCGBIT(ev, len)
-            0x20..=0x7f => {
+            0x20..=0x3f => {
                 let ev = nr - 0x20;
                 let mut data = vec![0u8; size];
                 match ev {
@@ -229,6 +253,11 @@ impl EventDevice {
                     }
                     x if x == input::EV_REL as u8 => {
                         let src = self.ops.supported_rel();
+                        let n = core::cmp::min(src.len(), data.len());
+                        data[..n].copy_from_slice(&src[..n]);
+                    }
+                    x if x == input::EV_ABS as u8 => {
+                        let src = self.ops.supported_abs();
                         let n = core::cmp::min(src.len(), data.len());
                         data[..n].copy_from_slice(&src[..n]);
                     }

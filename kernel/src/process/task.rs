@@ -180,6 +180,7 @@ impl Task {
             return Err(error);
         }
 
+        Scheduler::add_task_to_best_cpu(result.clone());
         Ok(result)
     }
 

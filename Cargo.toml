@@ -8,6 +8,7 @@ members = [
     "drivers/fs/*",
     "drivers/net/*",
     "drivers/serial/*",
+    "drivers/usb/*",
     "drivers/video/*",
 ]
 

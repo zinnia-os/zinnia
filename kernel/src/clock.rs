@@ -121,6 +121,16 @@ pub fn handle_tick() {
     crate::vfs::timerfd::poll_timerfds(now);
 }
 
+/// Sleeps the current task for at least `ns` nanoseconds, yielding the CPU
+/// while waiting.
+pub fn sleep_ns(ns: usize) {
+    let deadline = get_elapsed().saturating_add(ns);
+    let guard = timeout_at(deadline);
+    while !guard.expired() {
+        crate::percpu::CpuData::get().scheduler.do_yield();
+    }
+}
+
 /// Blocking wait for a given amount of nanoseconds.
 pub fn block_ns(time: usize) -> Result<(), ClockError> {
     if CLOCK.lock().current.is_none() {
