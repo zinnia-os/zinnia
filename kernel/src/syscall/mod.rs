@@ -296,7 +296,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
 
         // Scheduling
         numbers::SLEEP => system::sleep,
-        numbers::YIELD => sys_unimpl!("yield", Ok(0)),
+        numbers::YIELD => system::sched_yield,
         numbers::GETPRIORITY => sys_unimpl!("getpriority", Err(Errno::ENOSYS)),
         numbers::SETPRIORITY => sys_unimpl!("setpriority", Err(Errno::ENOSYS)),
         numbers::SCHED_GETPARAM => sys_unimpl!("sched_getparam", Err(Errno::ENOSYS)),

@@ -345,6 +345,12 @@ pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
     Ok(0)
 }
 
+#[wrap_syscall]
+pub fn sched_yield() -> EResult<usize> {
+    CpuData::get().scheduler.reschedule();
+    Ok(0)
+}
+
 fn get_futex_queue(pointer: VirtAddr) -> Arc<FutexQueue> {
     let task = Scheduler::get_current();
     let address_space = task.address_space.clone();
