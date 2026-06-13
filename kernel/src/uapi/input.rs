@@ -44,7 +44,23 @@ pub const SYN_REPORT: u16 = 0;
 pub const REL_X: u16 = 0x00;
 pub const REL_Y: u16 = 0x01;
 pub const REL_WHEEL: u16 = 0x08;
+pub const REL_MAX: u16 = 0x0f;
 pub const REL_CNT: u16 = 0x10;
+
+// Absolute axes
+pub const ABS_X: u16 = 0x00;
+pub const ABS_Y: u16 = 0x01;
+pub const ABS_Z: u16 = 0x02;
+pub const ABS_RX: u16 = 0x03;
+pub const ABS_RY: u16 = 0x04;
+pub const ABS_RZ: u16 = 0x05;
+pub const ABS_THROTTLE: u16 = 0x06;
+pub const ABS_RUDDER: u16 = 0x07;
+pub const ABS_WHEEL: u16 = 0x08;
+pub const ABS_HAT0X: u16 = 0x10;
+pub const ABS_HAT0Y: u16 = 0x11;
+pub const ABS_MAX: u16 = 0x3f;
+pub const ABS_CNT: u16 = 0x40;
 
 // Key/button codes
 pub const KEY_RESERVED: u16 = 0;
@@ -150,6 +166,18 @@ pub const KEY_INSERT: u16 = 110;
 pub const KEY_DELETE: u16 = 111;
 pub const KEY_LEFTMETA: u16 = 125;
 pub const KEY_RIGHTMETA: u16 = 126;
+pub const KEY_F13: u16 = 183;
+pub const KEY_F14: u16 = 184;
+pub const KEY_F15: u16 = 185;
+pub const KEY_F16: u16 = 186;
+pub const KEY_F17: u16 = 187;
+pub const KEY_F18: u16 = 188;
+pub const KEY_F19: u16 = 189;
+pub const KEY_F20: u16 = 190;
+pub const KEY_F21: u16 = 191;
+pub const KEY_F22: u16 = 192;
+pub const KEY_F23: u16 = 193;
+pub const KEY_F24: u16 = 194;
 pub const KEY_CNT: u16 = 0x300;
 
 // Mouse button codes
@@ -157,8 +185,44 @@ pub const BTN_MISC: u16 = 0x100;
 pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_RIGHT: u16 = 0x111;
 pub const BTN_MIDDLE: u16 = 0x112;
+pub const BTN_SIDE: u16 = 0x113;
+pub const BTN_EXTRA: u16 = 0x114;
+pub const BTN_FORWARD: u16 = 0x115;
+pub const BTN_BACK: u16 = 0x116;
+
+// Joystick button codes
+pub const BTN_TRIGGER: u16 = 0x120;
+pub const BTN_THUMB: u16 = 0x121;
+pub const BTN_THUMB2: u16 = 0x122;
+pub const BTN_TOP: u16 = 0x123;
+pub const BTN_TOP2: u16 = 0x124;
+pub const BTN_PINKIE: u16 = 0x125;
+pub const BTN_BASE: u16 = 0x126;
+pub const BTN_BASE2: u16 = 0x127;
+pub const BTN_BASE3: u16 = 0x128;
+pub const BTN_BASE4: u16 = 0x129;
+pub const BTN_BASE5: u16 = 0x12a;
+pub const BTN_BASE6: u16 = 0x12b;
+
+// Gamepad button codes
+pub const BTN_SOUTH: u16 = 0x130;
+pub const BTN_EAST: u16 = 0x131;
+pub const BTN_C: u16 = 0x132;
+pub const BTN_NORTH: u16 = 0x133;
+pub const BTN_WEST: u16 = 0x134;
+pub const BTN_Z: u16 = 0x135;
+pub const BTN_TL: u16 = 0x136;
+pub const BTN_TR: u16 = 0x137;
+pub const BTN_TL2: u16 = 0x138;
+pub const BTN_TR2: u16 = 0x139;
+pub const BTN_SELECT: u16 = 0x13a;
+pub const BTN_START: u16 = 0x13b;
+pub const BTN_MODE: u16 = 0x13c;
+pub const BTN_THUMBL: u16 = 0x13d;
+pub const BTN_THUMBR: u16 = 0x13e;
 
 // Bus types
+pub const BUS_USB: u16 = 0x03;
 pub const BUS_I8042: u16 = 0x11;
 
 pub const EV_VERSION: u32 = 0x010001;
