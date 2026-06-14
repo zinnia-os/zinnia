@@ -364,9 +364,15 @@ fn DISCOVER_APS_STAGE() {
         let madt = madt_ptr.read_unaligned();
 
         let mut offset = 0;
-        while offset < madt.hdr.length - size_of::<uacpi_sys::acpi_sdt_hdr>() as u32 {
+        while offset < madt.hdr.length - size_of::<uacpi_sys::acpi_madt>() as u32 {
             let ptr = madt_ptr.offset(1).byte_offset(offset as isize) as *const acpi_entry_hdr;
             let entry = ptr.read_unaligned();
+
+            // Don't trust malformed firmware tables.
+            if entry.length == 0 {
+                error!("MADT contains a zero-length entry!");
+                break;
+            }
 
             match entry.type_ as u32 {
                 uacpi_sys::ACPI_MADT_ENTRY_TYPE_LAPIC => {
