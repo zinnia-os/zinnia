@@ -614,28 +614,17 @@ pub fn fcntl(fd: i32, cmd: usize, arg: usize) -> EResult<usize> {
             warn!("fcntl F_SETOWN_EX is a stub!");
             Ok(0)
         }
-        F_GETLK => {
-            warn!("fcntl F_GETLK is a stub!");
+        F_GETLK | F_OFD_GETLK => {
+            proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
+            let mut ptr = UserPtr::<flock>::new(VirtAddr::new(arg));
+            let mut lock = ptr.read().ok_or(Errno::EFAULT)?;
+            lock.l_type = F_UNLCK as i16;
+            lock.l_pid = 0;
+            ptr.write(lock).ok_or(Errno::EFAULT)?;
             Ok(0)
         }
-        F_SETLK => {
-            warn!("fcntl F_SETLK is a stub!");
-            Ok(0)
-        }
-        F_SETLKW => {
-            warn!("fcntl F_SETLKW is a stub!");
-            Ok(0)
-        }
-        F_OFD_GETLK => {
-            warn!("fcntl F_OFD_GETLK is a stub!");
-            Ok(0)
-        }
-        F_OFD_SETLK => {
-            warn!("fcntl F_OFD_SETLK is a stub!");
-            Ok(0)
-        }
-        F_OFD_SETLKW => {
-            warn!("fcntl F_OFD_SETLKW is a stub!");
+        F_SETLK | F_SETLKW | F_OFD_SETLK | F_OFD_SETLKW => {
+            proc_inner.get_fd(fd).ok_or(Errno::EBADF)?;
             Ok(0)
         }
         _ => Err(Errno::EINVAL),

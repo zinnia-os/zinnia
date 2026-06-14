@@ -76,6 +76,16 @@ pub struct f_owner_ex {
     pub pid: super::pid_t,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct flock {
+    pub l_type: i16,
+    pub l_whence: i16,
+    pub l_start: super::off_t,
+    pub l_len: super::off_t,
+    pub l_pid: super::pid_t,
+}
+
 pub const F_OWNER_TID: u32 = 0;
 pub const POSIX_FADV_NORMAL: u32 = 0;
 pub const POSIX_FADV_RANDOM: u32 = 1;
