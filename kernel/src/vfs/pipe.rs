@@ -37,7 +37,7 @@ impl PipeBuffer {
     pub fn new() -> Self {
         Self {
             inner: SpinMutex::new(PipeInner {
-                buffer: RingBuffer::new(0x1000),
+                buffer: RingBuffer::new(0x10000),
                 readers: 0,
                 writers: 0,
             }),
