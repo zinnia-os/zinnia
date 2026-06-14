@@ -103,6 +103,7 @@ impl Runq {
             return Some(start_word * RQB_BITS + masked.trailing_zeros() as usize);
         }
         for offset in 1..=RQB_LEN {
+            #[allow(clippy::modulo_one)]
             let word = (start_word + offset) % RQB_LEN;
             if self.status[word] != 0 {
                 return Some(word * RQB_BITS + self.status[word].trailing_zeros() as usize);
