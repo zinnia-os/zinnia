@@ -42,8 +42,9 @@ bitflags! {
         const Size = 1 << 7;
         const Global = 1 << 8;
         const Available = 1 << 9;
-        const AttributeTable = 1 << 10;
         const ExecuteDisable = 1 << 63;
+        const Pat = 1 << 7;
+        const LargePat = 1 << 12;
     }
 }
 
@@ -83,7 +84,12 @@ impl PageTableEntry {
                 VmCacheType::Normal => 0,
                 VmCacheType::WriteThrough => PageFlags::WriteThrough.bits(),
                 VmCacheType::WriteCombine => {
-                    PageFlags::AttributeTable.bits() | PageFlags::WriteThrough.bits()
+                    let pat_bit = if flags.contains(PteFlags::Large) {
+                        PageFlags::LargePat.bits()
+                    } else {
+                        PageFlags::Pat.bits()
+                    };
+                    pat_bit | PageFlags::WriteThrough.bits()
                 }
                 VmCacheType::Uncacheable => PageFlags::CacheDisable.bits(),
             };
@@ -95,7 +101,7 @@ impl PageTableEntry {
     /// Decodes the caching mode of a (leaf) entry from its PAT-index bits.
     pub fn cache_type(&self) -> VmCacheType {
         let flags = PageFlags::from_bits_retain(self.inner);
-        let pat = flags.contains(PageFlags::AttributeTable);
+        let pat = flags.contains(PageFlags::Pat);
         let pcd = flags.contains(PageFlags::CacheDisable);
         let pwt = flags.contains(PageFlags::WriteThrough);
         match (pat, pcd, pwt) {
