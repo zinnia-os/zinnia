@@ -54,6 +54,16 @@ pub struct RandomFile;
 
 static RNG_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 
+pub fn fill_random(buf: &mut [u8]) {
+    let mut i = 0;
+    while i < buf.len() {
+        let bytes = next_random_u64().to_le_bytes();
+        let take = (buf.len() - i).min(bytes.len());
+        buf[i..i + take].copy_from_slice(&bytes[..take]);
+        i += take;
+    }
+}
+
 fn next_random_u64() -> u64 {
     let mut x = RNG_STATE.load(Ordering::Relaxed)
         ^ (clock::get_elapsed() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);

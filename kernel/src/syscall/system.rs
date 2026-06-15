@@ -109,6 +109,25 @@ pub fn clock_getres(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
 }
 
 #[wrap_syscall]
+pub fn getentropy(buffer: VirtAddr, length: usize) -> EResult<usize> {
+    // POSIX limits to 256 bytes per call.
+    if length > 256 {
+        return Err(Errno::EIO);
+    }
+    if length == 0 {
+        return Ok(0);
+    }
+
+    let mut buf = [0u8; 256];
+    crate::device::memfiles::fill_random(&mut buf[..length]);
+
+    let mut ptr = UserPtr::<u8>::new(buffer);
+    ptr.write_slice(&buf[..length]).ok_or(Errno::EFAULT)?;
+
+    Ok(0)
+}
+
+#[wrap_syscall]
 pub fn futex_wait(pointer: VirtAddr, expected: i32, timeout: VirtAddr) -> EResult<usize> {
     let pointer = UserPtr::<i32>::new(pointer);
     let deadline = read_timeout_deadline(timeout)?;
