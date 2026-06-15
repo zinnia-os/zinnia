@@ -828,9 +828,41 @@ impl DirectoryOps for Ext2Dir {
         // Decrement link count.
         let mut raw = self.sb.read_inode(removed_ino)?;
         raw.i_links_count = raw.i_links_count.saturating_sub(1);
-        self.sb.write_inode(removed_ino, &raw)?;
+        if raw.i_links_count == 0 {
+            self.sb.free_inode_data(removed_ino, &mut raw)?;
+            self.sb.inode_cache.lock().remove(&removed_ino);
+        } else {
+            self.sb.write_inode(removed_ino, &raw)?;
+        }
 
-        // Remove from entry cache.
+        // Drop the entry from the parent's name cache and mark it negative.
+        if let Some(parent) = path.entry.parent.as_ref() {
+            parent.children.lock().remove(&path.entry.name);
+        }
+        *path.entry.inode.lock() = EntryState::NotPresent;
+
+        Ok(())
+    }
+
+    fn rmdir(&self, _self_node: &Arc<INode>, path: &PathNode, _identity: &Identity) -> EResult<()> {
+        // The VFS guarantees the directory is empty. Remove its entry from this directory
+        // and free the directory inode and its blocks.
+        let name = &path.entry.name;
+        let removed_ino = self.remove_entry(name)?;
+
+        let mut raw = self.sb.read_inode(removed_ino)?;
+        self.sb.free_inode_data(removed_ino, &mut raw)?;
+        self.sb.inode_cache.lock().remove(&removed_ino);
+
+        // The removed directory's `..` entry pointed at this parent, so its
+        // disappearance drops one link from the parent.
+        let mut parent_raw = self.sb.read_inode(self.ino)?;
+        parent_raw.i_links_count = parent_raw.i_links_count.saturating_sub(1);
+        self.sb.write_inode(self.ino, &parent_raw)?;
+
+        if let Some(parent) = path.entry.parent.as_ref() {
+            parent.children.lock().remove(&path.entry.name);
+        }
         *path.entry.inode.lock() = EntryState::NotPresent;
 
         Ok(())

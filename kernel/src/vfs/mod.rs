@@ -124,15 +124,14 @@ pub fn rmdir(root: PathNode, cwd: PathNode, path: &[u8], identity: &Identity) ->
         _ => return Err(Errno::ENOTDIR),
     };
 
-    // Populate the namecache, then refuse to remove a non-empty directory.
-    dir.lookup(&inode, &node)?;
-    if node
-        .entry
-        .children
-        .lock()
-        .values()
-        .any(|c| c.get_inode().is_some())
-    {
+    let mut probe = [dirent {
+        d_ino: 0,
+        d_off: 0,
+        d_reclen: 0,
+        d_type: 0,
+        d_name: [0u8; _],
+    }];
+    if dir.get_dir_entries(&inode, node.entry.clone(), 0, &mut probe, identity)? > 0 {
         return Err(Errno::ENOTEMPTY);
     }
 
@@ -141,7 +140,7 @@ pub fn rmdir(root: PathNode, cwd: PathNode, path: &[u8], identity: &Identity) ->
     parent_inode.try_access(identity, OpenFlags::Write, false)?;
 
     match &parent_inode.node_ops {
-        NodeOps::Directory(x) => x.unlink(&parent_inode, &node, identity),
+        NodeOps::Directory(x) => x.rmdir(&parent_inode, &node, identity),
         _ => Err(Errno::ENOTDIR),
     }
 }

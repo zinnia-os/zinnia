@@ -206,6 +206,14 @@ pub trait DirectoryOps: FileOps + Any {
     /// Removes a link.
     fn unlink(&self, self_node: &Arc<INode>, path: &PathNode, identity: &Identity) -> EResult<()>;
 
+    /// Removes an empty child directory referenced by `path`.
+    /// The caller guarantees the directory is empty before invoking this.
+    /// Unlike [`DirectoryOps::unlink`], an implementation must account for the directory's `..` entry
+    /// on the parent's link count and free the directory's own inode.
+    fn rmdir(&self, self_node: &Arc<INode>, path: &PathNode, identity: &Identity) -> EResult<()> {
+        self.unlink(self_node, path, identity)
+    }
+
     /// Renames a node.
     fn rename(
         &self,

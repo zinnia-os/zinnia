@@ -548,6 +548,80 @@ impl Ext2Super {
         Ok(())
     }
 
+    fn free_block_tree(&self, block: u64, level: u32) -> EResult<()> {
+        if block == 0 {
+            return Ok(());
+        }
+
+        if level > 0 {
+            let mut buf = zinnia::alloc::vec![0u8; self.block_size];
+            self.read_block(block, &mut buf)?;
+            let ptrs = self.block_size / 4;
+            for i in 0..ptrs {
+                let off = i * 4;
+                let child =
+                    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]) as u64;
+                self.free_block_tree(child, level - 1)?;
+            }
+        }
+
+        self.free_block(block)
+    }
+
+    pub fn free_inode_data(&self, ino: u32, raw: &mut Ext2Inode) -> EResult<()> {
+        let was_dir = raw.is_dir();
+
+        // Fast symlinks store their target inline in `i_block` and own no blocks.
+        if !raw.is_fast_symlink() {
+            for i in 0..EXT2_NDIR_BLOCKS {
+                let block = raw.i_block[i] as u64;
+                if block != 0 {
+                    self.free_block(block)?;
+                }
+            }
+            self.free_block_tree(raw.i_block[EXT2_IND_BLOCK] as u64, 1)?;
+            self.free_block_tree(raw.i_block[EXT2_DIND_BLOCK] as u64, 2)?;
+            self.free_block_tree(raw.i_block[EXT2_TIND_BLOCK] as u64, 3)?;
+        }
+
+        raw.i_block = [0; EXT2_N_BLOCKS];
+        raw.i_blocks = 0;
+        raw.i_size = 0;
+        raw.i_dir_acl = 0;
+        raw.i_links_count = 0;
+        raw.i_dtime = (zinnia::clock::realtime_ns().unwrap_or(0) / 1_000_000_000) as u32;
+        self.write_inode(ino, raw)?;
+
+        self.free_inode(ino)?;
+
+        if was_dir {
+            let group = ((ino - 1) / self.inodes_per_group) as usize;
+            let mut bgdt = self.bgdt.lock();
+            if group < bgdt.len() {
+                bgdt[group].bg_used_dirs_count = bgdt[group].bg_used_dirs_count.saturating_sub(1);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn write_back_metadata(&self, inode: &INode) -> EResult<()> {
+        let ino = inode.id as u32;
+        if ino == 0 {
+            return Ok(());
+        }
+
+        let mut raw = self.read_inode(ino)?;
+        let perm = inode.mode.lock().bits() as u16 & 0o7777;
+        raw.i_mode = (raw.i_mode & S_IFMT) | perm;
+        raw.i_uid = *inode.uid.lock() as u16;
+        raw.i_gid = *inode.gid.lock() as u16;
+        raw.i_atime = inode.atime.lock().tv_sec as u32;
+        raw.i_mtime = inode.mtime.lock().tv_sec as u32;
+        raw.i_ctime = inode.ctime.lock().tv_sec as u32;
+        self.write_inode(ino, &raw)
+    }
+
     /// Convert a raw ext2 inode to a VFS INode.
     pub fn inode_to_vfs(self: &Arc<Self>, ino: u32, raw: &Ext2Inode) -> EResult<Arc<INode>> {
         let mode_bits = raw.i_mode & 0o7777;
@@ -607,33 +681,97 @@ impl Ext2Super {
         let zeros = zinnia::alloc::vec![0u8; self.block_size];
         self.write_block(new_block, &zeros)?;
 
-        let ptrs_per_block = (self.block_size / 4) as u64;
+        let ptrs = (self.block_size / 4) as u64;
 
-        if logical_block < EXT2_NDIR_BLOCKS as u64 {
-            raw.i_block[logical_block as usize] = new_block as u32;
-        } else {
-            let lb = logical_block - EXT2_NDIR_BLOCKS as u64;
-            if lb < ptrs_per_block {
-                // Single indirect.
-                if raw.i_block[EXT2_IND_BLOCK] == 0 {
-                    let ind = self.alloc_block(preferred_group)?;
-                    let z = zinnia::alloc::vec![0u8; self.block_size];
-                    self.write_block(ind, &z)?;
-                    raw.i_block[EXT2_IND_BLOCK] = ind as u32;
-                    raw.i_blocks += (self.block_size / 512) as u32;
-                }
-                self.write_block_ptr(raw.i_block[EXT2_IND_BLOCK] as u64, lb as usize, new_block)?;
-            } else {
-                // Double/triple indirect: not needed for basic use. Return error.
-                self.free_block(new_block)?;
-                return Err(Errno::EFBIG);
+        let result = (|| {
+            if logical_block < EXT2_NDIR_BLOCKS as u64 {
+                raw.i_block[logical_block as usize] = new_block as u32;
+                return Ok(());
             }
+
+            let lb = logical_block - EXT2_NDIR_BLOCKS as u64;
+            let single = ptrs;
+            let double = ptrs * ptrs;
+            let triple = ptrs * ptrs * ptrs;
+
+            // Pick the indirect slot, its indirection level, and the data block offset within that slot's subtree.
+            let (slot, level, offset) = if lb < single {
+                (EXT2_IND_BLOCK, 1u32, lb)
+            } else if lb < single + double {
+                (EXT2_DIND_BLOCK, 2, lb - single)
+            } else if lb < single + double + triple {
+                (EXT2_TIND_BLOCK, 3, lb - single - double)
+            } else {
+                return Err(Errno::EFBIG);
+            };
+
+            // Allocate the top level indirect block if it does not exist yet.
+            if raw.i_block[slot] == 0 {
+                let ind = self.alloc_block(preferred_group)?;
+                let z = zinnia::alloc::vec![0u8; self.block_size];
+                self.write_block(ind, &z)?;
+                raw.i_block[slot] = ind as u32;
+                raw.i_blocks += (self.block_size / 512) as u32;
+            }
+
+            self.map_indirect(
+                raw.i_block[slot] as u64,
+                level,
+                offset,
+                new_block,
+                preferred_group,
+                &mut raw.i_blocks,
+            )
+        })();
+
+        if let Err(e) = result {
+            // Roll back the data block we didn't need.
+            self.free_block(new_block)?;
+            return Err(e);
         }
 
         raw.i_blocks += (self.block_size / 512) as u32;
         self.write_inode(ino, raw)?;
 
         Ok(new_block)
+    }
+
+    fn map_indirect(
+        &self,
+        block: u64,
+        level: u32,
+        offset: u64,
+        data_block: u64,
+        preferred_group: u32,
+        i_blocks: &mut u32,
+    ) -> EResult<()> {
+        if level == 1 {
+            // Entries at this level point directly at data blocks.
+            return self.write_block_ptr(block, offset as usize, data_block);
+        }
+
+        let ptrs = (self.block_size / 4) as u64;
+        // Number of data blocks each child subtree covers.
+        let subtree = ptrs.pow(level - 1);
+        let index = (offset / subtree) as usize;
+
+        let mut child = self.read_block_ptr(block, index)?;
+        if child == 0 {
+            child = self.alloc_block(preferred_group)?;
+            let z = zinnia::alloc::vec![0u8; self.block_size];
+            self.write_block(child, &z)?;
+            self.write_block_ptr(block, index, child)?;
+            *i_blocks += (self.block_size / 512) as u32;
+        }
+
+        self.map_indirect(
+            child,
+            level - 1,
+            offset % subtree,
+            data_block,
+            preferred_group,
+            i_blocks,
+        )
     }
 
     /// Write a single u32 block pointer into a block on disk.
@@ -713,6 +851,8 @@ impl SuperBlock for Ext2Super {
     fn sync(self: Arc<Self>) -> EResult<()> {
         let cached: Vec<Arc<INode>> = self.inode_cache.lock().values().cloned().collect();
         for inode in cached {
+            self.write_back_metadata(&inode)?;
+
             if let NodeOps::Regular(ops) = &inode.node_ops
                 && let Ok(reg) = Arc::downcast::<Ext2Regular>(ops.clone())
             {
