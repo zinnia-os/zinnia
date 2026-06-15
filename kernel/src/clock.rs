@@ -211,3 +211,17 @@ pub fn realtime_ns() -> Option<i64> {
     }
     Some(base.saturating_add(get_elapsed() as i64))
 }
+
+/// Polls `f` until it returns `true` or the timeout elapses.
+pub fn poll_until(timeout_ns: usize, mut f: impl FnMut() -> bool) -> bool {
+    let deadline = get_elapsed().saturating_add(timeout_ns);
+    loop {
+        if f() {
+            return true;
+        }
+        if get_elapsed() >= deadline {
+            return false;
+        }
+        let _ = block_ns(10_000_000);
+    }
+}

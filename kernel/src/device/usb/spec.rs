@@ -1,13 +1,14 @@
 use crate::device::usb::Speed;
 
 #[repr(packed, C)]
+#[derive(Clone, Copy)]
 pub struct DescriptorHeader {
     pub length: u8,
     pub descriptor_type: DescriptorType,
 }
 
 #[repr(u8)]
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum DescriptorType {
     Device = 1,
     Config = 2,
@@ -20,6 +21,7 @@ pub enum DescriptorType {
 }
 
 #[repr(packed, C)]
+#[derive(Clone, Copy)]
 pub struct DeviceDescriptor {
     pub header: DescriptorHeader,
     pub usb: u16,
@@ -64,6 +66,7 @@ pub struct ConfigDescriptor {
 }
 
 #[repr(packed, C)]
+#[derive(Clone, Copy)]
 pub struct InterfaceDescriptor {
     pub header: DescriptorHeader,
     pub interface_number: u8,
@@ -87,6 +90,7 @@ pub const USB_ENDPOINT_ATTRIB_TYPE_BULK: u32 = 0x02;
 pub const USB_ENDPOINT_ATTRIB_TYPE_INTR: u32 = 0x03;
 
 #[repr(packed, C)]
+#[derive(Clone, Copy)]
 pub struct EndpointDescriptor {
     pub length: u8,
     pub descriptor_type: u8,
@@ -102,9 +106,35 @@ impl EndpointDescriptor {
     pub const fn max_packet_size(&self) -> u16 {
         self.max_packet_size & Self::MAX_PACKET_SIZE_MASK
     }
+
+    pub const fn extra_transactions(&self) -> u16 {
+        (self.max_packet_size >> 11) & 0x3
+    }
+
+    pub fn valid_for_speed(&self, speed: Speed) -> bool {
+        let ep_num = self.endpoint_address as u32 & USB_ENDPOINT_ADDRESS_NUM_MASK;
+        let extra_transactions = self.extra_transactions();
+        if ep_num == 0 || self.max_packet_size() == 0 {
+            return false;
+        }
+
+        match self.attributes as u32 & USB_ENDPOINT_ATTRIB_TYPE_MASK {
+            USB_ENDPOINT_ATTRIB_TYPE_BULK => {
+                speed != Speed::Low && !(speed == Speed::High && extra_transactions != 0)
+            }
+            USB_ENDPOINT_ATTRIB_TYPE_INTR => {
+                self.interval != 0
+                    && !(matches!(speed, Speed::High | Speed::Super | Speed::SuperPlus)
+                        && self.interval > 16)
+                    && !(speed == Speed::High && extra_transactions == 3)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[repr(packed, C)]
+#[derive(Clone, Copy)]
 pub struct SsEpCompanionDescriptor {
     pub length: u8,
     pub descriptor_type: u8,
@@ -113,7 +143,11 @@ pub struct SsEpCompanionDescriptor {
     pub bytes_per_interval: u16,
 }
 
+pub const USB_CLASS_HUB: u8 = 0x09;
 pub const USB_HUB_PROTOCOL_MULTI_TT: u32 = 2;
+
+pub const USB_HUB_POWER_SWITCHING_MODE_MASK: u16 = 0x0003;
+pub const USB_HUB_POWER_SWITCHING_MODE_NONE: u16 = 1 << 1;
 
 #[repr(packed, C)]
 pub struct HubDescriptor {
@@ -183,6 +217,7 @@ bitflags::bitflags! {
 }
 
 #[repr(u16)]
+#[derive(Clone, Copy)]
 pub enum PortFeature {
     PortConnection = 0,
     PortEnable = 1,

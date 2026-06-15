@@ -288,6 +288,35 @@ impl<'a> DeviceView<'a> {
 
         Ok(line)
     }
+
+    pub fn setup_msi(&mut self) -> EResult<Arc<dyn IrqLine>> {
+        if !self.capabilities().any(|mut cap| cap.msi().is_some()) {
+            return Err(Errno::ENODEV);
+        }
+
+        log!("Using MSI (no MSI-X available)");
+
+        let msi = arch::irq::allocate_msi().ok_or(Errno::ENOMEM)?;
+        let line = msi.clone() as Arc<dyn IrqLine>;
+        line.program(Some((TriggerMode::Edge, Polarity::High)));
+
+        for mut cap in self.capabilities() {
+            if let Some(mut msi_cap) = cap.msi() {
+                msi_cap.program(msi.msg_addr().value() as u64, msi.msg_data() as u16);
+                break;
+            }
+        }
+
+        Ok(line)
+    }
+
+    pub fn setup_irq(&mut self) -> EResult<Arc<dyn IrqLine>> {
+        match self.setup_msix() {
+            Ok(line) => Ok(line),
+            Err(Errno::ENODEV) => self.setup_msi(),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl<'a> MemoryView for DeviceView<'a> {
@@ -430,7 +459,45 @@ impl<'a> Capability<'a, ()> {
 
 /// Capability for MSIs
 pub struct MsiCapability;
-impl<'a> Capability<'a, MsiCapability> {}
+impl<'a> Capability<'a, MsiCapability> {
+    /// Whether the capability uses a 64-bit message address.
+    fn is_64bit(&self) -> bool {
+        let reg: Register<u32> = Register::new(self.cap as usize);
+        let field: Field<_, u8> = Field::new_bits(reg, 23..=23);
+        self.view
+            .read_reg(reg)
+            .map(|x| x.read_field(field).value())
+            .unwrap_or(0)
+            != 0
+    }
+
+    pub fn program(&mut self, addr: u64, data: u16) {
+        let base = self.cap as usize;
+        let addr_lo: Register<u32> = Register::new(base + 0x04);
+        self.view.write_reg(addr_lo, addr as u32);
+
+        let data_off = if self.is_64bit() {
+            let addr_hi: Register<u32> = Register::new(base + 0x08);
+            self.view.write_reg(addr_hi, (addr >> 32) as u32);
+            0x0C
+        } else {
+            0x08
+        };
+        let data_reg: Register<u32> = Register::new(base + data_off);
+        self.view.write_reg(data_reg, data as u32);
+
+        let ctrl: Register<u32> = Register::new(base);
+        let enable: Field<_, u8> = Field::new_bits(ctrl, 16..=16);
+        let multiple_message_enable: Field<_, u8> = Field::new_bits(ctrl, 20..=22);
+        let value = self
+            .view
+            .read_reg(ctrl)
+            .unwrap()
+            .write_field(multiple_message_enable, 0u8)
+            .write_field(enable, 1u8);
+        self.view.write_reg(ctrl, value.value());
+    }
+}
 
 /// Capability for MSI-Xs
 pub struct MsiXCapability;

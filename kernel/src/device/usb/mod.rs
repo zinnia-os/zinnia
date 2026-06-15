@@ -1,8 +1,13 @@
-use crate::{device::usb::hub::Hub, memory::IovecIter, posix::errno::EResult};
+use crate::{
+    device::usb::hub::Hub, memory::IovecIter, posix::errno::EResult, util::mutex::spin::SpinMutex,
+};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use async_trait::async_trait;
+use core::any::Any;
+use num_enum::FromPrimitive;
 
 pub mod hub;
+pub mod hub_class;
 pub mod spec;
 
 pub type UsbResult<T> = Result<T, Status>;
@@ -15,12 +20,14 @@ bitflags::bitflags! {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferType {
     Control,
     Bulk,
     Interrupt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     ShortPacket,
     Error,
@@ -28,7 +35,10 @@ pub enum Status {
     FlowError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive)]
+#[repr(u8)]
 pub enum Speed {
+    #[default]
     Unknown,
     Low,
     Full,
@@ -39,23 +49,40 @@ pub enum Speed {
 
 pub struct Endpoint {
     pub desc: spec::EndpointDescriptor,
-    pub ss_companion: spec::SsEpCompanionDescriptor,
+    /// SuperSpeed endpoint companion descriptor.
+    pub ss_companion: Option<spec::SsEpCompanionDescriptor>,
 }
 
 pub struct Interface {
     pub desc: spec::InterfaceDescriptor,
     pub endpoints: Vec<Endpoint>,
-    pub driver: &'static Driver,
+    pub driver: Option<&'static Driver>,
+    /// Private state of the attached class driver, cleared by its `detach`.
+    pub driver_data: SpinMutex<Option<Arc<dyn Any + Send + Sync>>>,
 }
 
-#[async_trait]
+/// Parsed hub descriptor of a hub-class device.
+#[derive(Clone, Copy)]
+pub struct HubInfo {
+    pub port_count: u8,
+    /// USB 2.0 hub with one transaction translator per port.
+    pub multi_tt: bool,
+    /// Time from port power-on until power is stable, in milliseconds.
+    pub power_good_ms: u32,
+    /// Whether the hub requires per-port power switching.
+    pub power_switched: bool,
+}
+
+/// Per controller operations the host controller driver must implement.
+#[async_trait(?Send)]
 pub trait ControllerOps {
     async fn address_device(
         &self,
         controller: &Controller,
-        hub: &Hub,
+        hub: &Arc<Hub>,
+        port: u8,
         speed: Speed,
-    ) -> UsbResult<()>;
+    ) -> UsbResult<Arc<Device>>;
 
     async fn deaddress_device(&self, controller: &Controller, device: &Device) -> UsbResult<()>;
 
@@ -68,53 +95,212 @@ pub trait ControllerOps {
         endpoint: &Endpoint,
     ) -> UsbResult<()>;
 
+    /// Submits a transfer and returns the number of bytes transferred.
     async fn transfer(
         &self,
         controller: &Controller,
         device: &Device,
-        transfer: &Transfer,
-    ) -> UsbResult<()>;
+        transfer: &mut Transfer,
+    ) -> UsbResult<usize>;
 }
 
 pub struct Controller {
-    pub ops: Box<dyn ControllerOps>,
+    pub ops: Box<dyn ControllerOps + Send + Sync>,
 }
 
 pub struct Transfer<'a, 'b> {
-    pub endpoint: &'a Endpoint,
+    /// The endpoint this transfer targets, or [`None`] for a control transfer on EP0.
+    pub endpoint: Option<&'a Endpoint>,
     pub flags: TransferFlags,
     pub typ: TransferType,
     pub device: Option<&'a Device>,
 
     pub setup: Option<spec::Setup>,
-    pub data: &'a IovecIter<'b>,
-}
-
-pub struct Device {
-    pub parent_hub: Arc<Hub>,
-}
-
-impl Device {
-    pub async fn submit(&self, transfer: Transfer<'_, '_>) -> UsbResult<()> {
-        let controller = self.parent_hub.controller.as_ref();
-        controller.ops.transfer(controller, self, &transfer).await
-    }
+    pub data: &'a mut IovecIter<'b>,
 }
 
 pub struct Driver {
     pub name: &'static str,
-    pub probe: fn(device: &Device, interface: &Interface) -> EResult<()>,
-    pub attach: fn(device: &Device, interface: &Interface) -> EResult<()>,
-    pub detach: fn(device: &Device, interface: &Interface) -> EResult<()>,
+    pub probe: fn(device: Arc<Device>, interface: &Interface) -> EResult<()>,
+    pub attach: fn(device: Arc<Device>, interface: &Interface) -> EResult<()>,
+    pub detach: fn(device: Arc<Device>, interface: &Interface) -> EResult<()>,
 }
 
-pub enum DriverScore {
-    None = 0,
-    Generic = 10,
-    ClassMatch = 30,
-    SubclassMatch = 50,
-    ProtocolMatch = 60,
-    VendorMatch = 80,
-    ProductMatch = 90,
-    ExactMatch = 100,
+impl Driver {
+    pub fn register(&'static self) {
+        DRIVERS.lock().push(self);
+    }
+}
+
+static DRIVERS: SpinMutex<Vec<&'static Driver>> = SpinMutex::new(Vec::new());
+
+pub struct Device {
+    pub parent_hub: Arc<Hub>,
+    /// 1-based port on `parent_hub` this device is attached to.
+    pub port: u8,
+    pub speed: Speed,
+    /// The device descriptor, read while the device is addressed.
+    pub descriptor: SpinMutex<Option<spec::DeviceDescriptor>>,
+    /// Hub characteristics if this device is a hub.
+    pub hub_info: SpinMutex<Option<HubInfo>>,
+    pub driver_data: SpinMutex<Option<Arc<dyn Any + Send + Sync>>>,
+    /// The interfaces of the active configuration.
+    pub interfaces: SpinMutex<Vec<Interface>>,
+}
+
+impl Device {
+    pub fn new(parent_hub: Arc<Hub>, port: u8, speed: Speed) -> Self {
+        Self {
+            parent_hub,
+            port,
+            speed,
+            descriptor: SpinMutex::new(None),
+            hub_info: SpinMutex::new(None),
+            driver_data: SpinMutex::new(None),
+            interfaces: SpinMutex::new(Vec::new()),
+        }
+    }
+
+    /// Finds the first registered driver whose `probe` accepts `interface` and attaches it.
+    pub fn match_interface(self: Arc<Self>, interface: &mut Interface) {
+        let drivers: Vec<_> = DRIVERS.lock().iter().copied().collect();
+
+        for driver in drivers {
+            if (driver.probe)(self.clone(), interface).is_err() {
+                continue;
+            }
+
+            match (driver.attach)(self.clone(), interface) {
+                Ok(()) => {
+                    interface.driver = Some(driver);
+                    log!(
+                        "Interface {} attached to driver '{}'",
+                        { interface.desc.interface_number },
+                        driver.name,
+                    );
+                    return;
+                }
+                Err(e) => warn!(
+                    "Driver \"{}\" failed to attach interface {}: {:?}",
+                    driver.name,
+                    { interface.desc.interface_number },
+                    e,
+                ),
+            }
+        }
+
+        log!("No driver found for interface {}", {
+            interface.desc.interface_number
+        });
+    }
+
+    pub async fn submit(&self, mut transfer: Transfer<'_, '_>) -> UsbResult<usize> {
+        let controller = self.parent_hub.controller.as_ref();
+        controller
+            .ops
+            .transfer(controller, self, &mut transfer)
+            .await
+    }
+
+    /// Returns the number of bytes transferred.
+    pub async fn control_transfer(&self, setup: spec::Setup, data: &mut [u8]) -> UsbResult<usize> {
+        let to_host = setup.request_type & spec::USB_REQUEST_DIR_TO_HOST as u8 != 0;
+        let flags = if to_host {
+            TransferFlags::ToHost
+        } else {
+            TransferFlags::ToDevice
+        };
+
+        // SAFETY: `data` outlives the iterator below.
+        let iovec = unsafe { IovecIter::iovec_from_mut_ptr(data) };
+        let iovecs = [iovec];
+        let mut iter = unsafe { IovecIter::new_kernel(&iovecs) };
+
+        let mut transfer = Transfer {
+            endpoint: None,
+            flags,
+            typ: TransferType::Control,
+            device: Some(self),
+            setup: Some(setup),
+            data: &mut iter,
+        };
+
+        let controller = self.parent_hub.controller.as_ref();
+        controller
+            .ops
+            .transfer(controller, self, &mut transfer)
+            .await
+    }
+
+    pub async fn interrupt_transfer(
+        &self,
+        endpoint: &Endpoint,
+        buf: &mut [u8],
+    ) -> UsbResult<usize> {
+        // SAFETY: `buf` outlives the iterator below.
+        let iovec = unsafe { IovecIter::iovec_from_mut_ptr(buf) };
+        let iovecs = [iovec];
+        let mut iter = unsafe { IovecIter::new_kernel(&iovecs) };
+
+        let mut transfer = Transfer {
+            endpoint: Some(endpoint),
+            flags: TransferFlags::ToHost,
+            typ: TransferType::Interrupt,
+            device: Some(self),
+            setup: None,
+            data: &mut iter,
+        };
+
+        let controller = self.parent_hub.controller.as_ref();
+        controller
+            .ops
+            .transfer(controller, self, &mut transfer)
+            .await
+    }
+
+    pub async fn get_descriptor(
+        &self,
+        desc_type: u8,
+        index: u8,
+        buf: &mut [u8],
+    ) -> UsbResult<usize> {
+        let setup = spec::Setup {
+            request_type: spec::USB_REQUEST_DIR_TO_HOST as u8,
+            request: spec::USB_REQUEST_GET_DESCRIPTOR as u8,
+            value: ((desc_type as u16) << 8) | index as u16,
+            index: 0,
+            length: buf.len() as u16,
+        };
+
+        self.control_transfer(setup, buf).await
+    }
+
+    pub async fn get_class_descriptor(
+        &self,
+        desc_type: u8,
+        index: u8,
+        buf: &mut [u8],
+    ) -> UsbResult<usize> {
+        let setup = spec::Setup {
+            request_type: (spec::USB_REQUEST_DIR_TO_HOST | spec::USB_REQUEST_CLASS) as u8,
+            request: spec::USB_REQUEST_GET_DESCRIPTOR as u8,
+            value: ((desc_type as u16) << 8) | index as u16,
+            index: 0,
+            length: buf.len() as u16,
+        };
+
+        self.control_transfer(setup, buf).await
+    }
+
+    pub async fn set_configuration(&self, configuration: u8) -> UsbResult<()> {
+        let setup = spec::Setup {
+            request_type: spec::USB_REQUEST_DIR_TO_DEVICE as u8,
+            request: spec::USB_REQUEST_SET_CONFIGURATION as u8,
+            value: configuration as u16,
+            index: 0,
+            length: 0,
+        };
+
+        self.control_transfer(setup, &mut []).await.map(|_| ())
+    }
 }
