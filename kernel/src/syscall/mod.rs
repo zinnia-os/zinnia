@@ -301,7 +301,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::SETPRIORITY => sys_unimpl!("setpriority", Err(Errno::ENOSYS)),
         numbers::SCHED_GETPARAM => sys_unimpl!("sched_getparam", Err(Errno::ENOSYS)),
         numbers::SCHED_SETPARAM => sys_unimpl!("sched_setparam", Err(Errno::ENOSYS)),
-        numbers::GETENTROPY => sys_unimpl!("getentropy", Ok(0)),
+        numbers::GETENTROPY => system::getentropy,
 
         // Modules
         numbers::MODULE_INSERT => module::module_insert,
