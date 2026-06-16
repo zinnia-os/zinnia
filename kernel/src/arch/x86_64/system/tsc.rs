@@ -6,7 +6,10 @@ use crate::{
     },
 };
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -42,9 +45,10 @@ impl ClockSource for TscClock {
         return 255;
     }
 
-    fn get_elapsed_ns(&self) -> usize {
+    fn elapsed(&self) -> Duration {
         let cycles = asm::rdtsc() - TSC_BASE_CYCLES.load(Ordering::Relaxed);
-        return cycles_to_ns(cycles, TSC_FREQUENCY.load(Ordering::Relaxed));
+        let ns = cycles_to_ns(cycles, TSC_FREQUENCY.load(Ordering::Relaxed));
+        return Duration::from_nanos(ns as u64);
     }
 }
 
@@ -74,7 +78,7 @@ fn TSC_STAGE() {
 
         // Wait for 10ms.
         let t1 = asm::rdtsc();
-        clock::block_ns(10_000_000).unwrap();
+        clock::block(Duration::from_millis(10)).unwrap();
         let t2 = asm::rdtsc();
 
         // We want the frequency in Hz.

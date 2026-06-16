@@ -17,7 +17,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::fmt::Write;
+use core::{fmt::Write, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FutexKey {
@@ -64,30 +64,17 @@ pub fn setuname(addr: VirtAddr) -> EResult<usize> {
 pub fn clock_get(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
     let mut tp = UserPtr::new(tp);
 
-    const NS_TO_SEC: usize = 1000 * 1000 * 1000;
-
-    let ts = match clockid as usize {
+    let duration = match clockid as usize {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
             // Wall-clock time (UTC) since the Unix epoch.
-            let realtime = clock::realtime_ns().unwrap_or(0);
-            let secs = realtime.div_euclid(NS_TO_SEC as i64);
-            let nsecs = realtime.rem_euclid(NS_TO_SEC as i64);
-            timespec {
-                tv_sec: secs as _,
-                tv_nsec: nsecs as _,
-            }
+            clock::realtime().unwrap_or(Duration::ZERO)
         }
-        _ => {
-            // Default: monotonic time since boot.
-            let elapsed = clock::get_elapsed();
-            timespec {
-                tv_sec: (elapsed / NS_TO_SEC) as _,
-                tv_nsec: (elapsed % NS_TO_SEC) as _,
-            }
-        }
+        // Default: monotonic time since boot.
+        _ => clock::get_elapsed(),
     };
 
-    tp.write(ts).ok_or(Errno::EINVAL)?;
+    tp.write(timespec::from_duration(duration))
+        .ok_or(Errno::EINVAL)?;
 
     Ok(0)
 }
@@ -252,8 +239,8 @@ pub fn syslog(level: usize, ptr: VirtAddr, len: usize) -> EResult<usize> {
     let mut writer = crate::log::GLOBAL_LOGGERS.lock();
     _ = writer.write_fmt(format_args!(
         "[{:5}.{:06}] \x1b[0m",
-        current_time / 1_000_000_000,
-        (current_time / 1000) % 1_000_000,
+        current_time.as_secs(),
+        current_time.subsec_micros(),
     ));
     _ = writer.write_fmt(format_args!(
         "[{}] {}",
@@ -318,22 +305,14 @@ pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
     let mut remainder = UserPtr::<timespec>::new(remainder);
 
     let ts: timespec = request.read().ok_or(Errno::EFAULT)?;
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
-        return Err(Errno::EINVAL);
-    }
+    let total = ts.to_duration()?;
 
-    // Convert request to a single nanosecond count, saturating on overflow.
-    let total_ns = (ts.tv_sec as usize)
-        .checked_mul(1_000_000_000)
-        .and_then(|s| s.checked_add(ts.tv_nsec as usize))
-        .unwrap_or(usize::MAX);
-
-    if total_ns == 0 {
+    if total.is_zero() {
         return Ok(0);
     }
 
     let now = clock::get_elapsed();
-    let deadline = now.saturating_add(total_ns);
+    let deadline = now.saturating_add(total);
     let guard = clock::timeout_at(deadline);
 
     let task = Scheduler::get_current();
@@ -343,11 +322,7 @@ pub fn sleep(request: VirtAddr, remainder: VirtAddr) -> EResult<usize> {
             if !remainder.addr().is_null() {
                 let now = clock::get_elapsed();
                 let left = deadline.saturating_sub(now);
-                let rem = timespec {
-                    tv_sec: (left / 1_000_000_000) as isize,
-                    tv_nsec: (left % 1_000_000_000) as isize,
-                };
-                let _ = remainder.write(rem);
+                let _ = remainder.write(timespec::from_duration(left));
             }
             return Err(Errno::EINTR);
         }
@@ -423,7 +398,7 @@ fn find_futex_queue(pointer: VirtAddr) -> Option<Arc<FutexQueue>> {
     found
 }
 
-fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<usize>> {
+fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<Duration>> {
     if timeout.is_null() {
         return Ok(None);
     }
@@ -431,26 +406,12 @@ fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<usize>> {
     let timeout = UserPtr::<timespec>::new(timeout)
         .read()
         .ok_or(Errno::EFAULT)?;
-    let duration = timespec_to_ns(timeout)?;
+    let duration = timeout.to_duration()?;
     let deadline = clock::get_elapsed()
         .checked_add(duration)
         .ok_or(Errno::EINVAL)?;
 
     Ok(Some(deadline))
-}
-
-fn timespec_to_ns(value: timespec) -> EResult<usize> {
-    if value.tv_sec < 0 || value.tv_nsec < 0 || value.tv_nsec >= 1_000_000_000 {
-        return Err(Errno::EINVAL);
-    }
-
-    let seconds = (value.tv_sec as usize)
-        .checked_mul(1_000_000_000)
-        .ok_or(Errno::EINVAL)?;
-
-    seconds
-        .checked_add(value.tv_nsec as usize)
-        .ok_or(Errno::EINVAL)
 }
 
 #[wrap_syscall]

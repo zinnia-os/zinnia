@@ -1,3 +1,6 @@
+use crate::posix::errno::{EResult, Errno};
+use core::time::Duration;
+
 pub type time_t = isize;
 pub type suseconds_t = isize;
 
@@ -8,11 +11,48 @@ pub struct timespec {
     pub tv_nsec: isize,
 }
 
+impl timespec {
+    /// Converts a [`timespec`] to a [`Duration`].
+    pub fn to_duration(self) -> EResult<Duration> {
+        if self.tv_sec < 0 || self.tv_nsec < 0 || self.tv_nsec >= 1_000_000_000 {
+            return Err(Errno::EINVAL);
+        }
+        Ok(Duration::new(self.tv_sec as u64, self.tv_nsec as u32))
+    }
+
+    pub fn from_duration(value: Duration) -> Self {
+        timespec {
+            tv_sec: value.as_secs() as time_t,
+            tv_nsec: value.subsec_nanos() as isize,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct timeval {
     pub tv_sec: time_t,
     pub tv_usec: suseconds_t,
+}
+
+impl timeval {
+    /// Converts a [`timeval`] to a [`Duration`].
+    pub fn to_duration(self) -> EResult<Duration> {
+        if self.tv_sec < 0 || self.tv_usec < 0 || self.tv_usec >= 1_000_000 {
+            return Err(Errno::EINVAL);
+        }
+        Ok(Duration::new(
+            self.tv_sec as u64,
+            self.tv_usec as u32 * 1_000,
+        ))
+    }
+
+    pub fn from_duration(value: Duration) -> Self {
+        timeval {
+            tv_sec: value.as_secs() as time_t,
+            tv_usec: (value.subsec_micros()) as suseconds_t,
+        }
+    }
 }
 
 #[repr(C)]

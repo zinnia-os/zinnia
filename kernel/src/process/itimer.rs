@@ -1,50 +1,50 @@
-use alloc::sync::Weak;
-
 use crate::{
     posix::errno::{EResult, Errno},
     process::{PROCESS_TABLE, signal},
     uapi,
 };
+use alloc::sync::Weak;
 use core::ops::Bound;
+use core::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IntervalTimerState {
-    interval_ns: usize,
-    next_deadline_ns: Option<usize>,
+    interval: Duration,
+    next_deadline: Option<Duration>,
 }
 
 impl IntervalTimerState {
-    pub(super) fn snapshot(&self, now: usize) -> uapi::time::itimerval {
+    pub(super) fn snapshot(&self, now: Duration) -> uapi::time::itimerval {
         uapi::time::itimerval {
-            it_interval: ns_to_timeval(self.interval_ns),
-            it_value: ns_to_timeval(
-                self.next_deadline_ns
+            it_interval: uapi::time::timeval::from_duration(self.interval),
+            it_value: uapi::time::timeval::from_duration(
+                self.next_deadline
                     .map(|deadline| deadline.saturating_sub(now))
-                    .unwrap_or(0),
+                    .unwrap_or(Duration::ZERO),
             ),
         }
     }
 
     pub(super) fn replace(
         &mut self,
-        now: usize,
+        now: Duration,
         value: uapi::time::itimerval,
     ) -> EResult<uapi::time::itimerval> {
         let old = self.snapshot(now);
-        self.interval_ns = timeval_to_ns(value.it_interval)?;
+        self.interval = value.it_interval.to_duration()?;
 
-        let initial_ns = timeval_to_ns(value.it_value)?;
-        self.next_deadline_ns = if initial_ns == 0 {
+        let initial = value.it_value.to_duration()?;
+        self.next_deadline = if initial.is_zero() {
             None
         } else {
-            Some(now.checked_add(initial_ns).ok_or(Errno::EINVAL)?)
+            Some(now.checked_add(initial).ok_or(Errno::EINVAL)?)
         };
 
         Ok(old)
     }
 }
 
-pub fn poll_interval_timers(now: usize) {
+pub fn poll_interval_timers(now: Duration) {
     let mut last_pid = None;
 
     loop {
@@ -65,23 +65,23 @@ pub fn poll_interval_timers(now: usize) {
     }
 }
 
-fn poll_process_timer(now: usize, proc: &alloc::sync::Arc<crate::process::Process>) {
+fn poll_process_timer(now: Duration, proc: &alloc::sync::Arc<crate::process::Process>) {
     let should_signal = {
         let mut timer = proc.real_timer.lock();
-        match timer.next_deadline_ns {
+        match timer.next_deadline {
             Some(deadline) if deadline <= now => {
-                if timer.interval_ns == 0 {
-                    timer.next_deadline_ns = None;
+                if timer.interval.is_zero() {
+                    timer.next_deadline = None;
                 } else {
                     let mut next_deadline = deadline;
                     loop {
-                        let Some(candidate) = next_deadline.checked_add(timer.interval_ns) else {
-                            timer.next_deadline_ns = None;
+                        let Some(candidate) = next_deadline.checked_add(timer.interval) else {
+                            timer.next_deadline = None;
                             break;
                         };
 
                         if candidate > now {
-                            timer.next_deadline_ns = Some(candidate);
+                            timer.next_deadline = Some(candidate);
                             break;
                         }
 
@@ -106,27 +106,5 @@ fn poll_process_timer(now: usize, proc: &alloc::sync::Arc<crate::process::Proces
 
     if let Some(thread) = thread {
         signal::send_signal_to_thread(&thread, signal::Signal::SigAlrm);
-    }
-}
-
-fn timeval_to_ns(value: uapi::time::timeval) -> EResult<usize> {
-    if value.tv_sec < 0 || value.tv_usec < 0 || value.tv_usec >= 1_000_000 {
-        return Err(Errno::EINVAL);
-    }
-
-    let seconds = (value.tv_sec as usize)
-        .checked_mul(1_000_000_000)
-        .ok_or(Errno::EINVAL)?;
-    let micros = (value.tv_usec as usize)
-        .checked_mul(1_000)
-        .ok_or(Errno::EINVAL)?;
-
-    seconds.checked_add(micros).ok_or(Errno::EINVAL)
-}
-
-const fn ns_to_timeval(value: usize) -> uapi::time::timeval {
-    uapi::time::timeval {
-        tv_sec: (value / 1_000_000_000) as _,
-        tv_usec: ((value % 1_000_000_000) / 1_000) as _,
     }
 }

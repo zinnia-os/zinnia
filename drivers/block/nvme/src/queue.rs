@@ -6,7 +6,9 @@ use crate::{
 use core::hint::spin_loop;
 use zinnia::{
     alloc::sync::Arc,
-    clock, log,
+    clock,
+    core::time::Duration,
+    log,
     memory::{
         AllocFlags, KernelAlloc, MmioView, PageAllocator, PhysAddr, Register, UnsafeMemoryView,
         VmCacheType,
@@ -16,7 +18,7 @@ use zinnia::{
 const DOORBELL_OFFSET: usize = 0x1000;
 const TAIL_DOORBELL: Register<u32> = Register::new(0);
 const HEAD_DOORBELL: Register<u32> = Register::new(4);
-const COMPLETION_TIMEOUT_NS: usize = 30_000_000_000;
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Queue {
     queue_id: usize,
@@ -152,7 +154,7 @@ impl Queue {
 
         // Wait until the phase for this entry has changed.
         let mut dw3;
-        let deadline = clock::get_elapsed().saturating_add(COMPLETION_TIMEOUT_NS);
+        let deadline = clock::get_elapsed().saturating_add(COMPLETION_TIMEOUT);
         loop {
             dw3 = unsafe {
                 view.read_reg(spec::cq_entry::DW3)

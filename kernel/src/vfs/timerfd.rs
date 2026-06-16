@@ -14,17 +14,14 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-
-/// Maximum number of nanoseconds in a [`timespec`] field, used for validation.
-const NS_PER_SEC: usize = 1_000_000_000;
+use core::time::Duration;
 
 #[derive(Default)]
 struct TimerfdState {
-    /// Reload interval in nanoseconds. Zero indicates a one-shot timer.
-    interval_ns: usize,
-    /// Absolute monotonic deadline (nanoseconds since boot) of the next
-    /// expiration, or `None` when the timer is disarmed.
-    next_deadline_ns: Option<usize>,
+    /// Reload interval. Zero indicates a one-shot timer.
+    interval: Duration,
+    /// Absolute monotonic deadline of the next expiration, or [`None`] when the timer is disarmed.
+    next_deadline: Option<Duration>,
     /// Number of expirations that have not yet been read by userspace.
     expirations: u64,
 }
@@ -43,41 +40,41 @@ impl TimerfdFile {
     }
 
     /// Read the current `itimerspec` view of the timer.
-    fn snapshot(&self, now: usize) -> itimerspec {
+    fn snapshot(&self, now: Duration) -> itimerspec {
         let state = self.state.lock();
         itimerspec {
-            it_interval: ns_to_timespec(state.interval_ns),
-            it_value: ns_to_timespec(
+            it_interval: timespec::from_duration(state.interval),
+            it_value: timespec::from_duration(
                 state
-                    .next_deadline_ns
+                    .next_deadline
                     .map(|deadline| deadline.saturating_sub(now))
-                    .unwrap_or(0),
+                    .unwrap_or(Duration::ZERO),
             ),
         }
     }
 
-    /// Configure the timer. `initial_ns` is the absolute deadline (since
-    /// boot) of the first expiration. `Some(0)` disarms the timer.
+    /// Configure the timer. `initial_deadline` is the absolute deadline (since
+    /// boot) of the first expiration. `None` disarms the timer.
     /// Returns the previous itimerspec.
     pub fn settime(
         self: &Arc<Self>,
-        now: usize,
-        initial_deadline_ns: Option<usize>,
-        interval_ns: usize,
+        now: Duration,
+        initial_deadline: Option<Duration>,
+        interval: Duration,
     ) -> itimerspec {
         let old = self.snapshot(now);
         {
             let mut state = self.state.lock();
-            state.interval_ns = interval_ns;
-            state.next_deadline_ns = initial_deadline_ns;
+            state.interval = interval;
+            state.next_deadline = initial_deadline;
             // Setting the timer (whether arming or disarming) clears any
             // pending expirations to mirror Linux semantics.
             state.expirations = 0;
         }
         // (Re)register on the global active list whenever the timer is
         // armed. Disarming leaves the entry; the tick handler will simply
-        // see `next_deadline_ns == None`.
-        if initial_deadline_ns.is_some() {
+        // see `next_deadline == None`.
+        if initial_deadline.is_some() {
             register(self);
         }
         // Wake any pollers; readers waiting on a previously-armed timer
@@ -86,16 +83,16 @@ impl TimerfdFile {
         old
     }
 
-    pub fn gettime(&self, now: usize) -> itimerspec {
+    pub fn gettime(&self, now: Duration) -> itimerspec {
         self.snapshot(now)
     }
 
     /// Called from the timer tick to advance the timer. Returns true if any
     /// expiration occurred (in which case waiters were woken).
-    fn advance(&self, now: usize) -> bool {
+    fn advance(&self, now: Duration) -> bool {
         {
             let mut state = self.state.lock();
-            let Some(deadline) = state.next_deadline_ns else {
+            let Some(deadline) = state.next_deadline else {
                 return false;
             };
             if now < deadline {
@@ -104,16 +101,19 @@ impl TimerfdFile {
 
             // Compute the number of expirations since `deadline` and the
             // next deadline (if periodic).
-            if state.interval_ns == 0 {
+            if state.interval.is_zero() {
                 state.expirations = state.expirations.saturating_add(1);
-                state.next_deadline_ns = None;
+                state.next_deadline = None;
             } else {
                 let elapsed = now - deadline;
-                let extra = (elapsed / state.interval_ns) as u64;
+                let extra = (elapsed.as_nanos() / state.interval.as_nanos()) as u64;
                 let count = 1u64.saturating_add(extra);
                 state.expirations = state.expirations.saturating_add(count);
-                let next = deadline + state.interval_ns * (count as usize);
-                state.next_deadline_ns = Some(next);
+                let next = deadline
+                    + state
+                        .interval
+                        .saturating_mul(count.min(u32::MAX as u64) as u32);
+                state.next_deadline = Some(next);
             }
         }
         self.event.wake_all();
@@ -208,7 +208,7 @@ fn register(timer: &Arc<TimerfdFile>) {
 /// Called from the periodic clock tick. Advances all registered timerfds and
 /// wakes any waiters whose deadlines have elapsed. Drops registrations whose
 /// owning files have been closed.
-pub fn poll_timerfds(now: usize) {
+pub fn poll_timerfds(now: Duration) {
     let snapshot: Vec<Arc<TimerfdFile>> = {
         let mut list = ACTIVE_TIMERS.lock();
         list.retain(|w| w.strong_count() > 0);
@@ -217,24 +217,5 @@ pub fn poll_timerfds(now: usize) {
 
     for timer in snapshot {
         timer.advance(now);
-    }
-}
-
-pub fn timespec_to_ns(value: timespec) -> EResult<usize> {
-    if value.tv_sec < 0 || value.tv_nsec < 0 || (value.tv_nsec as usize) >= NS_PER_SEC {
-        return Err(Errno::EINVAL);
-    }
-    let seconds = (value.tv_sec as usize)
-        .checked_mul(NS_PER_SEC)
-        .ok_or(Errno::EINVAL)?;
-    seconds
-        .checked_add(value.tv_nsec as usize)
-        .ok_or(Errno::EINVAL)
-}
-
-const fn ns_to_timespec(value: usize) -> timespec {
-    timespec {
-        tv_sec: (value / NS_PER_SEC) as _,
-        tv_nsec: (value % NS_PER_SEC) as _,
     }
 }

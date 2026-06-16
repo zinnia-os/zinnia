@@ -3,6 +3,7 @@ use crate::{
     memory::{UnsafeMemoryView, VmCacheType, view::MmioView},
 };
 use alloc::boxed::Box;
+use core::time::Duration;
 use uacpi_sys::{
     UACPI_STATUS_OK, acpi_hpet, uacpi_table, uacpi_table_find_by_signature, uacpi_table_unref,
 };
@@ -33,9 +34,10 @@ impl ClockSource for Hpet {
         unsafe { self.regs.write_reg(regs::MAIN_COUNTER, 0_u64).unwrap() };
     }
 
-    fn get_elapsed_ns(&self) -> usize {
+    fn elapsed(&self) -> Duration {
         let counter = unsafe { self.regs.read_reg(regs::MAIN_COUNTER).unwrap().value() };
-        return (counter * self.period as u64 / 1_000_000) as usize;
+        // `period` is in femtoseconds; dividing by 1e6 yields nanoseconds.
+        return Duration::from_nanos(counter * self.period as u64 / 1_000_000);
     }
 }
 

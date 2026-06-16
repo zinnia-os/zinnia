@@ -1,6 +1,8 @@
 use crate::regs::*;
 use zinnia::{
-    clock, log,
+    clock,
+    core::time::Duration,
+    log,
     memory::{BitValue, MmioView, Register, UnsafeMemoryView},
     posix::errno::{EResult, Errno},
     warn,
@@ -32,7 +34,8 @@ impl IgcController {
     }
 
     pub fn poll(&self, timeout_us: usize, mut cond: impl FnMut() -> bool) -> bool {
-        let deadline = clock::get_elapsed().saturating_add(timeout_us * 1_000);
+        let deadline =
+            clock::get_elapsed().saturating_add(Duration::from_micros(timeout_us as u64));
         loop {
             if cond() {
                 return true;
@@ -51,7 +54,7 @@ impl IgcController {
         self.write(RCTL, 0);
         self.write(TCTL, BitValue::new(0u32).write_field(tctl::PSP, 1).value());
         self.wrfl();
-        _ = clock::block_ns(10_000_000);
+        _ = clock::block(Duration::from_millis(10));
 
         self.update(CTRL, |v| v.write_field(ctrl::GIO_MASTER_DISABLE, 1));
         if !self.poll(800_000, || {
@@ -64,7 +67,7 @@ impl IgcController {
         }
 
         self.update(CTRL, |v| v.write_field(ctrl::RST, 1));
-        _ = clock::block_ns(1_000_000);
+        _ = clock::block(Duration::from_millis(1));
 
         if !self.poll(20_000, || {
             self.read(EECD).read_field(eecd::AUTO_RD).value() != 0
@@ -152,7 +155,7 @@ impl IgcController {
             }
 
             self.put_hw_semaphore();
-            _ = clock::block_ns(5_000_000);
+            _ = clock::block(Duration::from_millis(5));
         }
         Err(Errno::ETIMEDOUT)
     }
@@ -187,7 +190,7 @@ impl IgcController {
     fn mdic_wait(&self) -> EResult<u16> {
         let mut last = BitValue::new(0u32);
         if !self.poll(100_000, || {
-            _ = clock::block_ns(50_000);
+            _ = clock::block(Duration::from_micros(50));
             last = self.read(MDIC);
             last.read_field(mdic::READY).value() != 0
         }) {

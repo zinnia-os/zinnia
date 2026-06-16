@@ -27,7 +27,7 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 use bytemuck::{Pod, Zeroable};
-use core::{arch::global_asm, mem::offset_of, sync::atomic::Ordering};
+use core::{arch::global_asm, mem::offset_of, sync::atomic::Ordering, time::Duration};
 use uacpi_sys::{UACPI_STATUS_OK, acpi_entry_hdr, acpi_madt_lapic, acpi_madt_x2apic, uacpi_table};
 
 unsafe extern "C" {
@@ -306,7 +306,7 @@ fn start_ap(temp_cr3: u32, id: u32) {
         Level::Assert,
         TriggerMode::Edge,
     );
-    clock::block_ns(10_000_000).unwrap();
+    clock::block(Duration::from_millis(10)).unwrap();
 
     lapic.send_ipi(
         IpiTarget::Specific(id),
@@ -317,7 +317,7 @@ fn start_ap(temp_cr3: u32, id: u32) {
         Level::Assert,
         TriggerMode::Edge,
     );
-    clock::block_ns(10_000_000).unwrap();
+    clock::block(Duration::from_millis(10)).unwrap();
 
     let booted = unsafe {
         mem.as_hhdm::<u8>()
@@ -326,7 +326,7 @@ fn start_ap(temp_cr3: u32, id: u32) {
     };
 
     while unsafe { booted.read_volatile() } == 0 {
-        clock::block_ns(1_000_000).unwrap();
+        clock::block(Duration::from_millis(1)).unwrap();
     }
 
     unsafe {

@@ -41,6 +41,7 @@ use alloc::{
 use core::{
     mem,
     sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    time::Duration,
 };
 
 #[derive(Debug)]
@@ -117,13 +118,13 @@ impl Process {
         *self.name.lock() = name;
     }
 
-    pub fn get_real_timer(&self, now: usize) -> uapi::time::itimerval {
+    pub fn get_real_timer(&self, now: Duration) -> uapi::time::itimerval {
         self.real_timer.lock().snapshot(now)
     }
 
     pub fn set_real_timer(
         &self,
-        now: usize,
+        now: Duration,
         value: uapi::time::itimerval,
     ) -> EResult<uapi::time::itimerval> {
         self.real_timer.lock().replace(now, value)

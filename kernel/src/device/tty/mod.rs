@@ -17,7 +17,10 @@ use crate::{
     },
 };
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    time::Duration,
+};
 
 pub trait TtyDriver: Send + Sync {
     fn write_output(&self, data: &[u8]) -> EResult<()>;
@@ -495,7 +498,7 @@ impl FileOps for TtyFileOps {
             }
         } else if vmin == 0 && vtime > 0 {
             // Raw, MIN=0 TIME>0: wait for 1 char or timeout (VTIME × 100ms).
-            let deadline = clock::get_elapsed() + vtime * 100_000_000;
+            let deadline = clock::get_elapsed() + Duration::from_millis(vtime as u64 * 100);
             loop {
                 let guard = self.tty.rd_event.guard();
                 let mut ldisc = self.tty.ldisc.lock();
@@ -525,7 +528,7 @@ impl FileOps for TtyFileOps {
             // bytes or timer expires after each byte.
             let target = core::cmp::min(vmin, buffer.len());
             let mut bytes_read = 0usize;
-            let mut deadline: Option<usize> = None;
+            let mut deadline: Option<Duration> = None;
 
             loop {
                 let guard = self.tty.rd_event.guard();
@@ -544,7 +547,8 @@ impl FileOps for TtyFileOps {
                     }
 
                     // (Re)start inter-character timer.
-                    deadline = Some(clock::get_elapsed() + vtime * 100_000_000);
+                    deadline =
+                        Some(clock::get_elapsed() + Duration::from_millis(vtime as u64 * 100));
                 }
 
                 if let Some(dl) = deadline {

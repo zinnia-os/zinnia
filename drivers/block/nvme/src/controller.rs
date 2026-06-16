@@ -13,7 +13,7 @@ use zinnia::{
         vec::Vec,
     },
     clock,
-    core::sync::atomic::Ordering,
+    core::{sync::atomic::Ordering, time::Duration},
     error, log,
     memory::{
         AllocFlags, BitValue, Field, KernelAlloc, MmioView, PageAllocator, Register,
@@ -299,9 +299,11 @@ impl Controller {
     /// Sets the CC.EN flag.
     fn set_status(&self, enable: bool) -> Result<(), NvmeError> {
         let cap = unsafe { self.regs.read_reg(spec::regs::CAP) }.ok_or(NvmeError::MmioFailed)?;
-        let timeout_ns =
-            (cap.read_field(spec::regs::cap::TO).value() as usize).max(1) * 500_000_000;
-        let deadline = clock::get_elapsed().saturating_add(timeout_ns);
+        // CAP.TO is in 500ms units.
+        let timeout = Duration::from_millis(
+            (cap.read_field(spec::regs::cap::TO).value() as u64).max(1) * 500,
+        );
+        let deadline = clock::get_elapsed().saturating_add(timeout);
 
         unsafe {
             let cc = self

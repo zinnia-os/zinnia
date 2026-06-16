@@ -93,15 +93,8 @@ impl EventDevice {
 
     /// Enqueue an input event with the current timestamp and wake readers.
     pub fn report_event(&self, typ: u16, code: u16, value: i32) {
-        let ns = clock::get_elapsed();
-        let secs = ns / 1_000_000_000;
-        let usecs = (ns % 1_000_000_000) / 1_000;
-
         let ev = InputEvent {
-            time: uapi::time::timeval {
-                tv_sec: secs as _,
-                tv_usec: usecs as _,
-            },
+            time: uapi::time::timeval::from_duration(clock::get_elapsed()),
             typ,
             code,
             value,

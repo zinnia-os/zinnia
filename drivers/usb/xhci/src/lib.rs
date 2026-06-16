@@ -3,6 +3,7 @@
 use zinnia::{
     alloc::{boxed::Box, format, sync::Arc, vec::Vec},
     arch, clock,
+    core::time::Duration,
     device::{
         pci::{self, DeviceView, PciBar, PciVariant},
         usb::{self, hub::Hub},
@@ -31,8 +32,8 @@ use spec::{TrbType, caps, doorbell, erst_entry, interrupter, opregs, port, runti
 
 zinnia::module!("xHCI USB Controller", "Marvin Friedrich", main);
 
-const HANDSHAKE_TIMEOUT_NS: usize = 1_000_000_000;
-const HANDOFF_TIMEOUT_NS: usize = 5_000_000_000;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 static CONTROLLERS: SpinMutex<Vec<Arc<XhciController>>> = SpinMutex::new(Vec::new());
 
 pub fn main(_cmdline: &str) {
@@ -187,7 +188,7 @@ fn handoff(mmio: &MmioView, xecp_dwords: u16) -> EResult<()> {
                 // Set the OS Owned Semaphore (bit 24).
                 unsafe { mmio.write_reg(reg, dword | (1 << 24)) };
 
-                let deadline = clock::get_elapsed().saturating_add(HANDOFF_TIMEOUT_NS);
+                let deadline = clock::get_elapsed().saturating_add(HANDOFF_TIMEOUT);
                 loop {
                     let cur = unsafe { mmio.read_reg(reg) }.ok_or(Errno::EIO)?.value();
                     if (cur >> 16) & 0x1 == 0 {
@@ -197,7 +198,7 @@ fn handoff(mmio: &MmioView, xecp_dwords: u16) -> EResult<()> {
                         error!("BIOS ownership handoff timeout");
                         return Err(Errno::ETIMEDOUT);
                     }
-                    let _ = clock::block_ns(10_000_000);
+                    let _ = clock::block(Duration::from_millis(10));
                 }
             }
         }
@@ -359,7 +360,7 @@ impl XhciController {
             .write_field(opregs::usbcmd::RS, 0);
         self.op_wr(opregs::USBCMD, cmd.value());
 
-        if !clock::poll_until(HANDSHAKE_TIMEOUT_NS, || {
+        if !clock::poll_until(HANDSHAKE_TIMEOUT, || {
             self.op_rd(opregs::USBSTS)
                 .read_field(opregs::usbsts::HCH)
                 .value()
@@ -378,7 +379,7 @@ impl XhciController {
             .write_field(opregs::usbcmd::HCRST, 1);
         self.op_wr(opregs::USBCMD, cmd.value());
 
-        if !clock::poll_until(HANDSHAKE_TIMEOUT_NS, || {
+        if !clock::poll_until(HANDSHAKE_TIMEOUT, || {
             let cmd = self.op_rd(opregs::USBCMD);
             let sts = self.op_rd(opregs::USBSTS);
             cmd.read_field(opregs::usbcmd::HCRST).value() == 0
@@ -428,7 +429,7 @@ impl XhciController {
             .write_field(opregs::usbcmd::INTE, 1);
         self.op_wr(opregs::USBCMD, cmd.value());
 
-        if !clock::poll_until(HANDSHAKE_TIMEOUT_NS, || {
+        if !clock::poll_until(HANDSHAKE_TIMEOUT, || {
             let sts = self.op_rd(opregs::USBSTS);
             sts.read_field(opregs::usbsts::HCH).value() == 0
                 && sts.read_field(opregs::usbsts::CNR).value() == 0
@@ -460,7 +461,7 @@ impl XhciController {
         }
 
         if debounce_wait {
-            let _ = clock::block_ns(100_000_000); // 100ms debounce
+            let _ = clock::block(Duration::from_millis(100)); // 100ms debounce
         }
 
         for i in 0..self.port_count as usize {

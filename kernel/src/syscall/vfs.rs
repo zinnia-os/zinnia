@@ -34,12 +34,15 @@ use crate::{
         inode::{INode, Mode, NodeOps},
         pipe::PipeFile,
         signalfd::SignalfdFile,
-        timerfd::{self, TimerfdFile},
+        timerfd::TimerfdFile,
     },
     wrap_syscall,
 };
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 #[wrap_syscall]
 pub fn pread(fd: i32, base: VirtAddr, len: usize, offset: usize) -> EResult<isize> {
@@ -651,20 +654,16 @@ pub fn ppoll(
     fds_ptr.read_slice(&mut fds).ok_or(Errno::EFAULT)?;
 
     // Parse the timeout.
-    let timeout_ns: Option<usize> = if timeout_ptr.is_null() {
+    let timeout: Option<Duration> = if timeout_ptr.is_null() {
         None
     } else {
         let ts: UserPtr<crate::uapi::time::timespec> = UserPtr::new(timeout_ptr);
-        let timeout = ts.read().ok_or(Errno::EFAULT)?;
-        if timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1_000_000_000 {
-            return Err(Errno::EINVAL);
-        }
-        Some((timeout.tv_sec as usize) * 1_000_000_000 + timeout.tv_nsec as usize)
+        Some(ts.read().ok_or(Errno::EFAULT)?.to_duration()?)
     };
-    let is_nonblocking = timeout_ns == Some(0);
-    let deadline = timeout_ns
-        .filter(|&ns| ns > 0)
-        .map(|ns| clock::get_elapsed().saturating_add(ns));
+    let is_nonblocking = timeout == Some(Duration::ZERO);
+    let deadline = timeout
+        .filter(|d| !d.is_zero())
+        .map(|d| clock::get_elapsed().saturating_add(d));
 
     // Temporarily replace the signal mask while waiting.
     if !sigmask_ptr.is_null() {
@@ -1655,7 +1654,8 @@ pub fn epoll_pwait(
 
     let is_nonblocking = timeout_ms == 0;
     let timeout_guard = if timeout_ms > 0 {
-        let deadline = clock::get_elapsed().saturating_add((timeout_ms as usize) * 1_000_000);
+        let deadline =
+            clock::get_elapsed().saturating_add(Duration::from_millis(timeout_ms as u64));
         Some(clock::timeout_at(deadline))
     } else {
         None
@@ -1816,20 +1816,20 @@ pub fn timerfd_settime(
     let timer = Arc::downcast::<TimerfdFile>(file.ops.clone()).map_err(|_| Errno::EINVAL)?;
 
     let new = new_value.read().ok_or(Errno::EFAULT)?;
-    let interval_ns = timerfd::timespec_to_ns(new.it_interval)?;
-    let initial_ns = timerfd::timespec_to_ns(new.it_value)?;
+    let interval = new.it_interval.to_duration()?;
+    let initial = new.it_value.to_duration()?;
 
     let now = clock::get_elapsed();
-    let initial_deadline = if initial_ns == 0 {
+    let initial_deadline = if initial.is_zero() {
         // Disarm.
         None
     } else if flags & TFD_TIMER_ABSTIME != 0 {
-        Some(initial_ns)
+        Some(initial)
     } else {
-        Some(now.checked_add(initial_ns).ok_or(Errno::EINVAL)?)
+        Some(now.checked_add(initial).ok_or(Errno::EINVAL)?)
     };
 
-    let old = timer.settime(now, initial_deadline, interval_ns);
+    let old = timer.settime(now, initial_deadline, interval);
 
     if !old_value.is_null() {
         let mut old_value = old_value;

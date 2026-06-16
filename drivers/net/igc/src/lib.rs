@@ -153,7 +153,8 @@ impl NicDevice for Controller {
         tx.reap();
         if tx.outstanding == RING_SIZE - 1 {
             // Ring full.
-            let deadline = clock::get_elapsed().saturating_add(10_000_000);
+            let deadline =
+                clock::get_elapsed().saturating_add(core::time::Duration::from_millis(10));
             loop {
                 tx.reap();
                 if tx.outstanding < RING_SIZE - 1 {

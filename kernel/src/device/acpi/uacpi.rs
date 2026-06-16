@@ -206,12 +206,12 @@ extern "C" fn uacpi_kernel_free(mem: *mut c_void, size: uacpi_size) {
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_get_nanoseconds_since_boot() -> uacpi_u64 {
-    return clock::get_elapsed() as uacpi_u64;
+    return clock::get_elapsed().as_nanos() as uacpi_u64;
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_stall(usec: uacpi_u8) {
-    clock::block_ns(usec as usize);
+    let _ = clock::block(core::time::Duration::from_micros(usec as u64));
 }
 
 #[unsafe(no_mangle)]

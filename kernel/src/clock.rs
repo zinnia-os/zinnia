@@ -8,6 +8,7 @@ use crate::{
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use core::time::Duration;
 
 #[initgraph::task(name = "generic.clock")]
 pub fn CLOCK_STAGE() {}
@@ -18,11 +19,11 @@ pub trait ClockSource: Send {
     /// A priority of a clock source. A high value equals a high priority.
     fn get_priority(&self) -> u8;
 
-    /// Sets the elapsed nanoseconds to start counting at.
+    /// Resets the elapsed time to start counting from now.
     fn reset(&mut self);
 
-    /// Gets the elapsed nanoseconds since initialization of this timer.
-    fn get_elapsed_ns(&self) -> usize;
+    /// Gets the elapsed time since initialization of this timer.
+    fn elapsed(&self) -> Duration;
 }
 
 #[derive(Debug, PartialEq)]
@@ -37,13 +38,13 @@ pub enum ClockError {
     UnableToSetup,
 }
 
-/// Gets the elapsed nanoseconds since initialization of this timer.
+/// Gets the elapsed time since initialization of this timer.
 #[track_caller]
-pub fn get_elapsed() -> usize {
+pub fn get_elapsed() -> Duration {
     let guard = CLOCK.lock();
     match &guard.current {
-        Some(x) => x.get_elapsed_ns() + guard.counter_base,
-        None => 0,
+        Some(x) => x.elapsed() + guard.counter_base,
+        None => Duration::ZERO,
     }
 }
 
@@ -61,8 +62,8 @@ pub fn switch(mut new_source: Box<dyn ClockSource>) -> Result<(), ClockError> {
 
         // Save the current counter without recursively taking CLOCK.
         let elapsed = match &clock.current {
-            Some(current) => current.get_elapsed_ns() + clock.counter_base,
-            None => 0,
+            Some(current) => current.elapsed() + clock.counter_base,
+            None => Duration::ZERO,
         };
 
         clock.counter_base = elapsed;
@@ -81,7 +82,7 @@ pub fn has_clock() -> bool {
 
 struct TimeoutWaiter {
     task: Arc<Task>,
-    deadline: usize,
+    deadline: Duration,
     active: AtomicBool,
     fired: AtomicBool,
 }
@@ -102,7 +103,7 @@ impl Drop for TimeoutGuard {
     }
 }
 
-pub fn timeout_at(deadline: usize) -> TimeoutGuard {
+pub fn timeout_at(deadline: Duration) -> TimeoutGuard {
     let waiter = Arc::new(TimeoutWaiter {
         task: Scheduler::get_current(),
         deadline,
@@ -121,32 +122,30 @@ pub fn handle_tick() {
     crate::vfs::timerfd::poll_timerfds(now);
 }
 
-/// Sleeps the current task for at least `ns` nanoseconds, yielding the CPU
-/// while waiting.
-pub fn sleep_ns(ns: usize) {
-    let deadline = get_elapsed().saturating_add(ns);
+/// Sleeps the current task for at least `duration`, yielding the CPU while waiting.
+pub fn sleep(duration: Duration) {
+    let deadline = get_elapsed().saturating_add(duration);
     let guard = timeout_at(deadline);
     while !guard.expired() {
         crate::percpu::CpuData::get().scheduler.do_yield();
     }
 }
 
-/// Blocking wait for a given amount of nanoseconds.
-pub fn block_ns(time: usize) -> Result<(), ClockError> {
+/// Waits for at least `duration`.
+pub fn block(duration: Duration) -> Result<(), ClockError> {
     if CLOCK.lock().current.is_none() {
         error!(
-            "Unable to sleep for {} nanoseconds. No clock source available, this would block forever!",
-            time
+            "Unable to sleep for {duration:?}. No clock source available, this would block forever!"
         );
         return Err(ClockError::Unavailable);
     }
 
-    let target = get_elapsed() + time;
+    let target = get_elapsed() + duration;
     while get_elapsed() < target {}
     return Ok(());
 }
 
-fn wake_timeout_waiters(now: usize) {
+fn wake_timeout_waiters(now: Duration) {
     let mut expired = Vec::new();
     let mut removed = Vec::new();
 
@@ -188,33 +187,37 @@ struct Clock {
     /// The active clock source.
     current: Option<Box<dyn ClockSource>>,
     /// An offset to add to the read counter.
-    counter_base: usize,
+    counter_base: Duration,
 }
 
 static CLOCK: SpinMutex<Clock> = SpinMutex::new(Clock {
     current: None,
-    counter_base: 0,
+    counter_base: Duration::ZERO,
 });
 
 static TIMEOUT_WAITERS: SpinMutex<Vec<Arc<TimeoutWaiter>>> = SpinMutex::new(Vec::new());
 
+/// Offset (in nanoseconds) from monotonic boot time to the Unix epoch, or
+/// [`i64::MIN`] when the wall clock has not been set.
 static BOOT_REALTIME_NS: AtomicI64 = AtomicI64::new(i64::MIN);
 
-pub fn set_realtime_ns(now_unix_ns: i64) {
-    let elapsed = get_elapsed() as i64;
-    BOOT_REALTIME_NS.store(now_unix_ns.saturating_sub(elapsed), Ordering::Release);
+pub fn set_realtime(now_unix: Duration) {
+    let elapsed = get_elapsed().as_nanos() as i64;
+    let base = (now_unix.as_nanos() as i64).saturating_sub(elapsed);
+    BOOT_REALTIME_NS.store(base, Ordering::Release);
 }
-pub fn realtime_ns() -> Option<i64> {
+pub fn realtime() -> Option<Duration> {
     let base = BOOT_REALTIME_NS.load(Ordering::Acquire);
     if base == i64::MIN {
         return None;
     }
-    Some(base.saturating_add(get_elapsed() as i64))
+    let ns = base.saturating_add(get_elapsed().as_nanos() as i64);
+    Some(Duration::from_nanos(ns.max(0) as u64))
 }
 
 /// Polls `f` until it returns `true` or the timeout elapses.
-pub fn poll_until(timeout_ns: usize, mut f: impl FnMut() -> bool) -> bool {
-    let deadline = get_elapsed().saturating_add(timeout_ns);
+pub fn poll_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
+    let deadline = get_elapsed().saturating_add(timeout);
     loop {
         if f() {
             return true;
@@ -222,6 +225,6 @@ pub fn poll_until(timeout_ns: usize, mut f: impl FnMut() -> bool) -> bool {
         if get_elapsed() >= deadline {
             return false;
         }
-        let _ = block_ns(10_000_000);
+        let _ = block(Duration::from_millis(10));
     }
 }

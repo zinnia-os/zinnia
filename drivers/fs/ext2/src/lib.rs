@@ -8,7 +8,7 @@ use structs::*;
 
 use zinnia::{
     alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec},
-    core::slice,
+    core::{slice, time::Duration},
     device::block::{self, BlockBuffer, BlockDevice},
     error, log,
     memory::{UserCStr, UserPtr},
@@ -589,7 +589,9 @@ impl Ext2Super {
         raw.i_size = 0;
         raw.i_dir_acl = 0;
         raw.i_links_count = 0;
-        raw.i_dtime = (zinnia::clock::realtime_ns().unwrap_or(0) / 1_000_000_000) as u32;
+        raw.i_dtime = zinnia::clock::realtime()
+            .unwrap_or(Duration::ZERO)
+            .as_secs() as u32;
         self.write_inode(ino, raw)?;
 
         self.free_inode(ino)?;

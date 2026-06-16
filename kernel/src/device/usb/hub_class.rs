@@ -138,7 +138,7 @@ async fn hub_worker(
             }
         }
         if info.power_good_ms > 0 {
-            clock::sleep_ns(info.power_good_ms as usize * 1_000_000);
+            clock::sleep(core::time::Duration::from_millis(info.power_good_ms as u64));
         }
     }
 

@@ -66,7 +66,7 @@ pub fn fill_random(buf: &mut [u8]) {
 
 fn next_random_u64() -> u64 {
     let mut x = RNG_STATE.load(Ordering::Relaxed)
-        ^ (clock::get_elapsed() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
+        ^ (clock::get_elapsed().as_nanos() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
     if x == 0 {
         x = 0x9e37_79b9_7f4a_7c15;
     }

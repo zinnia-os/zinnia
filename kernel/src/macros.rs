@@ -72,8 +72,8 @@ macro_rules! log_inner {
             let mut writer = $crate::log::GLOBAL_LOGGERS.lock();
             _ = writer.write_fmt(format_args!(
                 "[{:5}.{:06}] \x1b[1;34m{}:\x1b[0m ",
-                current_time / 1_000_000_000,
-                (current_time / 1000) % 1_000_000,
+                current_time.as_secs(),
+                current_time.subsec_micros(),
                 $crate::current_module_name!()
             ));
             _ = writer.write_fmt(format_args!($prefix));

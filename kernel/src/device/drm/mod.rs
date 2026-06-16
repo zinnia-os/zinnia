@@ -994,9 +994,9 @@ impl FileOps for DrmFile {
                 // Queue page flip completion event if requested
                 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
                 if val.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
-                    let now_ns = crate::clock::get_elapsed();
-                    let tv_sec = (now_ns / 1_000_000_000) as u32;
-                    let tv_usec = ((now_ns % 1_000_000_000) / 1_000) as u32;
+                    let now = crate::clock::get_elapsed();
+                    let tv_sec = now.as_secs() as u32;
+                    let tv_usec = now.subsec_micros();
                     let seq = self.flip_sequence.fetch_add(1, Ordering::AcqRel);
                     let event = PageFlipEvent {
                         event_type: 2, // DRM_EVENT_FLIP_COMPLETE

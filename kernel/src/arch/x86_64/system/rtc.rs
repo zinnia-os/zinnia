@@ -158,7 +158,7 @@ fn RTC_STAGE() {
                 "Wall-clock time captured at {} seconds since the Unix epoch",
                 ns / 1_000_000_000
             );
-            clock::set_realtime_ns(ns);
+            clock::set_realtime(core::time::Duration::from_nanos(ns as u64));
         }
         None => {
             log!("Failed to read a sensible time, CLOCK_REALTIME will return 0");
