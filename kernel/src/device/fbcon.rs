@@ -141,7 +141,7 @@ impl VtDisplay for FbCon {
     fn write_output(&self, data: &[u8]) {
         for byte in data {
             if *byte == b'\n' {
-                unsafe { flanterm_write(self.ctx, &[b'\r'] as *const u8 as *const c_char, 1) };
+                unsafe { flanterm_write(self.ctx, b"\r" as *const u8 as *const c_char, 1) };
             }
             unsafe { flanterm_write(self.ctx, byte as *const u8 as *const c_char, 1) };
         }
@@ -169,7 +169,7 @@ impl LoggerSink for FbCon {
     fn write(&mut self, input: &[u8]) {
         for byte in input {
             if *byte == b'\n' {
-                unsafe { flanterm_write(self.ctx, &[b'\r'] as *const u8 as *const c_char, 1) };
+                unsafe { flanterm_write(self.ctx, b"\r" as *const u8 as *const c_char, 1) };
             }
             unsafe { flanterm_write(self.ctx, byte as *const u8 as *const c_char, 1) };
         }
