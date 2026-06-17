@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use core::any::Any;
 use num_enum::FromPrimitive;
 
+pub mod hid;
 pub mod hub;
 pub mod hub_class;
 pub mod spec;
