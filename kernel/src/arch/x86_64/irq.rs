@@ -38,7 +38,7 @@ pub(in crate::arch) fn get_irq_state() -> bool {
     unsafe {
         asm!("pushf; pop {0}", out(reg) flags);
     }
-    return flags & (consts::RFLAGS_IF as u64) != 0;
+    return flags & consts::RFLAGS_IF != 0;
 }
 
 pub(in crate::arch) fn wait_for_irq() {
@@ -332,7 +332,7 @@ fn page_fault_handler(context: &mut Context) {
         addr: cr2.into(),
     };
 
-    let irqs_were_on = context.rflags & consts::RFLAGS_IF as u64 != 0;
+    let irqs_were_on = context.rflags & consts::RFLAGS_IF != 0;
     if irqs_were_on {
         unsafe { set_irq_state(true) };
     }

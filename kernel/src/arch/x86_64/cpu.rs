@@ -117,7 +117,7 @@ pub(super) fn setup_core(context: &'static CpuData) {
         );
         super::asm::wrmsr(
             consts::MSR_SFMASK,
-            (consts::RFLAGS_AC | consts::RFLAGS_DF | consts::RFLAGS_IF) as u64,
+            consts::RFLAGS_AC | consts::RFLAGS_DF | consts::RFLAGS_IF,
         );
 
         asm!("mov {cr0}, cr0", cr0 = out(reg) cr0, options(nostack));
