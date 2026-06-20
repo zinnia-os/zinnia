@@ -11,9 +11,11 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::{Process, task::Task},
     sched::Scheduler,
+    uapi::net::{IFF_BROADCAST, IFF_MULTICAST, IFF_RUNNING, IFF_UP, IFNAMSIZ},
     util::mutex::spin::SpinMutex,
 };
 use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
 pub const RX_FRAME_LEN: usize = 1518;
 pub const MAX_ETH_PAYLOAD_LEN: usize = 1500;
@@ -24,9 +26,12 @@ static INTERFACES: SpinMutex<Vec<Arc<ManagedInterface>>> = SpinMutex::new(Vec::n
 pub struct ManagedInterface {
     nic: Arc<dyn NicDevice>,
     mac: MacAddr,
-    ip: Ipv4Addr,
-    netmask: Ipv4Addr,
-    gateway: Option<Ipv4Addr>,
+    name: [u8; IFNAMSIZ],
+    index: u32,
+    ip: AtomicU32,
+    netmask: AtomicU32,
+    gateway: AtomicU32,
+    flags: AtomicU16,
     arp_cache: ArpCache,
 }
 
@@ -34,16 +39,25 @@ impl ManagedInterface {
     pub fn new(
         nic: Arc<dyn NicDevice>,
         mac: MacAddr,
+        name: [u8; IFNAMSIZ],
+        index: u32,
         ip: Ipv4Addr,
         netmask: Ipv4Addr,
         gateway: Option<Ipv4Addr>,
     ) -> Self {
+        let mut flags = IFF_BROADCAST | IFF_MULTICAST;
+        if ip != Ipv4Addr::ANY {
+            flags |= IFF_UP | IFF_RUNNING;
+        }
         Self {
             nic,
             mac,
-            ip,
-            netmask,
-            gateway,
+            name,
+            index,
+            ip: AtomicU32::new(ip.as_u32()),
+            netmask: AtomicU32::new(netmask.as_u32()),
+            gateway: AtomicU32::new(gateway.map_or(0, Ipv4Addr::as_u32)),
+            flags: AtomicU16::new(flags as u16),
             arp_cache: ArpCache::new(),
         }
     }
@@ -52,8 +66,48 @@ impl ManagedInterface {
         self.mac
     }
 
+    pub fn name(&self) -> &[u8; IFNAMSIZ] {
+        &self.name
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
     pub fn ip(&self) -> Ipv4Addr {
-        self.ip
+        Ipv4Addr::from_u32(self.ip.load(Ordering::Acquire))
+    }
+
+    pub fn set_ip(&self, ip: Ipv4Addr) {
+        self.ip.store(ip.as_u32(), Ordering::Release);
+    }
+
+    pub fn netmask(&self) -> Ipv4Addr {
+        Ipv4Addr::from_u32(self.netmask.load(Ordering::Acquire))
+    }
+
+    pub fn set_netmask(&self, netmask: Ipv4Addr) {
+        self.netmask.store(netmask.as_u32(), Ordering::Release);
+    }
+
+    pub fn gateway(&self) -> Option<Ipv4Addr> {
+        match self.gateway.load(Ordering::Acquire) {
+            0 => None,
+            v => Some(Ipv4Addr::from_u32(v)),
+        }
+    }
+
+    pub fn set_gateway(&self, gateway: Option<Ipv4Addr>) {
+        self.gateway
+            .store(gateway.map_or(0, Ipv4Addr::as_u32), Ordering::Release);
+    }
+
+    pub fn flags(&self) -> i16 {
+        self.flags.load(Ordering::Acquire) as i16
+    }
+
+    pub fn set_flags(&self, flags: i16) {
+        self.flags.store(flags as u16, Ordering::Release);
     }
 
     pub fn arp_cache(&self) -> &ArpCache {
@@ -102,13 +156,44 @@ impl ManagedInterface {
             return dst;
         }
 
-        self.gateway.unwrap_or(dst)
+        self.gateway().unwrap_or(dst)
     }
 
     fn is_local_ipv4(&self, dst: Ipv4Addr) -> bool {
-        let mask = self.netmask.as_u32();
-        self.ip.as_u32() & mask == dst.as_u32() & mask
+        let mask = self.netmask().as_u32();
+        self.ip().as_u32() & mask == dst.as_u32() & mask
     }
+
+    /// Directed broadcast address for this interface's subnet.
+    pub fn broadcast_ipv4(&self) -> Ipv4Addr {
+        Ipv4Addr::from_u32(self.ip().as_u32() | !self.netmask().as_u32())
+    }
+}
+
+fn name_bytes(buf: &[u8]) -> &[u8] {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    &buf[..end]
+}
+
+pub fn by_name(name: &[u8]) -> Option<Arc<ManagedInterface>> {
+    let name = name_bytes(name);
+    INTERFACES
+        .lock()
+        .iter()
+        .find(|iface| name_bytes(iface.name()) == name)
+        .cloned()
+}
+
+pub fn by_index(index: u32) -> Option<Arc<ManagedInterface>> {
+    INTERFACES
+        .lock()
+        .iter()
+        .find(|iface| iface.index() == index)
+        .cloned()
+}
+
+pub fn snapshot() -> Vec<Arc<ManagedInterface>> {
+    INTERFACES.lock().clone()
 }
 
 pub fn register_interface(interface: Arc<ManagedInterface>) {

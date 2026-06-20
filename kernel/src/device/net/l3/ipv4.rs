@@ -6,8 +6,10 @@ use crate::{
             mac::MacAddr,
         },
         l3::icmp::EchoRequest,
+        l4,
     },
     posix::errno::{EResult, Errno},
+    util::mutex::spin::SpinMutex,
 };
 use alloc::vec::Vec;
 use core::fmt::{Display, Formatter};
@@ -15,8 +17,7 @@ use core::fmt::{Display, Formatter};
 pub const IPV4_HEADER_LEN: usize = 20;
 const PENDING_ARP_LIMIT: usize = 32;
 
-static PENDING_ARP: crate::util::mutex::spin::SpinMutex<Vec<PendingArpPacket>> =
-    crate::util::mutex::spin::SpinMutex::new(Vec::new());
+static PENDING_ARP: SpinMutex<Vec<PendingArpPacket>> = SpinMutex::new(Vec::new());
 
 struct PendingArpPacket {
     interface: usize,
@@ -38,6 +39,12 @@ impl Ipv4Addr {
 
     pub const fn new(bytes: [u8; 4]) -> Self {
         Self { buf: bytes }
+    }
+
+    pub const fn from_u32(v: u32) -> Self {
+        Self {
+            buf: v.to_be_bytes(),
+        }
     }
 
     pub const fn as_bytes(&self) -> &[u8; 4] {
@@ -177,7 +184,8 @@ pub fn process_packet(interface: &ManagedInterface, eth: &EthHeader<'_>) -> ERes
     let Some(header) = Ipv4Header::parse(eth.payload()) else {
         return Ok(false);
     };
-    if header.destination() != interface.ip() {
+    let dst = header.destination();
+    if dst != interface.ip() && dst != Ipv4Addr::BROADCAST && dst != interface.broadcast_ipv4() {
         return Ok(false);
     }
     if header.is_fragmented() {
@@ -188,8 +196,8 @@ pub fn process_packet(interface: &ManagedInterface, eth: &EthHeader<'_>) -> ERes
 
     match header.protocol() {
         Ipv4Protocol::Icmp => process_icmp(interface, eth.src(), &header),
-        Ipv4Protocol::Tcp => crate::device::net::l4::tcp::process_packet(interface, &header),
-        Ipv4Protocol::Udp => crate::device::net::l4::udp::process_packet(interface, &header),
+        Ipv4Protocol::Tcp => l4::tcp::process_packet(interface, &header),
+        Ipv4Protocol::Udp => l4::udp::process_packet(interface, &header),
         _ => Ok(false),
     }
 }

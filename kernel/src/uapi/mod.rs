@@ -12,6 +12,7 @@ pub mod ioctls;
 pub mod limits;
 pub mod mman;
 pub mod mount;
+pub mod net;
 pub mod poll;
 pub mod reboot;
 pub mod resource;

@@ -1,5 +1,6 @@
 use crate::{
-    memory::{IovecIter, VirtAddr},
+    device::net::l3::ipv4::Ipv4Addr,
+    memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     uapi,
     vfs::{
@@ -156,7 +157,124 @@ impl FileOps for Socket {
     }
 
     fn ioctl(&self, _file: &File, request: usize, argp: VirtAddr) -> EResult<usize> {
-        let _ = (request, argp);
-        Err(Errno::ENOTTY)
+        use uapi::net::*;
+
+        let request = request as u32;
+        match request {
+            SIOCGIFCONF => {
+                let mut ptr: UserPtr<ifconf> = UserPtr::new(argp);
+                let mut conf = ptr.read().ok_or(Errno::EFAULT)?;
+                let interfaces = interface::snapshot();
+                let entry = size_of::<ifreq>();
+
+                if conf.ifc_buf == 0 {
+                    conf.ifc_len = (interfaces.len() * entry) as i32;
+                    ptr.write(conf).ok_or(Errno::EFAULT)?;
+                    return Ok(0);
+                }
+
+                let max = conf.ifc_len as usize / entry;
+                let mut out: UserPtr<ifreq> = UserPtr::new(VirtAddr::new(conf.ifc_buf as usize));
+                let mut written = 0;
+                for iface in interfaces.iter().take(max) {
+                    let mut req = ifreq {
+                        ifr_name: *iface.name(),
+                        ifr_ifru: [0; 24],
+                    };
+                    write_sockaddr_in(&mut req.ifr_ifru, iface.ip());
+                    out.write(req).ok_or(Errno::EFAULT)?;
+                    out = out.offset(1);
+                    written += 1;
+                }
+                conf.ifc_len = (written * entry) as i32;
+                ptr.write(conf).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
+            SIOCGIFINDEX | SIOCGIFHWADDR | SIOCGIFADDR | SIOCGIFNETMASK | SIOCGIFFLAGS => {
+                let mut ptr: UserPtr<ifreq> = UserPtr::new(argp);
+                let mut req = ptr.read().ok_or(Errno::EFAULT)?;
+                let iface = interface::by_name(&req.ifr_name).ok_or(Errno::ENODEV)?;
+                match request {
+                    SIOCGIFINDEX => {
+                        req.ifr_ifru[..4].copy_from_slice(&(iface.index() as i32).to_ne_bytes())
+                    }
+                    SIOCGIFHWADDR => {
+                        req.ifr_ifru = [0; 24];
+                        req.ifr_ifru[..2].copy_from_slice(&ARPHRD_ETHER.to_ne_bytes());
+                        req.ifr_ifru[2..8].copy_from_slice(iface.mac().as_bytes());
+                    }
+                    SIOCGIFADDR => write_sockaddr_in(&mut req.ifr_ifru, iface.ip()),
+                    SIOCGIFNETMASK => write_sockaddr_in(&mut req.ifr_ifru, iface.netmask()),
+                    SIOCGIFFLAGS => req.ifr_ifru[..2].copy_from_slice(&iface.flags().to_ne_bytes()),
+                    _ => unreachable!(),
+                }
+                ptr.write(req).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
+            SIOCSIFADDR | SIOCSIFNETMASK | SIOCSIFFLAGS => {
+                let ptr: UserPtr<ifreq> = UserPtr::new(argp);
+                let req = ptr.read().ok_or(Errno::EFAULT)?;
+                let name = ifr_name_str(&req.ifr_name);
+                let Some(iface) = interface::by_name(&req.ifr_name) else {
+                    log!("SIOC config for unknown interface {:?}", name);
+                    return Err(Errno::ENODEV);
+                };
+                match request {
+                    SIOCSIFADDR => {
+                        let ip = read_sockaddr_in(&req.ifr_ifru);
+                        log!("{} address {}", name, ip);
+                        iface.set_ip(ip);
+                    }
+                    SIOCSIFNETMASK => {
+                        let mask = read_sockaddr_in(&req.ifr_ifru);
+                        log!("{} netmask {}", name, mask);
+                        iface.set_netmask(mask);
+                    }
+                    SIOCSIFFLAGS => {
+                        let flags = i16::from_ne_bytes([req.ifr_ifru[0], req.ifr_ifru[1]]);
+                        log!("{} flags {:#06x}", name, flags);
+                        iface.set_flags(flags);
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(0)
+            }
+            SIOCADDRT | SIOCDELRT => {
+                let ptr: UserPtr<rtentry> = UserPtr::new(argp);
+                let rt = ptr.read().ok_or(Errno::EFAULT)?;
+                let iface = interface::default_ipv4_interface().ok_or(Errno::ENODEV)?;
+                let name = ifr_name_str(iface.name());
+                if request == SIOCDELRT {
+                    log!("{} drop default route", name);
+                    iface.set_gateway(None);
+                } else {
+                    let gw = Ipv4Addr::new([
+                        rt.rt_gateway.sa_data[2],
+                        rt.rt_gateway.sa_data[3],
+                        rt.rt_gateway.sa_data[4],
+                        rt.rt_gateway.sa_data[5],
+                    ]);
+                    log!("{} default route via {}", name, gw);
+                    iface.set_gateway((gw != Ipv4Addr::ANY).then_some(gw));
+                }
+                Ok(0)
+            }
+            _ => Err(Errno::ENOTTY),
+        }
     }
+}
+
+fn write_sockaddr_in(buf: &mut [u8; 24], addr: Ipv4Addr) {
+    *buf = [0; 24];
+    buf[..2].copy_from_slice(&(uapi::socket::AF_INET as u16).to_ne_bytes());
+    buf[4..8].copy_from_slice(addr.as_bytes());
+}
+
+fn read_sockaddr_in(buf: &[u8; 24]) -> Ipv4Addr {
+    Ipv4Addr::new([buf[4], buf[5], buf[6], buf[7]])
+}
+
+fn ifr_name_str(name: &[u8]) -> &str {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    core::str::from_utf8(&name[..end]).unwrap_or("?")
 }

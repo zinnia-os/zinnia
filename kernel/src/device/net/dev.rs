@@ -1,126 +1,61 @@
 use crate::{
-    boot::BootInfo,
-    device::{
-        self,
-        net::{interface::ManagedInterface, l3::ipv4::Ipv4Addr, nic::NicDevice},
-    },
-    memory::IovecIter,
+    device::net::{interface::ManagedInterface, l3::ipv4::Ipv4Addr, nic::NicDevice},
     posix::errno::EResult,
     process::Identity,
-    vfs::{self, File, file::FileOps, fs::devtmpfs, inode::Mode},
+    uapi::net::IFNAMSIZ,
+    vfs::{self, fs::devtmpfs, inode::Mode},
 };
 use alloc::{format, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-const MAX_FRAME_LEN: usize = 1518;
 const DEFAULT_NETMASK: Ipv4Addr = Ipv4Addr::new([255, 255, 255, 0]);
 
 static ETH_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-struct NicFile {
-    nic: Arc<dyn NicDevice>,
-}
-
-impl FileOps for NicFile {
-    fn read(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let mut frame = [0u8; MAX_FRAME_LEN];
-        let n = self.nic.recv(&mut frame)?;
-        buffer.copy_from_slice(&frame[..n])
-    }
-
-    fn write(&self, _file: &File, buffer: &mut IovecIter, _offset: u64) -> EResult<isize> {
-        let mut frame = [0u8; MAX_FRAME_LEN];
-        let n = buffer.len().min(MAX_FRAME_LEN);
-        buffer.copy_to_slice(&mut frame[..n])?;
-        self.nic.send(&frame[..n])?;
-        Ok(n as isize)
-    }
-}
-
 pub fn register_nic(nic: Arc<dyn NicDevice>) -> EResult<()> {
-    if let Some(config) = configured_ipv4() {
-        let interface = Arc::new(ManagedInterface::new(
-            nic.clone(),
-            nic.mac(),
-            config.ip,
-            config.netmask,
-            config.gateway,
-        ));
-        if let Some(gateway) = config.gateway {
-            log!(
-                "Bringing up managed interface {} ({}) netmask={} gateway={}",
-                config.ip,
-                nic.mac(),
-                config.netmask,
-                gateway
-            );
-        } else {
-            log!(
-                "Bringing up managed interface {} ({}) netmask={} gateway=none",
-                config.ip,
-                nic.mac(),
-                config.netmask
-            );
-        }
-        super::interface::start_worker(interface.clone())?;
-        super::interface::register_interface(interface);
-        return Ok(());
-    }
-
     let idx = ETH_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let name = format!("net/eth{}", idx);
+    let (ip, netmask, gateway) = (Ipv4Addr::ANY, DEFAULT_NETMASK, None);
 
-    device::register_char_node(
-        name.as_bytes(),
-        device::make_shared(Arc::new(NicFile { nic }), 0, idx),
-        Mode::from_bits_truncate(0o660),
-    )
-}
-
-struct Ipv4Config {
-    ip: Ipv4Addr,
-    netmask: Ipv4Addr,
-    gateway: Option<Ipv4Addr>,
-}
-
-fn configured_ipv4() -> Option<Ipv4Config> {
-    let raw = BootInfo::get().command_line.get_string("ip")?;
-    let Some(ip) = parse_ipv4_cmdline("ip", raw) else {
-        return None;
-    };
-
-    Some(Ipv4Config {
+    let interface = Arc::new(ManagedInterface::new(
+        nic.clone(),
+        nic.mac(),
+        {
+            let mut name = [0u8; IFNAMSIZ];
+            let s = format!("eth{idx}");
+            let n = s.len().min(IFNAMSIZ - 1);
+            name[..n].copy_from_slice(&s.as_bytes()[..n]);
+            name
+        },
+        idx,
         ip,
-        netmask: configured_netmask(),
-        gateway: configured_gateway(),
-    })
-}
+        netmask,
+        gateway,
+    ));
 
-fn configured_netmask() -> Ipv4Addr {
-    let Some(raw) = BootInfo::get().command_line.get_string("netmask") else {
-        return DEFAULT_NETMASK;
-    };
-
-    parse_ipv4_cmdline("netmask", raw).unwrap_or(DEFAULT_NETMASK)
-}
-
-fn configured_gateway() -> Option<Ipv4Addr> {
-    let raw = BootInfo::get()
-        .command_line
-        .get_string("gateway")
-        .or_else(|| BootInfo::get().command_line.get_string("gw"))?;
-
-    parse_ipv4_cmdline("gateway", raw)
-}
-
-fn parse_ipv4_cmdline(name: &str, raw: &str) -> Option<Ipv4Addr> {
-    match Ipv4Addr::parse(raw) {
-        Some(addr) => Some(addr),
-        None => {
-            log!("{}=\"{}\" is not a valid IPv4 address; ignoring", name, raw);
-            None
-        }
+    if ip == Ipv4Addr::ANY {
+        log!("Registered interface eth{} ({})", idx, nic.mac());
+    } else if let Some(gateway) = gateway {
+        log!(
+            "Bringing up eth{} {} ({}) netmask={} gateway={}",
+            idx,
+            ip,
+            nic.mac(),
+            netmask,
+            gateway
+        );
+    } else {
+        log!(
+            "Bringing up eth{} {} ({}) netmask={} gateway=none",
+            idx,
+            ip,
+            nic.mac(),
+            netmask
+        );
     }
+
+    super::interface::start_worker(interface.clone())?;
+    super::interface::register_interface(interface);
+    Ok(())
 }
 
 #[initgraph::task(

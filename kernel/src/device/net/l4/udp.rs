@@ -42,6 +42,7 @@ struct UdpInner {
     local: Ipv4Endpoint,
     peer: Option<Ipv4Endpoint>,
     bound: bool,
+    bound_device: Option<Arc<ManagedInterface>>,
     recv_queue: VecDeque<UdpDatagram>,
     shutdown: ShutdownFlags,
     self_ref: Weak<UdpSocket>,
@@ -70,6 +71,7 @@ impl UdpSocket {
                 },
                 peer: None,
                 bound: false,
+                bound_device: None,
                 recv_queue: VecDeque::new(),
                 shutdown: ShutdownFlags::empty(),
                 self_ref: Weak::new(),
@@ -132,6 +134,7 @@ impl UdpSocket {
             return self.autobind();
         }
         if endpoint.addr != Ipv4Addr::ANY
+            && endpoint.addr != Ipv4Addr::BROADCAST
             && interface::interface_for_source(endpoint.addr).is_none()
         {
             return Err(Errno::EADDRNOTAVAIL);
@@ -162,7 +165,7 @@ impl UdpSocket {
     fn local_for_send(&self, interface: &ManagedInterface) -> Ipv4Endpoint {
         let local = self.inner.lock().local;
         Ipv4Endpoint {
-            addr: if local.addr == Ipv4Addr::ANY {
+            addr: if local.addr == Ipv4Addr::ANY || local.addr == Ipv4Addr::BROADCAST {
                 interface.ip()
             } else {
                 local.addr
@@ -181,13 +184,17 @@ impl UdpSocket {
 
         self.autobind()?;
 
-        let bound_addr = self.inner.lock().local.addr;
-        let interface = if bound_addr == Ipv4Addr::ANY {
-            interface::default_ipv4_interface()
+        let (bound_addr, bound_device) = {
+            let inner = self.inner.lock();
+            (inner.local.addr, inner.bound_device.clone())
+        };
+        let interface = if let Some(device) = bound_device {
+            device
+        } else if bound_addr == Ipv4Addr::ANY || bound_addr == Ipv4Addr::BROADCAST {
+            interface::default_ipv4_interface().ok_or(Errno::ENETUNREACH)?
         } else {
-            interface::interface_for_source(bound_addr)
-        }
-        .ok_or(Errno::ENETUNREACH)?;
+            interface::interface_for_source(bound_addr).ok_or(Errno::ENETUNREACH)?
+        };
 
         let source = self.local_for_send(&interface);
         let mut packet = vec![0u8; UDP_HEADER_LEN + data.len()];
@@ -358,11 +365,21 @@ impl SocketOps for UdpSocket {
         Ok(size_of::<i32>())
     }
 
-    fn setsockopt(&self, level: i32, optname: i32, _buf: &[u8]) -> EResult<()> {
+    fn setsockopt(&self, level: i32, optname: i32, buf: &[u8]) -> EResult<()> {
         if level as u32 != SOL_SOCKET {
             return Err(Errno::ENOPROTOOPT);
         }
         match optname as u32 {
+            SO_BINDTODEVICE => {
+                let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                let name = &buf[..end];
+                self.inner.lock().bound_device = if name.is_empty() {
+                    None
+                } else {
+                    Some(interface::by_name(name).ok_or(Errno::ENODEV)?)
+                };
+                Ok(())
+            }
             SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR | SO_BROADCAST => Ok(()),
             _ => Err(Errno::ENOPROTOOPT),
         }
@@ -452,7 +469,15 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
     };
 
     let mut inner = socket.inner.lock();
-    if inner.local.addr != Ipv4Addr::ANY && inner.local.addr != interface.ip() {
+    if inner.local.addr != Ipv4Addr::ANY
+        && inner.local.addr != interface.ip()
+        && inner.local.addr != Ipv4Addr::BROADCAST
+    {
+        return Ok(false);
+    }
+    if let Some(device) = &inner.bound_device
+        && !core::ptr::eq(Arc::as_ptr(device), interface as *const ManagedInterface)
+    {
         return Ok(false);
     }
     if inner.peer.is_some_and(|peer| peer != source) {
