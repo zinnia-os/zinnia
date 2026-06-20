@@ -157,7 +157,7 @@ impl PageAllocator for KernelAlloc {
             PhysAddr(usize::MAX)
         };
 
-        let mut addr = None;
+        let mut chosen: Option<(usize, Option<usize>)> = None;
         let mut it = head.head;
         let mut prev_it = None;
         while it != NO_PAGE {
@@ -166,21 +166,26 @@ impl PageAllocator for KernelAlloc {
             let page_count = head.pages[idx].count;
             let next = head.pages[idx].next;
 
-            if page_addr + bytes >= limit {
-                prev_it = Some(idx);
-                it = next;
-                continue;
+            if page_count >= pages && page_addr + bytes < limit {
+                chosen = Some((idx, prev_it));
+                if limit != PhysAddr(usize::MAX) {
+                    break;
+                }
             }
 
-            if unlikely(page_count < pages) {
-                prev_it = Some(idx);
-                it = next;
-                continue;
-            }
+            prev_it = Some(idx);
+            it = next;
+        }
+
+        let mut addr = None;
+        if let Some((idx, prev)) = chosen {
+            let page_addr = Page::addr_from_idx(idx);
+            let page_count = head.pages[idx].count;
+            let next = head.pages[idx].next;
 
             if unlikely(page_count == pages) {
                 addr = Some(page_addr);
-                if let Some(prev) = prev_it {
+                if let Some(prev) = prev {
                     head.pages[prev].next = next;
                 } else {
                     head.head = next;
@@ -191,10 +196,10 @@ impl PageAllocator for KernelAlloc {
                 head.pages[idx].count -= pages;
                 addr = Some(page_addr + head.pages[idx].count * arch::virt::get_page_size());
             }
-            break;
         }
 
-        debug_assert!(addr.is_some());
+        // Release the lock before zeroing.
+        drop(head);
 
         match addr {
             Some(x) => {
