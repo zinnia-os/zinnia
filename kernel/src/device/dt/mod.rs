@@ -6,6 +6,7 @@ use crate::{
     util::once::Once,
 };
 use alloc::{slice, string::String, vec::Vec};
+use core::fmt;
 
 pub struct DeviceTree<'a> {
     version: u32,
@@ -133,6 +134,95 @@ impl<'a, 'b> Node<'a, 'b> {
             offset: self.start,
         }
     }
+}
+
+impl fmt::Display for DeviceTree<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.root())
+    }
+}
+
+impl fmt::Display for Node<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_node(self, f, 0)
+    }
+}
+
+/// Recursively format a node and its subnodes in DTS-like syntax.
+fn fmt_node(node: &Node, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
+    let indent = |f: &mut fmt::Formatter<'_>| -> fmt::Result {
+        for _ in 0..depth {
+            f.write_str("    ")?;
+        }
+        Ok(())
+    };
+
+    indent(f)?;
+    let name = node.name();
+    if name.is_empty() {
+        f.write_str("/ {\n")?;
+    } else {
+        writeln!(f, "{} {{", String::from_utf8_lossy(name))?;
+    }
+
+    for prop in node.properties() {
+        for _ in 0..=depth {
+            f.write_str("    ")?;
+        }
+        write!(f, "{}", String::from_utf8_lossy(prop.name()))?;
+
+        let data = prop.data();
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        // Printable, NUL-terminated bytes are rendered as one or more strings.
+        if data.last() == Some(&0)
+            && data[..data.len() - 1]
+                .iter()
+                .all(|&b| b == 0 || (0x20..0x7f).contains(&b))
+        {
+            let mut first = true;
+            for s in prop.as_str() {
+                f.write_str(if first { " = " } else { ", " })?;
+                first = false;
+                write!(f, "\"{}\"", String::from_utf8_lossy(s))?;
+            }
+            if !first {
+                return Ok(());
+            }
+        }
+
+        // Aligned data is rendered as <u32> cells, anything else as raw bytes.
+        if let Some(cells) = prop.as_u32() {
+            f.write_str(" = <")?;
+            for (i, c) in cells.iter().enumerate() {
+                if i != 0 {
+                    f.write_str(" ")?;
+                }
+                write!(f, "{:#x}", u32::from_be(*c))?;
+            }
+            return f.write_str(">");
+        }
+
+        f.write_str(" = [")?;
+        for (i, b) in data.iter().enumerate() {
+            if i != 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{b:02x}")?;
+        }
+        f.write_str("]")?;
+
+        f.write_str(";\n")?;
+    }
+
+    for child in node.nodes() {
+        fmt_node(&child, f, depth + 1)?;
+    }
+
+    indent(f)?;
+    f.write_str("};\n")
 }
 
 /// A property inside a node.
@@ -363,7 +453,7 @@ pub static DEVICES: Once<Vec<&Node>> = Once::new();
     name = "system.dt.parse-blob",
     depends = [crate::memory::MEMORY_STAGE],
 )]
-fn TREE_STAGE() {
+pub fn TREE_STAGE() {
     let dt = match BootInfo::get().fdt_addr {
         Some(fdt_addr) => unsafe {
             let slice = slice::from_raw_parts_mut(fdt_addr.as_hhdm(), 8);
@@ -383,18 +473,14 @@ fn TREE_STAGE() {
     log!("Running on \"{}\"", String::from_utf8_lossy(model.data()));
 
     let chosen = dt.find_node(b"/chosen").unwrap();
-    log!(
-        "stdout is: \"{}\"",
-        String::from_utf8_lossy(
-            chosen
-                .properties()
-                .find(|x| x.name() == b"stdout-path")
-                .unwrap()
-                .as_str()
-                .next()
-                .unwrap()
-        )
-    );
+    if let Some(x) = chosen
+        .properties()
+        .find(|x| x.name() == b"stdout-path")
+        .map(|x| x.as_str().next().unwrap().to_vec())
+    {
+        let s = String::from_utf8_lossy(&x);
+        log!("stdout is: \"{}\"", s);
+    }
 
     unsafe { TREE.init(Some(dt)) };
 }
