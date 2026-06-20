@@ -1206,6 +1206,104 @@ pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> ER
 }
 
 #[wrap_syscall]
+pub fn utimensat(fd: i32, path: VirtAddr, times: VirtAddr, flags: usize) -> EResult<()> {
+    use crate::uapi::time::timespec;
+    // `tv_nsec` sentinels.
+    const UTIME_OMIT: isize = (1 << 30) - 2;
+    const UTIME_NOW: isize = (1 << 30) - 1;
+
+    if flags & !((AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) as usize) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let now = timespec::from_duration(clock::realtime().unwrap_or(Duration::ZERO));
+
+    // Resolve the requested atime/mtime.
+    let (atime, mtime) = if times == VirtAddr::null() {
+        (Some(now), Some(now))
+    } else {
+        let mut ts = [timespec::default(); 2];
+        UserPtr::<timespec>::new(times)
+            .read_slice(&mut ts)
+            .ok_or(Errno::EFAULT)?;
+        let resolve = |t: timespec| match t.tv_nsec {
+            UTIME_OMIT => None,
+            UTIME_NOW => Some(now),
+            _ => Some(t),
+        };
+        (resolve(ts[0]), resolve(ts[1]))
+    };
+
+    let path_buf = if path == VirtAddr::null() {
+        None
+    } else {
+        Some(UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?)
+    };
+    let on_fd = match &path_buf {
+        None => true,
+        Some(p) => p.is_empty() && flags & (AT_EMPTY_PATH as usize) != 0,
+    };
+
+    let proc = Scheduler::get_current().get_process();
+    let files = proc.open_files.lock();
+
+    let inode = if on_fd {
+        if fd == AT_FDCWD as _ {
+            proc.working_dir
+                .lock()
+                .entry
+                .get_inode()
+                .ok_or(Errno::ENOENT)?
+        } else {
+            files
+                .get_fd(fd)
+                .ok_or(Errno::EBADF)?
+                .file
+                .inode
+                .as_ref()
+                .ok_or(Errno::EINVAL)?
+                .clone()
+        }
+    } else {
+        let path_buf = path_buf.unwrap();
+
+        let parent = if fd == AT_FDCWD as _ {
+            proc.working_dir.lock().clone()
+        } else {
+            files
+                .get_fd(fd)
+                .ok_or(Errno::EBADF)?
+                .file
+                .path
+                .as_ref()
+                .ok_or(Errno::ENOTDIR)?
+                .clone()
+        };
+
+        let root = proc.root_dir.lock().clone();
+        let identity = proc.identity.lock().clone();
+        drop(files);
+
+        let node = PathNode::lookup(
+            root,
+            parent,
+            &path_buf,
+            &identity,
+            LookupFlags::MustExist
+                | if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
+                    LookupFlags::empty()
+                } else {
+                    LookupFlags::FollowSymlinks
+                },
+        )?;
+        node.entry.get_inode().ok_or(Errno::EINVAL)?
+    };
+
+    inode.update_time(mtime, atime, Some(now));
+    Ok(())
+}
+
+#[wrap_syscall]
 pub fn unlinkat(fd: i32, path: VirtAddr, flags: usize) -> EResult<()> {
     if path == VirtAddr::null() {
         return Err(Errno::EINVAL);

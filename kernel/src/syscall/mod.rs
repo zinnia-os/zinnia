@@ -202,7 +202,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::FCNTL => vfs::fcntl,
         numbers::FTRUNCATE => vfs::ftruncate,
         numbers::FALLOCATE => vfs::fallocate,
-        numbers::UTIMENSAT => sys_unimpl!("utimensat", Err(Errno::ENOSYS)),
+        numbers::UTIMENSAT => vfs::utimensat,
         numbers::MKNODAT => sys_unimpl!("mknodat", Err(Errno::ENOSYS)),
         numbers::GETCWD => vfs::getcwd,
         numbers::CHDIR => vfs::chdir,
