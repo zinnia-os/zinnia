@@ -1,5 +1,3 @@
-// Slab allocator
-
 use super::{
     VirtAddr,
     pmm::{AllocFlags, KernelAlloc, PageAllocator},
@@ -10,22 +8,29 @@ use crate::{
 };
 use core::{
     alloc::{GlobalAlloc, Layout},
+    cell::Cell,
     hint::unlikely,
     mem::size_of,
     ptr::null_mut,
 };
-
-#[derive(Debug)]
-struct Slab {
-    /// Size of one entry.
-    ent_size: usize,
-    head: SpinMutex<VirtAddr>,
-}
+use intrusive_collections::{LinkedList, LinkedListLink, UnsafeRef, intrusive_adapter};
 
 #[repr(transparent)]
-struct SlabHeader {
-    slab: *const Slab,
+struct FreeSlot {
+    next: *mut FreeSlot,
 }
+
+struct SlabHeader {
+    link: LinkedListLink,
+    slab: *const Slab,
+    free: Cell<*mut FreeSlot>,
+    used: Cell<usize>,
+}
+
+unsafe impl Send for SlabHeader {}
+unsafe impl Sync for SlabHeader {}
+
+intrusive_adapter!(SlabPageAdapter = UnsafeRef<SlabHeader>: SlabHeader { link => LinkedListLink });
 
 struct SlabInfo {
     /// Amount of pages connected to this slab.
@@ -34,78 +39,113 @@ struct SlabInfo {
     size: usize,
 }
 
+struct Slab {
+    /// Size of one entry.
+    ent_size: usize,
+    /// Pages with at least one free slot.
+    partial: SpinMutex<LinkedList<SlabPageAdapter>>,
+}
+
 impl Slab {
     /// Creates a new, uninitialized slab.
     const fn new(size: usize) -> Self {
         Self {
             ent_size: size,
-            head: SpinMutex::new(VirtAddr::null()),
+            partial: SpinMutex::new(LinkedList::new(SlabPageAdapter::NEW)),
         }
     }
 
-    /// Adds one page worth of entries to an empty free list.
-    fn refill(&self, head_slot: &mut VirtAddr) {
-        debug_assert!(head_slot.is_null());
+    /// Byte offset of the first slot in a page of this slab.
+    #[inline]
+    fn slot_offset(&self) -> usize {
+        align_up(size_of::<SlabHeader>(), self.ent_size)
+    }
+
+    /// Allocates a fresh, unlinked page and chains its slots into the free list. Returns null if the PMM is exhausted.
+    fn refill(&self) -> *mut SlabHeader {
+        let Ok(mem) = KernelAlloc::alloc(1, AllocFlags::empty()) else {
+            return null_mut();
+        };
+
+        let page = mem.as_hhdm::<SlabHeader>();
+        let offset = self.slot_offset();
+        let slots = (arch::virt::get_page_size() - offset) / self.ent_size;
+        debug_assert!(slots > 0);
 
         unsafe {
-            // Calculate the amount of bytes we need to skip in order to be able to store a reference to the slab.
-            let offset = align_up(size_of::<SlabHeader>(), self.ent_size);
-            // That also means we need to deduct that amount here.
-            let available_size = arch::virt::get_page_size() - offset;
-
-            // Allocate memory for this slab.
-            let mem = KernelAlloc::alloc(1, AllocFlags::empty()).expect("Out of memory");
-            let mut head = mem.as_hhdm::<*mut ()>();
-
-            // Get a reference to the start of the buffer.
-            let ptr = head as *mut SlabHeader;
-            // In that first entry, record a pointer to the head.
-            (*ptr).slab = &raw const *self;
-            // Now save that start to the slab.
-            head = (head).byte_add(offset);
-
-            let slots = available_size / self.ent_size;
-            debug_assert!(slots > 0);
-            let fact = self.ent_size / size_of::<*mut ()>();
-
-            let arr = head;
+            let first = (page as *mut u8).byte_add(offset) as *mut FreeSlot;
             for i in 0..slots - 1 {
-                *arr.add(i * fact) = arr.add((i + 1) * fact) as *mut ();
+                (*first.byte_add(i * self.ent_size)).next = first.byte_add((i + 1) * self.ent_size);
             }
-            *arr.add((slots - 1) * fact) = null_mut();
+            (*first.byte_add((slots - 1) * self.ent_size)).next = null_mut();
 
-            *head_slot = head.into();
+            page.write(SlabHeader {
+                link: LinkedListLink::new(),
+                slab: &raw const *self,
+                free: Cell::new(first),
+                used: Cell::new(0),
+            });
         }
+
+        page
     }
 
     fn alloc(&self) -> *mut u8 {
-        let mut head = self.head.lock();
-        if unlikely(*head == VirtAddr::null()) {
-            self.refill(&mut head);
+        let mut list = self.partial.lock();
+
+        if unlikely(list.is_empty()) {
+            let page = self.refill();
+            if unlikely(page.is_null()) {
+                return null_mut();
+            }
+            list.push_front(unsafe { UnsafeRef::from_raw(page) });
         }
 
-        let old_free = head.value() as *mut *mut ();
-        debug_assert!(!old_free.is_null());
+        let mut cursor = list.front_mut();
+        let page = cursor.get().unwrap();
 
-        unsafe {
-            *head = (*old_free).into();
+        let slot = page.free.get();
+        debug_assert!(!slot.is_null());
+        page.free.set(unsafe { (*slot).next });
+        page.used.set(page.used.get() + 1);
+
+        // A page with no free slots left leaves the partial list.
+        if page.free.get().is_null() {
+            cursor.remove();
         }
 
-        return old_free as *mut u8;
+        slot as *mut u8
     }
 
-    fn free(&self, addr: *mut u8) {
+    /// # Safety
+    /// `page` must be the header of the page containing `addr`.
+    unsafe fn free(&self, page: *mut SlabHeader, addr: *mut u8) {
         if unlikely(addr.is_null()) {
             return;
         }
 
-        let new_head = addr as *mut *mut ();
-        let mut head = self.head.lock();
+        let slot = addr as *mut FreeSlot;
+        let mut list = self.partial.lock();
 
-        unsafe {
-            *new_head = head.value() as *mut ();
+        let (was_linked, now_empty) = {
+            let page = unsafe { &*page };
+            let was_linked = page.link.is_linked();
+            unsafe { (*slot).next = page.free.get() };
+            page.free.set(slot);
+            let used = page.used.get() - 1;
+            page.used.set(used);
+            (was_linked, used == 0)
+        };
+
+        if now_empty {
+            // Drop it from the list and hand the page back to the PMM.
+            if was_linked {
+                unsafe { list.cursor_mut_from_ptr(page).remove() };
+            }
+            unsafe { KernelAlloc::dealloc(VirtAddr::from(page).as_hhdm().unwrap(), 1) };
+        } else if !was_linked {
+            list.push_front(unsafe { UnsafeRef::from_raw(page) });
         }
-        *head = new_head.into();
     }
 }
 
@@ -114,7 +154,6 @@ fn find_size(size: usize) -> Option<&'static Slab> {
     ALLOCATOR.slabs.iter().find(|&slab| slab.ent_size >= size)
 }
 
-#[repr(C, align(4096))]
 pub struct SlabAllocator {
     slabs: [Slab; 8],
 }
@@ -142,7 +181,8 @@ unsafe impl GlobalAlloc for SlabAllocator {
         }
 
         // Find a suitable slab.
-        let slab = find_size(layout.size());
+        let effective = layout.size().max(layout.align());
+        let slab = find_size(effective);
         if let Some(s) = slab {
             // The allocation fits within our defined slabs.
             let result = s.alloc();
@@ -151,6 +191,7 @@ unsafe impl GlobalAlloc for SlabAllocator {
         }
 
         // The allocation won't fit within our defined slabs.
+        debug_assert!(layout.align() <= arch::virt::get_page_size());
         // Get how many pages have to be allocated in order to fit `size`.
         let num_pages = divide_up(layout.size(), arch::virt::get_page_size());
 
@@ -185,9 +226,8 @@ unsafe impl GlobalAlloc for SlabAllocator {
                     (*info).num_pages + 1,
                 );
             } else {
-                let header =
-                    align_down(ptr as usize, arch::virt::get_page_size()) as *mut SlabHeader;
-                (*(*header).slab).free(ptr);
+                let page = align_down(ptr as usize, arch::virt::get_page_size()) as *mut SlabHeader;
+                (*(*page).slab).free(page, ptr);
             }
         }
     }
