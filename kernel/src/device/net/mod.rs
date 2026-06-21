@@ -57,13 +57,22 @@ pub trait SocketOps: Send + Sync + Any {
     fn bind(&self, addr: &[u8], socket: &Arc<Socket>) -> EResult<()>;
 
     /// Start listening for connections.
-    fn listen(&self, backlog: i32) -> EResult<()>;
+    fn listen(&self, backlog: i32) -> EResult<()> {
+        let _ = backlog;
+        Err(Errno::ENOTSUP)
+    }
 
     /// Accept an incoming connection. Returns a new Socket for the server side.
-    fn accept(&self, nonblocking: bool) -> EResult<Arc<Socket>>;
+    fn accept(&self, nonblocking: bool) -> EResult<Arc<Socket>> {
+        let _ = nonblocking;
+        Err(Errno::ENOTSUP)
+    }
 
     /// Connect to a remote/local address.
-    fn connect(&self, addr: &[u8], nonblocking: bool) -> EResult<()>;
+    fn connect(&self, addr: &[u8], nonblocking: bool) -> EResult<()> {
+        let _ = (nonblocking, addr);
+        Err(Errno::ENOTSUP)
+    }
 
     /// Send data.
     fn send(&self, buf: &mut IovecIter, flags: u32, nonblocking: bool) -> EResult<isize>;
@@ -190,7 +199,8 @@ impl FileOps for Socket {
                 ptr.write(conf).ok_or(Errno::EFAULT)?;
                 Ok(0)
             }
-            SIOCGIFINDEX | SIOCGIFHWADDR | SIOCGIFADDR | SIOCGIFNETMASK | SIOCGIFFLAGS => {
+            SIOCGIFINDEX | SIOCGIFHWADDR | SIOCGIFADDR | SIOCGIFNETMASK | SIOCGIFBRDADDR
+            | SIOCGIFFLAGS | SIOCGIFMTU => {
                 let mut ptr: UserPtr<ifreq> = UserPtr::new(argp);
                 let mut req = ptr.read().ok_or(Errno::EFAULT)?;
                 let iface = interface::by_name(&req.ifr_name).ok_or(Errno::ENODEV)?;
@@ -205,10 +215,21 @@ impl FileOps for Socket {
                     }
                     SIOCGIFADDR => write_sockaddr_in(&mut req.ifr_ifru, iface.ip()),
                     SIOCGIFNETMASK => write_sockaddr_in(&mut req.ifr_ifru, iface.netmask()),
+                    SIOCGIFBRDADDR => write_sockaddr_in(&mut req.ifr_ifru, iface.broadcast_ipv4()),
                     SIOCGIFFLAGS => req.ifr_ifru[..2].copy_from_slice(&iface.flags().to_ne_bytes()),
+                    SIOCGIFMTU => {
+                        req.ifr_ifru = [0; 24];
+                        req.ifr_ifru[..4].copy_from_slice(&(DEFAULT_MTU as i32).to_ne_bytes());
+                    }
                     _ => unreachable!(),
                 }
                 ptr.write(req).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
+            SIOCSIFMTU | SIOCSIFBRDADDR => {
+                let ptr: UserPtr<ifreq> = UserPtr::new(argp);
+                let req = ptr.read().ok_or(Errno::EFAULT)?;
+                interface::by_name(&req.ifr_name).ok_or(Errno::ENODEV)?;
                 Ok(0)
             }
             SIOCSIFADDR | SIOCSIFNETMASK | SIOCSIFFLAGS => {

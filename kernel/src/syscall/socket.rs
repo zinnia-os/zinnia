@@ -1,6 +1,8 @@
 use crate::{
     device::net::{
         Socket, SocketFlags, SocketOps,
+        l2::packet::PacketSocket,
+        l3::raw::RawSocket,
         l4::{tcp::TcpSocket, udp::UdpSocket},
         local::LocalSocket,
     },
@@ -81,8 +83,10 @@ pub fn socket(family: i32, socket_type: i32, protocol: i32) -> EResult<usize> {
         AF_INET => match sock_type {
             SOCK_DGRAM => UdpSocket::new(sock_type, protocol)?,
             SOCK_STREAM => TcpSocket::new(sock_type, protocol)?,
+            SOCK_RAW => RawSocket::new(protocol)?,
             _ => return Err(Errno::ESOCKTNOSUPPORT),
         },
+        AF_PACKET => PacketSocket::new(sock_type, protocol)?,
         _ => return Err(Errno::EAFNOSUPPORT),
     };
 

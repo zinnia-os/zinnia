@@ -26,7 +26,7 @@ pub fn register_nic(nic: Arc<dyn NicDevice>) -> EResult<()> {
             name[..n].copy_from_slice(&s.as_bytes()[..n]);
             name
         },
-        idx,
+        idx + 1,
         ip,
         netmask,
         gateway,

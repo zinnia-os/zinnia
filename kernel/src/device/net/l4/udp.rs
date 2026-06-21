@@ -366,6 +366,9 @@ impl SocketOps for UdpSocket {
     }
 
     fn setsockopt(&self, level: i32, optname: i32, buf: &[u8]) -> EResult<()> {
+        if level as u32 == SOL_IP {
+            return Ok(());
+        }
         if level as u32 != SOL_SOCKET {
             return Err(Errno::ENOPROTOOPT);
         }

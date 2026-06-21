@@ -45,10 +45,7 @@ impl ManagedInterface {
         netmask: Ipv4Addr,
         gateway: Option<Ipv4Addr>,
     ) -> Self {
-        let mut flags = IFF_BROADCAST | IFF_MULTICAST;
-        if ip != Ipv4Addr::ANY {
-            flags |= IFF_UP | IFF_RUNNING;
-        }
+        let flags = IFF_UP | IFF_RUNNING | IFF_BROADCAST | IFF_MULTICAST;
         Self {
             nic,
             mac,
@@ -135,6 +132,13 @@ impl ManagedInterface {
         let body = write_header(&mut frame, &dst, &self.mac, ethertype).ok_or(Errno::EINVAL)?;
         body[..payload.len()].copy_from_slice(payload);
         self.nic.send(&frame[..ETH_HEADER_LEN + payload.len()])
+    }
+
+    pub fn send_raw(&self, frame: &[u8]) -> EResult<()> {
+        if frame.len() < ETH_HEADER_LEN || frame.len() > RX_FRAME_LEN {
+            return Err(Errno::EMSGSIZE);
+        }
+        self.nic.send(frame)
     }
 
     pub fn resolve_ipv4(&self, dst: Ipv4Addr) -> EResult<MacAddr> {
@@ -240,6 +244,7 @@ extern "C" fn rx_worker_entry(arg1: usize, _arg2: usize) {
     loop {
         match interface.nic.recv(&mut frame) {
             Ok(n) => {
+                crate::device::net::l2::packet::deliver(interface.index(), &frame[..n]);
                 if let Err(e) = interface.process_frame(&frame[..n]) {
                     log!("process_frame failed: {:?}", e);
                 }

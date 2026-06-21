@@ -194,6 +194,8 @@ pub fn process_packet(interface: &ManagedInterface, eth: &EthHeader<'_>) -> ERes
 
     interface.arp_cache().insert(header.source(), eth.src());
 
+    crate::device::net::l3::raw::deliver(header.protocol(), eth.payload());
+
     match header.protocol() {
         Ipv4Protocol::Icmp => process_icmp(interface, eth.src(), &header),
         Ipv4Protocol::Tcp => l4::tcp::process_packet(interface, &header),
