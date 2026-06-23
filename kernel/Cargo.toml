@@ -2,6 +2,7 @@
 name = "zinnia"
 version = "0.2.0"
 edition = "2024"
+license = "GPL-2.0-only"
 
 [lib]
 crate-type = ["dylib"]
