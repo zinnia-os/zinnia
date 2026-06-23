@@ -390,6 +390,20 @@ pub struct drm_prime_handle {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct drm_gem_close {
+    pub handle: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct drm_mode_closefb {
+    pub fb_id: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct drm_mode_crtc_lut {
     pub crtc_id: u32,
     pub gamma_size: u32,
@@ -639,20 +653,20 @@ pub const DRM_MODE_TYPE_DRIVER: u32 = 1 << 6;
 
 pub const DRM_IOCTL_VERSION: u32 = drm_iowr::<drm_version>(0x00);
 pub const DRM_IOCTL_GET_UNIQUE: u32 = drm_iowr::<drm_unique>(0x01);
-// pub const DRM_IOCTL_GET_MAGIC: u32 = drm_ior::<drm_auth>(0x02);
+pub const DRM_IOCTL_GET_MAGIC: u32 = drm_ior::<drm_auth>(0x02);
 // pub const DRM_IOCTL_IRQ_BUSID: u32 = drm_iowr::<drm_irq_busid>(0x03);
 pub const DRM_IOCTL_GET_MAP: u32 = drm_iowr::<drm_map>(0x04);
 pub const DRM_IOCTL_GET_CLIENT: u32 = drm_iowr::<drm_client>(0x05);
 pub const DRM_IOCTL_GET_STATS: u32 = drm_ior::<drm_stats>(0x06);
 pub const DRM_IOCTL_SET_VERSION: u32 = drm_iowr::<drm_set_version>(0x07);
 // pub const DRM_IOCTL_MODESET_CTL: u32 = drm_iow::<drm_modeset_ctl>(0x08);
-// pub const DRM_IOCTL_GEM_CLOSE: u32 = drm_iow ::<drm_gem_close>(0x09);
+pub const DRM_IOCTL_GEM_CLOSE: u32 = drm_iow::<drm_gem_close>(0x09);
 // pub const DRM_IOCTL_GEM_FLINK: u32 = drm_iowr::<drm_gem_flink>(0x0a);
 // pub const DRM_IOCTL_GEM_OPEN: u32 = drm_iowr::<drm_gem_open>(0x0b);
 pub const DRM_IOCTL_GET_CAP: u32 = drm_iowr::<drm_get_cap>(0x0c);
 pub const DRM_IOCTL_SET_CLIENT_CAP: u32 = drm_iow::<drm_set_client_cap>(0x0d);
 pub const DRM_IOCTL_SET_UNIQUE: u32 = drm_iow::<drm_unique>(0x10);
-// pub const DRM_IOCTL_AUTH_MAGIC: u32 = drm_iow::<drm_auth>(0x11);
+pub const DRM_IOCTL_AUTH_MAGIC: u32 = drm_iow::<drm_auth>(0x11);
 // pub const DRM_IOCTL_BLOCK: u32 = drm_iowr::<drm_block>(0x12);
 // pub const DRM_IOCTL_UNBLOCK: u32 = drm_iowr::<drm_block>(0x13);
 pub const DRM_IOCTL_CONTROL: u32 = drm_iow::<drm_control>(0x14);
@@ -740,7 +754,7 @@ pub const DRM_IOCTL_MODE_LIST_LESSEES: u32 = drm_iowr::<drm_mode_list_lessees>(0
 // pub const DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL: u32 = drm_iowr::<drm_syncobj_timeline_array>(0xCD);
 pub const DRM_IOCTL_MODE_GETFB2: u32 = drm_iowr::<drm_mode_fb_cmd2>(0xCE);
 // pub const DRM_IOCTL_SYNCOBJ_EVENTFD: u32 = drm_iowr::<drm_syncobj_eventfd>(0xCF);
-// pub const DRM_IOCTL_MODE_CLOSEFB: u32 = drm_iowr::<drm_mode_closefb>(0xD0);
+pub const DRM_IOCTL_MODE_CLOSEFB: u32 = drm_iowr::<drm_mode_closefb>(0xD0);
 // pub const DRM_IOCTL_SET_CLIENT_NAME: u32 = drm_iowr::<drm_set_client_name>(0xD1);
 // pub const DRM_IOCTL_GEM_CHANGE_HANDLE: u32 = drm_iowr::<drm_gem_change_handle>(0xD2);
 

@@ -1,4 +1,5 @@
 use core::any::Any;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
     device::drm::Device,
@@ -6,6 +7,13 @@ use crate::{
     uapi::drm::{drm_mode_connector_state, drm_mode_connector_type, drm_mode_modeinfo},
 };
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+
+static CONNECTOR_TYPE_IDS: [AtomicU32; core::mem::variant_count::<drm_mode_connector_type>()] =
+    [const { AtomicU32::new(0) }; _];
+
+fn id_for_type(connector_type: drm_mode_connector_type) -> u32 {
+    CONNECTOR_TYPE_IDS[connector_type as usize].fetch_add(1, Ordering::Relaxed) + 1
+}
 
 pub trait ModeObject {
     fn id(&self) -> u32;
@@ -53,6 +61,7 @@ pub struct Connector {
     id: u32,
     pub state: drm_mode_connector_state,
     pub connector_type: drm_mode_connector_type,
+    pub connector_type_id: u32,
     pub modes: Vec<drm_mode_modeinfo>,
     pub possible_encoders: Vec<Arc<Encoder>>,
 }
@@ -69,6 +78,7 @@ impl Connector {
             id,
             state,
             connector_type,
+            connector_type_id: id_for_type(connector_type),
             modes,
             possible_encoders,
         }

@@ -13,6 +13,7 @@
 #![feature(macro_metavar_expr)]
 #![feature(never_type)]
 #![feature(sync_unsafe_cell)]
+#![feature(variant_count)]
 // Clippy lints
 #![allow(clippy::needless_return)]
 #![allow(clippy::new_without_default)]

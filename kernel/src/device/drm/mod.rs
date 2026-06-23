@@ -5,6 +5,7 @@ use crate::{
     memory::{AddressSpace, IovecIter, UserPtr, VirtAddr, VmFlags},
     posix::errno::{EResult, Errno},
     process::Identity,
+    sched::Scheduler,
     uapi::{
         self,
         drm::{
@@ -14,7 +15,7 @@ use crate::{
     util::{event::Event, mutex::spin::SpinMutex},
     vfs::{
         self, File,
-        file::{FileOps, MmapFlags, OpenFlags, PollEventSet, PollFlags},
+        file::{FileDescription, FileOps, MmapFlags, OpenFlags, PollEventSet, PollFlags},
         fs::devtmpfs,
         inode::Mode,
     },
@@ -22,7 +23,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 pub mod modes;
@@ -197,6 +198,21 @@ impl DrmFile {
             .cloned()
             .ok_or(Errno::EINVAL)
     }
+
+    fn queue_flip_event(&self, user_data: u64) {
+        let now = crate::clock::get_elapsed();
+        let event = PageFlipEvent {
+            event_type: 2, // DRM_EVENT_FLIP_COMPLETE
+            length: core::mem::size_of::<PageFlipEvent>() as u32,
+            user_data,
+            tv_sec: now.as_secs() as u32,
+            tv_usec: now.subsec_micros(),
+            sequence: self.flip_sequence.fetch_add(1, Ordering::AcqRel),
+            reserved: 0,
+        };
+        self.events.lock().push(event);
+        self.rd_event.wake_all();
+    }
 }
 
 impl Drop for DrmFile {
@@ -237,6 +253,26 @@ impl crate::device::Device for DrmDeviceNode {
 
     fn minor(&self) -> u32 {
         self.minor
+    }
+}
+
+struct PrimeBuffer {
+    buffer: Arc<dyn BufferObject>,
+}
+
+impl FileOps for PrimeBuffer {
+    fn mmap(
+        &self,
+        _file: &File,
+        space: &mut AddressSpace,
+        addr: VirtAddr,
+        len: NonZeroUsize,
+        prot: VmFlags,
+        _flags: MmapFlags,
+        _offset: uapi::off_t,
+    ) -> EResult<VirtAddr> {
+        space.map_object(self.buffer.clone(), addr, len, prot, 0)?;
+        Ok(addr)
     }
 }
 
@@ -335,6 +371,93 @@ impl FileOps for DrmFile {
             drm::DRM_IOCTL_SET_MASTER | drm::DRM_IOCTL_DROP_MASTER => {
                 // No-op: single client, always master
             }
+            drm::DRM_IOCTL_GET_MAGIC => {
+                // TODO
+                let mut ptr = UserPtr::<drm::drm_auth>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+                val.magic = 1;
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_AUTH_MAGIC => {
+                // TODO
+            }
+            drm::DRM_IOCTL_PRIME_HANDLE_TO_FD => {
+                let mut ptr = UserPtr::<drm::drm_prime_handle>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                let buffer = self
+                    .buffers
+                    .lock()
+                    .iter()
+                    .find(|b| b.id() == val.handle)
+                    .ok_or(Errno::EINVAL)?
+                    .clone();
+
+                let ops: Arc<dyn FileOps> = Arc::new(PrimeBuffer { buffer });
+                let file = File::open_disconnected(ops, OpenFlags::ReadWrite)?;
+
+                let proc = Scheduler::get_current().get_process();
+                let fd = proc
+                    .open_files
+                    .lock()
+                    .open_file(
+                        FileDescription {
+                            file,
+                            close_on_exec: AtomicBool::new(true),
+                        },
+                        0,
+                    )
+                    .ok_or(Errno::EMFILE)?;
+
+                val.fd = fd;
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_PRIME_FD_TO_HANDLE => {
+                let mut ptr = UserPtr::<drm::drm_prime_handle>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                let proc = Scheduler::get_current().get_process();
+                let file = proc
+                    .open_files
+                    .lock()
+                    .get_fd(val.fd)
+                    .ok_or(Errno::EBADF)?
+                    .file;
+                let prime =
+                    Arc::downcast::<PrimeBuffer>(file.ops.clone()).map_err(|_| Errno::EINVAL)?;
+                let buffer = prime.buffer.clone();
+                val.handle = buffer.id();
+
+                // Reattach so ADDFB/ADDFB2 can resolve the handle.
+                let mut buffers = self.buffers.lock();
+                if !buffers.iter().any(|b| b.id() == val.handle) {
+                    buffers.push(buffer);
+                }
+                drop(buffers);
+
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_GEM_CLOSE => {
+                let ptr = UserPtr::<drm::drm_gem_close>::new(arg);
+                let val = ptr.read().ok_or(Errno::EFAULT)?;
+                self.buffers.lock().retain(|b| b.id() != val.handle);
+            }
+            drm::DRM_IOCTL_MODE_CLOSEFB => {
+                let ptr = UserPtr::<drm::drm_mode_closefb>::new(arg);
+                let fb_id = ptr.read().ok_or(Errno::EFAULT)?.fb_id;
+
+                self.framebuffers.lock().retain(|x| x.id != fb_id);
+                self.device
+                    .state()
+                    .framebuffers
+                    .lock()
+                    .retain(|x| x.id != fb_id);
+
+                let mut active = self.active_fb.lock();
+                if matches!(*active, Some((_, ref fb)) if fb.id == fb_id) {
+                    *active = None;
+                }
+            }
             drm::DRM_IOCTL_SET_VERSION => {
                 let mut ptr = UserPtr::<drm::drm_set_version>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
@@ -351,6 +474,9 @@ impl FileOps for DrmFile {
                     drm::DRM_CAP_CURSOR_WIDTH => val.value = 64,
                     drm::DRM_CAP_CURSOR_HEIGHT => val.value = 64,
                     drm::DRM_CAP_TIMESTAMP_MONOTONIC => val.value = 1,
+                    drm::DRM_CAP_PRIME => {
+                        val.value = drm::DRM_PRIME_CAP_IMPORT | drm::DRM_PRIME_CAP_EXPORT
+                    }
                     _ => return Err(Errno::EINVAL),
                 }
                 ptr.write(val).ok_or(Errno::EFAULT)?;
@@ -432,7 +558,7 @@ impl FileOps for DrmFile {
                 // Basic information about the connector.
                 val.connection = connector.state as u32;
                 val.connector_type = connector.connector_type as u32;
-                val.connector_type_id = 0; // TODO
+                val.connector_type_id = connector.connector_type_id;
 
                 // Modes
                 if val.modes_ptr != 0 {
@@ -802,9 +928,14 @@ impl FileOps for DrmFile {
 
                 // Check if this is a test-only commit
                 const DRM_MODE_ATOMIC_TEST_ONLY: u32 = 0x0100;
+                const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
                 if val.flags & DRM_MODE_ATOMIC_TEST_ONLY == 0 {
                     // Actually commit the state
                     self.device.commit(&state);
+
+                    if val.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
+                        self.queue_flip_event(val.user_data);
+                    }
                 }
             }
             drm::DRM_IOCTL_SET_CLIENT_CAP => {
@@ -994,21 +1125,7 @@ impl FileOps for DrmFile {
                 // Queue page flip completion event if requested
                 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
                 if val.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
-                    let now = crate::clock::get_elapsed();
-                    let tv_sec = now.as_secs() as u32;
-                    let tv_usec = now.subsec_micros();
-                    let seq = self.flip_sequence.fetch_add(1, Ordering::AcqRel);
-                    let event = PageFlipEvent {
-                        event_type: 2, // DRM_EVENT_FLIP_COMPLETE
-                        length: core::mem::size_of::<PageFlipEvent>() as u32,
-                        user_data: val.user_data,
-                        tv_sec,
-                        tv_usec,
-                        sequence: seq,
-                        reserved: 0,
-                    };
-                    self.events.lock().push(event);
-                    self.rd_event.wake_all();
+                    self.queue_flip_event(val.user_data);
                 }
             }
             drm::DRM_IOCTL_WAIT_VBLANK => {
