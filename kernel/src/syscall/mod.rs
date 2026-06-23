@@ -175,7 +175,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::GETTID => process::gettid,
         numbers::GETPID => process::getpid,
         numbers::GETPPID => process::getppid,
-        numbers::WAITID => sys_unimpl!("waitid", Err(Errno::ENOSYS)),
+        numbers::WAITID => process::waitid,
         numbers::WAITPID => process::waitpid,
 
         // Threads

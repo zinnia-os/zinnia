@@ -1,4 +1,7 @@
-use crate::posix::errno::{EResult, Errno};
+use crate::{
+    clock,
+    posix::errno::{EResult, Errno},
+};
 use core::time::Duration;
 
 pub type time_t = isize;
@@ -24,6 +27,15 @@ impl timespec {
         timespec {
             tv_sec: value.as_secs() as time_t,
             tv_nsec: value.subsec_nanos() as isize,
+        }
+    }
+
+    /// Current wall-clock time as a [`timespec`].
+    pub fn now() -> timespec {
+        let secs = clock::realtime().unwrap_or(Duration::ZERO).as_secs();
+        timespec {
+            tv_sec: secs as _,
+            tv_nsec: 0,
         }
     }
 }

@@ -499,6 +499,141 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
     }
 }
 
+const P_ALL: i32 = 0;
+const P_PID: i32 = 1;
+const P_PGID: i32 = 2;
+
+#[wrap_syscall]
+pub fn waitid(idtype: i32, id: pid_t, info_loc: VirtAddr, options: i32) -> EResult<usize> {
+    use uapi::signal::{
+        CLD_CONTINUED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, SIGCHLD, SIGCONT, siginfo_t, sigval,
+    };
+    use uapi::wait::{WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WSTOPPED};
+
+    let selector: pid_t = match idtype {
+        P_ALL => -1,
+        P_PID if id > 0 => id,
+        P_PGID => -id,
+        _ => return Err(Errno::EINVAL),
+    };
+
+    // waitid requires at least one event class to be requested.
+    if (options & (WEXITED | WSTOPPED | WCONTINUED)) == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let caller_pgrp = *proc.pgrp.lock();
+    let nowait = (options & WNOWAIT) != 0;
+
+    let write_info = |signo: i32, code: u32, pid: pid_t, uid: u32, status: i32| -> EResult<()> {
+        if info_loc.is_null() {
+            return Ok(());
+        }
+        let info = siginfo_t {
+            si_signo: signo,
+            si_code: code as i32,
+            si_errno: 0,
+            si_pid: pid,
+            si_uid: uid,
+            si_addr: UserPtr::new(VirtAddr::null()),
+            si_status: status,
+            si_value: sigval { sival_int: 0 },
+        };
+        UserPtr::<siginfo_t>::new(info_loc)
+            .write(info)
+            .ok_or(Errno::EFAULT)
+    };
+
+    loop {
+        let guard = proc.child_event.guard();
+        {
+            let mut children = proc.children.lock();
+            if children.is_empty() {
+                return Err(Errno::ECHILD);
+            }
+
+            let mut saw_match = false;
+            // (index, reapable, pid, uid, code, status)
+            let mut hit: Option<(usize, bool, pid_t, u32, u32, i32)> = None;
+
+            for (idx, child) in children.iter().enumerate() {
+                if !waitpid_matches(selector, caller_pgrp, child) {
+                    continue;
+                }
+                saw_match = true;
+                let uid = child.identity.lock().user_id as u32;
+                let state = child.status.lock();
+                match *state {
+                    State::Exited(code) if (options & WEXITED) != 0 => {
+                        hit = Some((idx, true, child.get_pid(), uid, CLD_EXITED, code as i32));
+                        break;
+                    }
+                    State::Signaled(sig) if (options & WEXITED) != 0 => {
+                        hit = Some((idx, true, child.get_pid(), uid, CLD_KILLED, sig as i32));
+                        break;
+                    }
+                    State::Stopped(sig)
+                        if (options & WSTOPPED) != 0
+                            && (if nowait {
+                                child.stop_unwaited.load(Ordering::Acquire)
+                            } else {
+                                child.stop_unwaited.swap(false, Ordering::AcqRel)
+                            }) =>
+                    {
+                        hit = Some((idx, false, child.get_pid(), uid, CLD_STOPPED, sig as i32));
+                        break;
+                    }
+                    _ if (options & WCONTINUED) != 0
+                        && (if nowait {
+                            child.continue_unwaited.load(Ordering::Acquire)
+                        } else {
+                            child.continue_unwaited.swap(false, Ordering::AcqRel)
+                        }) =>
+                    {
+                        hit = Some((
+                            idx,
+                            false,
+                            child.get_pid(),
+                            uid,
+                            CLD_CONTINUED,
+                            SIGCONT as i32,
+                        ));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some((idx, reapable, pid, uid, code, status)) = hit {
+                write_info(SIGCHLD as i32, code, pid, uid, status)?;
+                if reapable && !nowait {
+                    children.remove(idx);
+                }
+                return Ok(0);
+            }
+
+            if !saw_match {
+                return Err(Errno::ECHILD);
+            }
+
+            // Nothing waitable yet.
+            if (options & WNOHANG) != 0 {
+                write_info(0, 0, 0, 0, 0)?;
+                return Ok(0);
+            }
+        }
+
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::ERESTART);
+        }
+        guard.wait();
+        if Scheduler::get_current().has_pending_signals() {
+            return Err(Errno::ERESTART);
+        }
+    }
+}
+
 const THREAD_NAME_MAX: usize = 16;
 
 #[wrap_syscall]
