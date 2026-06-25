@@ -7,7 +7,7 @@ use zinnia::{
     core::sync::atomic::{AtomicU32, Ordering},
     device::drm::{
         Device, DeviceState, DrmFile, IdAllocator,
-        modes::DMT_MODES,
+        modes::{DMT_MODES, synthesize_preferred_mode},
         object::{AtomicState, BufferObject, Connector, Crtc, Encoder, Framebuffer, Plane},
     },
     error, log,
@@ -15,7 +15,6 @@ use zinnia::{
     posix::errno::{EResult, Errno},
     uapi::drm::{
         DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, drm_mode_connector_state,
-        drm_mode_modeinfo,
     },
     util::mutex::spin::SpinMutex,
 };
@@ -322,10 +321,12 @@ impl VirtioGpuDevice {
             return Err(Errno::EIO);
         }
 
-        // Update scanout state
+        // Update scanout state.
         let mut scanouts = self.scanouts.lock();
         if let Some(scanout) = scanouts.iter_mut().find(|s| s.id == scanout_id) {
             scanout.current_resource = Some(resource_id);
+            scanout.width = width;
+            scanout.height = height;
         }
 
         Ok(())
@@ -431,14 +432,16 @@ impl VirtioGpuDevice {
             let encoder = Arc::new(Encoder::new(encoder_id, vec![crtc.clone()], crtc.clone()));
             all_encoders.push(encoder.clone());
 
-            // Look up proper modes from the DMT table
-            let modes: Vec<drm_mode_modeinfo> = DMT_MODES
-                .iter()
-                .filter(|m| {
-                    m.hdisplay == scanout.width as u16 && m.vdisplay == scanout.height as u16
-                })
-                .cloned()
-                .collect();
+            let preferred = synthesize_preferred_mode(scanout.width, scanout.height);
+            let mut modes = vec![preferred];
+            modes.extend(
+                DMT_MODES
+                    .iter()
+                    .filter(|m| {
+                        m.hdisplay != preferred.hdisplay || m.vdisplay != preferred.vdisplay
+                    })
+                    .cloned(),
+            );
 
             // Create connector
             let connector_id = self.obj_counter.alloc();
@@ -620,20 +623,21 @@ impl Device for VirtioGpuDevice {
 
         let resource_id = virtio_buffer.resource_id;
 
-        // Get scanout information and check whether the bound resource is already what we want.
-        let (scanout_id, scanout_width, scanout_height, needs_set_scanout) = {
+        let (scanout_id, needs_set_scanout) = {
             let scanouts = self.scanouts.lock();
             if let Some(scanout) = scanouts.first() {
-                let needs = scanout.current_resource != Some(resource_id);
-                (scanout.id, scanout.width, scanout.height, needs)
+                let needs = scanout.current_resource != Some(resource_id)
+                    || scanout.width != framebuffer.width
+                    || scanout.height != framebuffer.height;
+                (scanout.id, needs)
             } else {
                 error!("No scanouts available!");
                 return;
             }
         };
 
-        let transfer_width = framebuffer.width.min(scanout_width);
-        let transfer_height = framebuffer.height.min(scanout_height);
+        let transfer_width = framebuffer.width;
+        let transfer_height = framebuffer.height;
 
         // Upload the new framebuffer contents before rebinding the scanout.
         // Otherwise the host can briefly display stale pixels from this resource.
