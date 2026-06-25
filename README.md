@@ -2,7 +2,7 @@
 
 # Zinnia
 
-![GitHub License](https://img.shields.io/github/license/zinnia-os/zinnia?style=flat&color=red)
+![GitHub License](https://img.shields.io/github/license/zinnia-os/zinnia?style=flat&color=green)
 ![GitHub Repo stars](https://img.shields.io/github/stars/zinnia-os/zinnia?style=flat)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/zinnia-os/zinnia/ci.yml)
 ![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/zinnia-os/zinnia?style=flat)
@@ -41,7 +41,7 @@ including the `rust-src` component.
 
 The following commmand will build the kernel and all drivers for x86_64:
 ```sh
-cargo +nightly build --release --target toolchain/x86_64-kernel.json
+cargo +nightly build --release -Zjson-target-spec --target toolchain/x86_64-kernel.json
 ```
 
 ## Debugging
