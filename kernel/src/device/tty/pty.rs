@@ -354,6 +354,12 @@ impl FileOps for PtyMaster {
                 self.pair.tty.signal_foreground(sig);
                 Ok(0)
             }
+            uapi::ioctls::FIONREAD => {
+                let avail = self.pair.master_buf.lock().get_data_len() as i32;
+                let mut ptr: UserPtr<i32> = UserPtr::new(arg);
+                ptr.write(avail).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
             _ => {
                 // Forward other ioctls (TCGETS, TIOCGWINSZ, etc.) to the slave TTY.
                 let ops = TtyFileOps {
