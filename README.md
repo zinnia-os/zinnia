@@ -6,6 +6,7 @@
 ![GitHub Repo stars](https://img.shields.io/github/stars/zinnia-os/zinnia?style=flat)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/zinnia-os/zinnia/ci.yml)
 ![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/zinnia-os/zinnia?style=flat)
+![Discord](https://img.shields.io/discord/1305893510704267327?logo=discord&logoColor=white&label=discord)
 
 Zinnia is a modular 64-bit Unix-like kernel written in Rust.
 
