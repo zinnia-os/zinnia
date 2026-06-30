@@ -9,7 +9,7 @@ use crate::{
     process::task::Task,
     uapi::input::{BUS_USB, EV_SYN, InputAbsinfo, InputId},
 };
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use parser::Parser;
 
 #[initgraph::task(name = "device.usb.hid", depends = [crate::memory::MEMORY_STAGE])]
@@ -82,8 +82,12 @@ async fn hid_worker(
     };
 
     // Identify the device for the input layer.
-    let (vendor, product) =
-        (*device.descriptor.lock()).map_or((0, 0), |d| (d.vendor_id, d.product_id));
+    let (vendor, product, product_string_index) =
+        (*device.descriptor.lock()).map_or((0, 0, 0), |d| (d.vendor_id, d.product_id, d.product));
+    let device_name = match device.get_string(interface_desc.interface).await {
+        Some(name) => Some(name),
+        None => device.get_string(product_string_index).await,
+    };
 
     // Fetch the report descriptor.
     let mut report_desc = vec![0u8; MAX_REPORT_DESC];
@@ -153,7 +157,7 @@ async fn hid_worker(
     let mut devices: Vec<Arc<EventDevice>> = Vec::new();
     for caps in parser.build_caps() {
         let ops = Arc::new(HidInputDevice {
-            name: caps.name,
+            name: device_name.as_deref().unwrap_or(caps.name).into(),
             id: InputId {
                 bustype: BUS_USB,
                 vendor,
@@ -198,7 +202,7 @@ async fn hid_worker(
 }
 
 struct HidInputDevice {
-    name: &'static str,
+    name: String,
     id: InputId,
     ev: u32,
     keys: Vec<u8>,
@@ -209,7 +213,7 @@ struct HidInputDevice {
 
 impl EventDeviceOps for HidInputDevice {
     fn name(&self) -> &str {
-        self.name
+        &self.name
     }
 
     fn id(&self) -> InputId {
