@@ -121,49 +121,44 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+impl PollFlags {
+    pub fn wants_read_wake(self) -> bool {
+        self.intersects(Self::Read | Self::Err | Self::Hup) || !self.intersects(Self::Write)
+    }
+
+    pub fn wants_write_wake(self) -> bool {
+        self.intersects(Self::Write | Self::Err | Self::Hup) || !self.intersects(Self::Read)
+    }
+}
+
 pub struct PollEventSet<'a> {
-    first: Option<&'a Event>,
-    second: Option<&'a Event>,
+    events: Vec<&'a Event>,
 }
 
 impl<'a> PollEventSet<'a> {
-    pub const fn new() -> Self {
-        Self {
-            first: None,
-            second: None,
-        }
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
     }
 
-    pub const fn one(event: &'a Event) -> Self {
+    pub fn one(event: &'a Event) -> Self {
         Self {
-            first: Some(event),
-            second: None,
+            events: Vec::from([event]),
         }
     }
 
     pub fn add(mut self, event: &'a Event) -> Self {
-        if self
-            .first
-            .is_some_and(|existing| core::ptr::eq(existing, event))
-            || self
-                .second
-                .is_some_and(|existing| core::ptr::eq(existing, event))
+        if !self
+            .events
+            .iter()
+            .any(|existing| core::ptr::eq(*existing, event))
         {
-            return self;
+            self.events.push(event);
         }
-
-        if self.first.is_none() {
-            self.first = Some(event);
-        } else if self.second.is_none() {
-            self.second = Some(event);
-        }
-
         self
     }
 
     pub fn iter(self) -> impl Iterator<Item = &'a Event> {
-        [self.first, self.second].into_iter().flatten()
+        self.events.into_iter()
     }
 }
 

@@ -10,10 +10,7 @@ use crate::{
         access::{R_OK, W_OK, X_OK},
         dev_t,
         dirent::dirent,
-        epoll::{
-            EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLEXCLUSIVE, EPOLLMSG,
-            EPOLLONESHOT, epoll_data, epoll_event,
-        },
+        epoll::{EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLEXCLUSIVE, epoll_event},
         fcntl::{O_CLOEXEC, *},
         limits::PATH_MAX,
         mode_t,
@@ -700,17 +697,19 @@ pub fn ppoll(
     let timeout_guard = deadline.map(clock::timeout_at);
 
     loop {
-        let guards: Vec<_> = if is_nonblocking {
-            Vec::new()
-        } else {
-            let mut guards = Vec::new();
+        let mut guards = Vec::new();
+        if !is_nonblocking {
             for (file_opt, mask) in files.iter().zip(masks.iter()) {
                 if let Some(file) = file_opt {
-                    guards.extend(file.ops.poll_events(file, *mask).iter().map(|e| e.guard()));
+                    guards.extend(
+                        file.ops
+                            .poll_events(file, *mask | PollFlags::Err | PollFlags::Hup)
+                            .iter()
+                            .map(|e| e.guard()),
+                    );
                 }
             }
-            guards
-        };
+        }
 
         let mut ready_count = 0usize;
         for ((poll_entry, file_opt), mask) in fds.iter_mut().zip(files.iter()).zip(masks.iter()) {
@@ -738,12 +737,8 @@ pub fn ppoll(
             }
         }
 
-        // Return once anything is ready, on a zero timeout, once the deadline passes,
-        // or when there is nothing that could ever wake us.
-        if ready_count > 0
-            || is_nonblocking
-            || timeout_guard.as_ref().is_some_and(|g| g.expired())
-            || (guards.is_empty() && timeout_guard.is_none())
+        // Return once anything is ready, on a zero timeout, or once the deadline passes.
+        if ready_count > 0 || is_nonblocking || timeout_guard.as_ref().is_some_and(|g| g.expired())
         {
             let mut fds_out = UserPtr::<pollfd>::new(fds_ptr.addr());
             fds_out.write_slice(&fds).ok_or(Errno::EFAULT)?;
@@ -1645,17 +1640,6 @@ fn epoll_of(file: &File) -> Arc<EpollFile> {
     Arc::downcast(file.ops.clone()).expect("file was previously verified as an epoll")
 }
 
-const fn poll_flags_from_epoll(events: u32) -> PollFlags {
-    // Drop ET/ONESHOT/EXCLUSIVE/WAKEUP metadata bits and EPOLLMSG, which collides
-    // with POLLNVAL in the PollFlags encoding and has no poll equivalent.
-    let bits = (events & 0x07FF) & !EPOLLMSG;
-    PollFlags::from_bits_truncate(bits as i16)
-}
-
-const fn epoll_bits_from_poll(revents: PollFlags) -> u32 {
-    (revents.bits() as u16) as u32
-}
-
 #[wrap_syscall]
 pub fn epoll_create(flags: i32) -> EResult<i32> {
     if flags & !(O_CLOEXEC as i32) != 0 {
@@ -1707,9 +1691,6 @@ pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event_ptr: VirtAddr) -> EResult<()
             if ev.events & EPOLLEXCLUSIVE != 0 {
                 warn!("epoll_ctl: EPOLLEXCLUSIVE is not supported");
             }
-            if ev.events & EPOLLET != 0 {
-                warn!("epoll_ctl: EPOLLET requested, treating as level-triggered");
-            }
             epoll.add(fd, target, ev.events, unsafe { ev.data.num_u64 })
         }
         EPOLL_CTL_MOD => {
@@ -1718,7 +1699,7 @@ pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event_ptr: VirtAddr) -> EResult<()
                 .ok_or(Errno::EFAULT)?;
             epoll.modify(fd, ev.events, unsafe { ev.data.num_u64 })
         }
-        EPOLL_CTL_DEL => epoll.remove(fd),
+        EPOLL_CTL_DEL => epoll.delete(fd),
         _ => Err(Errno::EINVAL),
     }
 }
@@ -1748,100 +1729,12 @@ pub fn epoll_pwait(
 
     let epfile = resolve_epoll(epfd)?;
     let epoll = epoll_of(&epfile);
-    let maxevents = maxevents as usize;
 
-    let is_nonblocking = timeout_ms == 0;
-    let timeout_guard = if timeout_ms > 0 {
-        let deadline =
-            clock::get_elapsed().saturating_add(Duration::from_millis(timeout_ms as u64));
-        Some(clock::timeout_at(deadline))
-    } else {
-        None
-    };
+    let nonblocking = timeout_ms == 0;
+    let deadline = (timeout_ms > 0)
+        .then(|| clock::get_elapsed().saturating_add(Duration::from_millis(timeout_ms as u64)));
 
-    let mut out: Vec<epoll_event> = Vec::with_capacity(maxevents);
-    let mut oneshot_fired: Vec<i32> = Vec::new();
-
-    loop {
-        let registrations = epoll.snapshot();
-
-        let mut wait_files: Vec<Arc<File>> = Vec::new();
-        if !is_nonblocking {
-            for (_, _, _, file) in &registrations {
-                if let Ok(inner) = Arc::downcast::<EpollFile>(file.ops.clone()) {
-                    inner.get_children(&mut wait_files);
-                } else {
-                    wait_files.push(file.clone());
-                }
-            }
-        }
-
-        let guards: Vec<_> = if is_nonblocking {
-            Vec::new()
-        } else {
-            let mut guards = Vec::new();
-            for file in &wait_files {
-                for ev in file
-                    .ops
-                    .poll_events(file, PollFlags::Read | PollFlags::Write)
-                    .iter()
-                {
-                    guards.push(ev.guard());
-                }
-            }
-            guards
-        };
-
-        out.clear();
-        oneshot_fired.clear();
-
-        for (fd, events, data, file) in &registrations {
-            if out.len() >= maxevents {
-                break;
-            }
-            let mask = poll_flags_from_epoll(*events);
-            let revents = match file.ops.poll(file, mask) {
-                Ok(r) => r,
-                Err(_) => PollFlags::Err,
-            };
-            let reported = epoll_bits_from_poll(revents) & *events;
-            if reported != 0 {
-                out.push(epoll_event {
-                    events: reported,
-                    data: epoll_data { num_u64: *data },
-                });
-                if *events & EPOLLONESHOT != 0 {
-                    oneshot_fired.push(*fd);
-                }
-            }
-        }
-
-        if !out.is_empty() || is_nonblocking {
-            break;
-        }
-        if timeout_guard.as_ref().is_some_and(|g| g.expired()) {
-            break;
-        }
-
-        // No way to be woken: empty interest list and indefinite wait would hang.
-        if guards.is_empty() && timeout_guard.is_none() {
-            break;
-        }
-
-        if let Some(g) = guards.first() {
-            g.wait();
-        } else {
-            CpuData::get().scheduler.do_yield();
-        }
-
-        if Scheduler::get_current().has_pending_signals() {
-            return Err(Errno::EINTR);
-        }
-    }
-
-    for fd in oneshot_fired {
-        epoll.disarm_oneshot(fd);
-    }
+    let out = epoll.wait(maxevents as usize, deadline, nonblocking)?;
 
     let mut writer = UserPtr::<epoll_event>::new(events_ptr);
     writer.write_slice(&out).ok_or(Errno::EFAULT)?;

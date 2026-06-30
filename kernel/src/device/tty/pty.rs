@@ -390,11 +390,14 @@ impl FileOps for PtyMaster {
     }
 
     fn poll_events(&self, _file: &File, mask: PollFlags) -> PollEventSet<'_> {
-        if mask.intersects(PollFlags::Read) {
-            PollEventSet::one(&self.pair.master_rd_event)
-        } else {
-            PollEventSet::new()
+        let mut events = PollEventSet::new();
+        if mask.wants_read_wake() {
+            events = events.add(&self.pair.master_rd_event);
         }
+        if mask.wants_write_wake() {
+            events = events.add(&self.pair.master_wr_event);
+        }
+        events
     }
 }
 

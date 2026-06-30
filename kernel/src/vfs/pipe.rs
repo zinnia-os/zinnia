@@ -203,14 +203,11 @@ impl FileOps for PipeFile {
     }
 
     fn poll_events(&self, _file: &File, mask: PollFlags) -> PollEventSet<'_> {
-        let wants_read = mask.intersects(PollFlags::Read);
-        let wants_write = mask.intersects(PollFlags::Write);
-
         let mut events = PollEventSet::new();
-        if wants_read || !wants_write {
+        if mask.wants_read_wake() {
             events = events.add(&self.buffer.rd_queue);
         }
-        if wants_write || !wants_read {
+        if mask.wants_write_wake() {
             events = events.add(&self.buffer.wr_queue);
         }
         events

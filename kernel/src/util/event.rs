@@ -1,5 +1,9 @@
 use crate::{percpu::CpuData, process::task::Task, sched::Scheduler, util::mutex::spin::SpinMutex};
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
@@ -14,15 +18,26 @@ pub struct Waiter {
 
 intrusive_adapter!(WaitersLinkAdapter = UnsafeRef<Waiter>: Waiter { waiters_link => LinkedListAtomicLink });
 
+struct Observer {
+    link: LinkedListAtomicLink,
+    target: Weak<Event>,
+}
+
+intrusive_adapter!(ObserverAdapter = UnsafeRef<Observer>: Observer { link => LinkedListAtomicLink });
+
 #[derive(Debug)]
 pub struct Event {
     waiters: SpinMutex<LinkedList<WaitersLinkAdapter>>,
+    observers: SpinMutex<LinkedList<ObserverAdapter>>,
+    forwarding: AtomicBool,
 }
 
 impl Event {
     pub fn new() -> Self {
         Self {
             waiters: SpinMutex::new(LinkedList::new(WaitersLinkAdapter::NEW)),
+            observers: SpinMutex::new(LinkedList::new(ObserverAdapter::NEW)),
+            forwarding: AtomicBool::new(false),
         }
     }
 
@@ -70,31 +85,68 @@ impl Event {
     /// Wakes up to `count` waiters, returning the number actually woken.
     #[track_caller]
     pub fn wake_n(&self, count: usize) -> usize {
-        let mut waiters = self.waiters.lock();
         let mut woke = 0;
-        while woke < count {
-            let Some(waiter) = waiters.pop_front() else {
-                break;
-            };
-            waiter.woken.store(true, Ordering::Release);
-            Scheduler::wake_task(waiter.task.clone());
-            woke += 1;
+        {
+            let mut waiters = self.waiters.lock();
+            while woke < count {
+                let Some(waiter) = waiters.pop_front() else {
+                    break;
+                };
+                waiter.woken.store(true, Ordering::Release);
+                Scheduler::wake_task(waiter.task.clone());
+                woke += 1;
+            }
         }
+        self.forward();
         woke
     }
 
     #[track_caller]
     pub fn wake_all(&self) -> usize {
-        let mut waiters = self.waiters.lock();
         let mut woke = 0;
-        for waiter in waiters.iter() {
-            waiter.woken.store(true, Ordering::Release);
-            Scheduler::wake_task(waiter.task.clone());
-            woke += 1;
+        {
+            let mut waiters = self.waiters.lock();
+            for waiter in waiters.iter() {
+                waiter.woken.store(true, Ordering::Release);
+                Scheduler::wake_task(waiter.task.clone());
+                woke += 1;
+            }
+            waiters.clear();
         }
-        // UnsafeRefs are non-owning, so this just unlinks the nodes without freeing the Waiters (the guards own them).
-        waiters.clear();
+        self.forward();
         woke
+    }
+
+    /// Registers `target` so a wake of this event also wakes it.
+    pub fn add_observer(&self, target: Weak<Event>) -> ObserverHandle {
+        let observer = Box::pin(Observer {
+            link: LinkedListAtomicLink::new(),
+            target,
+        });
+        self.observers
+            .lock()
+            .push_back(unsafe { UnsafeRef::from_raw(&*observer as *const Observer) });
+        ObserverHandle {
+            source: self,
+            observer,
+        }
+    }
+
+    /// Forwards a wake to live observers without holding two event locks at once.
+    fn forward(&self) {
+        if self.forwarding.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let targets: Vec<Arc<Event>> = self
+            .observers
+            .lock()
+            .iter()
+            .filter_map(|o| o.target.upgrade())
+            .collect();
+        for target in targets {
+            target.wake_all();
+        }
+        self.forwarding.store(false, Ordering::Release);
     }
 }
 
@@ -126,6 +178,27 @@ impl<'n> Drop for EventGuard<'n> {
 
         if self.waiter.waiters_link.is_linked() {
             let mut cursor = unsafe { waiters.cursor_mut_from_ptr(&*self.waiter as *const Waiter) };
+            cursor.remove();
+        }
+    }
+}
+
+pub struct ObserverHandle {
+    source: *const Event,
+    observer: Pin<Box<Observer>>,
+}
+
+// Safety: like EventGuard, the observer is pinned and the list reference is protected by the
+// source's SpinMutex, which we hold during Drop.
+unsafe impl Send for ObserverHandle {}
+unsafe impl Sync for ObserverHandle {}
+
+impl Drop for ObserverHandle {
+    fn drop(&mut self) {
+        let mut observers = unsafe { &*self.source }.observers.lock();
+        if self.observer.link.is_linked() {
+            let mut cursor =
+                unsafe { observers.cursor_mut_from_ptr(&*self.observer as *const Observer) };
             cursor.remove();
         }
     }

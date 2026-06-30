@@ -950,14 +950,11 @@ impl SocketOps for LocalSocket {
     }
 
     fn poll_events(&self, mask: PollFlags) -> PollEventSet<'_> {
-        let wants_read = mask.intersects(PollFlags::Read);
-        let wants_write = mask.intersects(PollFlags::Write);
-
         let mut events = PollEventSet::new();
-        if wants_read || !wants_write {
+        if mask.wants_read_wake() {
             events = events.add(&self.rd_event);
         }
-        if wants_write || !wants_read {
+        if mask.wants_write_wake() {
             events = events.add(&self.wr_event);
         }
         events

@@ -1,74 +1,183 @@
 use crate::{
+    clock,
     posix::errno::{EResult, Errno},
-    uapi::epoll::{EPOLLERR, EPOLLHUP},
-    util::mutex::spin::SpinMutex,
+    sched::Scheduler,
+    uapi::epoll::{EPOLLERR, EPOLLHUP, EPOLLMSG, EPOLLONESHOT, epoll_data, epoll_event},
+    util::{
+        event::{Event, ObserverHandle},
+        mutex::spin::SpinMutex,
+    },
     vfs::{
         File,
         file::{FileOps, PollEventSet, PollFlags},
     },
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use core::time::Duration;
+
+const MAX_NEST: usize = 4;
 
 pub struct EpollFile {
-    interest: SpinMutex<BTreeMap<i32, Registration>>,
+    ready: Arc<Event>,
+    items: SpinMutex<BTreeMap<i32, EpollItem>>,
 }
 
-pub struct Registration {
-    pub events: u32,
-    pub data: u64,
-    pub file: Arc<File>,
+struct EpollItem {
+    // Drop observers before the file that owns their source events.
+    _observers: Vec<ObserverHandle>,
+    file: Arc<File>,
+    interest: u32,
+    data: u64,
+    disabled: bool,
 }
 
 impl EpollFile {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            interest: SpinMutex::new(BTreeMap::new()),
+            ready: Arc::new(Event::new()),
+            items: SpinMutex::new(BTreeMap::new()),
         }
     }
 
     pub fn add(&self, fd: i32, file: Arc<File>, events: u32, data: u64) -> EResult<()> {
-        let mut interest = self.interest.lock();
-        if interest.contains_key(&fd) {
-            return Err(Errno::EEXIST);
+        self.check_no_loop(&file, MAX_NEST)?;
+        let interest = events | EPOLLERR | EPOLLHUP;
+        let observers = self.observe(&file, interest);
+
+        {
+            let mut items = self.items.lock();
+            if items.contains_key(&fd) {
+                return Err(Errno::EEXIST);
+            }
+            items.insert(
+                fd,
+                EpollItem {
+                    _observers: observers,
+                    file,
+                    interest,
+                    data,
+                    disabled: false,
+                },
+            );
         }
-        interest.insert(
-            fd,
-            Registration {
-                events: events | EPOLLERR | EPOLLHUP,
-                data,
-                file,
-            },
-        );
+        self.ready.wake_all();
         Ok(())
     }
 
     pub fn modify(&self, fd: i32, events: u32, data: u64) -> EResult<()> {
-        let mut interest = self.interest.lock();
-        let reg = interest.get_mut(&fd).ok_or(Errno::ENOENT)?;
-        reg.events = events | EPOLLERR | EPOLLHUP;
-        reg.data = data;
+        let file = {
+            let items = self.items.lock();
+            items.get(&fd).ok_or(Errno::ENOENT)?.file.clone()
+        };
+        let interest = events | EPOLLERR | EPOLLHUP;
+        let observers = self.observe(&file, interest);
+
+        {
+            let mut items = self.items.lock();
+            let item = items.get_mut(&fd).ok_or(Errno::ENOENT)?;
+            item._observers = observers;
+            item.interest = interest;
+            item.data = data;
+            item.disabled = false;
+        }
+        self.ready.wake_all();
         Ok(())
     }
 
-    pub fn remove(&self, fd: i32) -> EResult<()> {
-        let mut interest = self.interest.lock();
-        interest.remove(&fd).ok_or(Errno::ENOENT)?;
+    pub fn delete(&self, fd: i32) -> EResult<()> {
+        self.items.lock().remove(&fd).ok_or(Errno::ENOENT)?;
         Ok(())
     }
 
-    pub fn snapshot(&self) -> Vec<(i32, u32, u64, Arc<File>)> {
-        self.interest
-            .lock()
+    fn observe(&self, file: &File, interest: u32) -> Vec<ObserverHandle> {
+        let weak = Arc::downgrade(&self.ready);
+        file.ops
+            .poll_events(file, poll_flags_from_epoll(interest))
             .iter()
-            .map(|(fd, reg)| (*fd, reg.events, reg.data, reg.file.clone()))
+            .map(|ev| ev.add_observer(weak.clone()))
             .collect()
     }
 
-    pub fn disarm_oneshot(&self, fd: i32) {
-        if let Some(reg) = self.interest.lock().get_mut(&fd) {
-            // EPOLLERR and EPOLLHUP are always reported but the user mask becomes zero
-            // so nothing will actually match until EPOLL_CTL_MOD re-arms it.
-            reg.events = EPOLLERR | EPOLLHUP;
+    fn check_no_loop(&self, file: &Arc<File>, depth: usize) -> EResult<()> {
+        let Ok(child) = Arc::downcast::<EpollFile>(file.ops.clone()) else {
+            return Ok(());
+        };
+        if core::ptr::eq(Arc::as_ptr(&child), self) || depth == 0 {
+            return Err(Errno::ELOOP);
+        }
+        let files: Vec<Arc<File>> = child
+            .items
+            .lock()
+            .values()
+            .map(|i| i.file.clone())
+            .collect();
+        for file in &files {
+            self.check_no_loop(file, depth - 1)?;
+        }
+        Ok(())
+    }
+
+    pub fn wait(
+        &self,
+        maxevents: usize,
+        deadline: Option<Duration>,
+        nonblocking: bool,
+    ) -> EResult<Vec<epoll_event>> {
+        let timeout = deadline.map(clock::timeout_at);
+        let mut out: Vec<epoll_event> = Vec::with_capacity(maxevents);
+
+        loop {
+            let guard = (!nonblocking).then(|| self.ready.guard());
+
+            out.clear();
+            let snapshot: Vec<(i32, u32, u64, bool, Arc<File>)> = self
+                .items
+                .lock()
+                .iter()
+                .map(|(fd, it)| (*fd, it.interest, it.data, it.disabled, it.file.clone()))
+                .collect();
+
+            let mut oneshot_fired: Vec<i32> = Vec::new();
+            for (fd, interest, data, disabled, file) in &snapshot {
+                if out.len() >= maxevents {
+                    break;
+                }
+                if *disabled {
+                    continue;
+                }
+                let mask = poll_flags_from_epoll(*interest);
+                let revents = file.ops.poll(file, mask).unwrap_or(PollFlags::Err);
+                let reported = epoll_bits_from_poll(revents) & *interest;
+                if reported != 0 {
+                    out.push(epoll_event {
+                        events: reported,
+                        data: epoll_data { num_u64: *data },
+                    });
+                    if *interest & EPOLLONESHOT != 0 {
+                        oneshot_fired.push(*fd);
+                    }
+                }
+            }
+
+            if !oneshot_fired.is_empty() {
+                let mut items = self.items.lock();
+                for fd in oneshot_fired {
+                    if let Some(item) = items.get_mut(&fd) {
+                        item.disabled = true;
+                    }
+                }
+            }
+
+            if !out.is_empty() || nonblocking || timeout.as_ref().is_some_and(|g| g.expired()) {
+                return Ok(out);
+            }
+
+            if let Some(g) = &guard {
+                g.wait();
+            }
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::EINTR);
+            }
         }
     }
 }
@@ -78,16 +187,19 @@ impl FileOps for EpollFile {
         if !mask.intersects(PollFlags::Read) {
             return Ok(PollFlags::empty());
         }
-        let regs: Vec<(u32, Arc<File>)> = self
-            .interest
+        let snapshot: Vec<(u32, bool, Arc<File>)> = self
+            .items
             .lock()
             .values()
-            .map(|r| (r.events, r.file.clone()))
+            .map(|it| (it.interest, it.disabled, it.file.clone()))
             .collect();
-        for (events, file) in regs {
-            let child_mask = flags_from_epoll(events);
-            let revents = file.ops.poll(&file, child_mask).unwrap_or(PollFlags::Err);
-            if !(revents & child_mask).is_empty() {
+        for (interest, disabled, file) in snapshot {
+            if disabled {
+                continue;
+            }
+            let m = poll_flags_from_epoll(interest);
+            let revents = file.ops.poll(&file, m).unwrap_or(PollFlags::Err);
+            if epoll_bits_from_poll(revents) & interest != 0 {
                 return Ok(PollFlags::In);
             }
         }
@@ -95,41 +207,15 @@ impl FileOps for EpollFile {
     }
 
     fn poll_events(&self, _file: &File, _mask: PollFlags) -> PollEventSet<'_> {
-        PollEventSet::new()
+        PollEventSet::one(self.ready.as_ref())
     }
 }
 
-/// Convert epoll event bits to `PollFlags`, dropping metadata bits.
-const fn flags_from_epoll(events: u32) -> PollFlags {
-    let bits = (events & 0x07FF) & !crate::uapi::epoll::EPOLLMSG;
+const fn poll_flags_from_epoll(events: u32) -> PollFlags {
+    let bits = (events & 0x07FF) & !EPOLLMSG;
     PollFlags::from_bits_truncate(bits as i16)
 }
 
-impl EpollFile {
-    /// Recursively collect all leaf (non-epoll) registrations watched by this epoll,
-    /// so that the waiter can register on each of their readiness events.
-    pub fn get_children(&self, out: &mut Vec<Arc<File>>) {
-        self.get_children_recursive(out, &mut vec![self as *const _ as usize])
-    }
-
-    fn get_children_recursive(&self, out: &mut Vec<Arc<File>>, visited: &mut Vec<usize>) {
-        let files: Vec<Arc<File>> = self
-            .interest
-            .lock()
-            .values()
-            .map(|r| r.file.clone())
-            .collect();
-        for file in files {
-            if let Ok(child_epoll) = Arc::downcast::<EpollFile>(file.ops.clone()) {
-                let key = Arc::as_ptr(&child_epoll) as usize;
-                if visited.contains(&key) {
-                    continue;
-                }
-                visited.push(key);
-                child_epoll.get_children_recursive(out, visited);
-            } else {
-                out.push(file.clone());
-            }
-        }
-    }
+const fn epoll_bits_from_poll(revents: PollFlags) -> u32 {
+    (revents.bits() as u16) as u32
 }
