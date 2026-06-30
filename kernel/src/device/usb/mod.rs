@@ -1,7 +1,10 @@
 use crate::{
-    device::usb::hub::Hub, memory::IovecIter, posix::errno::EResult, util::mutex::spin::SpinMutex,
+    device::usb::hub::Hub,
+    memory::{IovecIter, PhysAddr},
+    posix::errno::EResult,
+    util::mutex::spin::SpinMutex,
 };
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use async_trait::async_trait;
 use core::any::Any;
 use num_enum::FromPrimitive;
@@ -10,6 +13,7 @@ pub mod hid;
 pub mod hub;
 pub mod hub_class;
 pub mod spec;
+pub mod storage;
 
 pub type UsbResult<T> = Result<T, Status>;
 
@@ -118,6 +122,9 @@ pub struct Transfer<'a, 'b> {
 
     pub setup: Option<spec::Setup>,
     pub data: &'a mut IovecIter<'b>,
+    /// A contiguous physical buffer to DMA directly, bypassing `data`. The host
+    /// controller uses this instead of bouncing through `data` when set.
+    pub data_phys: Option<(PhysAddr, usize)>,
 }
 
 pub struct Driver {
@@ -224,6 +231,75 @@ impl Device {
             device: Some(self),
             setup: Some(setup),
             data: &mut iter,
+            data_phys: None,
+        };
+
+        let controller = self.parent_hub.controller.as_ref();
+        controller
+            .ops
+            .transfer(controller, self, &mut transfer)
+            .await
+    }
+
+    pub async fn bulk_transfer(
+        &self,
+        endpoint: &Endpoint,
+        buf: &mut [u8],
+        to_host: bool,
+    ) -> UsbResult<usize> {
+        let flags = if to_host {
+            TransferFlags::ToHost
+        } else {
+            TransferFlags::ToDevice
+        };
+
+        // SAFETY: `buf` outlives the iterator below.
+        let iovec = unsafe { IovecIter::iovec_from_mut_ptr(buf) };
+        let iovecs = [iovec];
+        let mut iter = unsafe { IovecIter::new_kernel(&iovecs) };
+
+        let mut transfer = Transfer {
+            endpoint: Some(endpoint),
+            flags,
+            typ: TransferType::Bulk,
+            device: Some(self),
+            setup: None,
+            data: &mut iter,
+            data_phys: None,
+        };
+
+        let controller = self.parent_hub.controller.as_ref();
+        controller
+            .ops
+            .transfer(controller, self, &mut transfer)
+            .await
+    }
+
+    /// Bulk transfer that DMAs directly from/into a contiguous physical buffer,
+    /// skipping the controller's bounce copy. Used for block I/O.
+    pub async fn bulk_transfer_phys(
+        &self,
+        endpoint: &Endpoint,
+        phys: PhysAddr,
+        len: usize,
+        to_host: bool,
+    ) -> UsbResult<usize> {
+        let flags = TransferFlags::BufferPhysical
+            | if to_host {
+                TransferFlags::ToHost
+            } else {
+                TransferFlags::ToDevice
+            };
+
+        let mut iter = unsafe { IovecIter::new_kernel(&[]) };
+        let mut transfer = Transfer {
+            endpoint: Some(endpoint),
+            flags,
+            typ: TransferType::Bulk,
+            device: Some(self),
+            setup: None,
+            data: &mut iter,
+            data_phys: Some((phys, len)),
         };
 
         let controller = self.parent_hub.controller.as_ref();
@@ -250,6 +326,7 @@ impl Device {
             device: Some(self),
             setup: None,
             data: &mut iter,
+            data_phys: None,
         };
 
         let controller = self.parent_hub.controller.as_ref();
@@ -290,6 +367,48 @@ impl Device {
             length: buf.len() as u16,
         };
 
+        self.control_transfer(setup, buf).await
+    }
+
+    /// Reads and UTF-16-decodes the string descriptor at `index`, or [`None`] if
+    /// `index` is 0 or the device returns no usable string.
+    pub async fn get_string(&self, index: u8) -> Option<String> {
+        if index == 0 {
+            return None;
+        }
+
+        // String descriptor 0 holds the supported language ids; default to English.
+        let mut langs = [0u8; 4];
+        let langid = match self.get_string_raw(0, 0, &mut langs).await {
+            Ok(n) if n >= 4 => u16::from_le_bytes([langs[2], langs[3]]),
+            _ => 0x0409,
+        };
+
+        let mut buf = [0u8; 255];
+        let n = self.get_string_raw(index, langid, &mut buf).await.ok()?;
+        if n < 2 || buf[1] != spec::DescriptorType::String as u8 {
+            return None;
+        }
+
+        let len = (buf[0] as usize).min(n);
+        let units = buf[2..len]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        let s: String = char::decode_utf16(units)
+            .map(|r| r.unwrap_or('\u{fffd}'))
+            .collect();
+        let s = String::from(s.trim());
+        if s.is_empty() { None } else { Some(s) }
+    }
+
+    async fn get_string_raw(&self, index: u8, langid: u16, buf: &mut [u8]) -> UsbResult<usize> {
+        let setup = spec::Setup {
+            request_type: spec::USB_REQUEST_DIR_TO_HOST as u8,
+            request: spec::USB_REQUEST_GET_DESCRIPTOR as u8,
+            value: ((spec::DescriptorType::String as u16) << 8) | index as u16,
+            index: langid,
+            length: buf.len() as u16,
+        };
         self.control_transfer(setup, buf).await
     }
 

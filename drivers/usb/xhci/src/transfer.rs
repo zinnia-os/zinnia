@@ -136,6 +136,32 @@ pub fn data(ctrl: &XhciController, dev: &XhciDevice, xfer: &mut Transfer) -> Usb
         return Err(Status::Error);
     }
 
+    // Do DMA directly if a buffer was provided by the caller.
+    if let Some((phys, length)) = xfer.data_phys {
+        if length == 0 {
+            return Ok(0);
+        }
+        let cell = CompletionCell::new();
+        {
+            let mut ring = dev.ep_rings[ep_index - 1].lock();
+            let ring = ring.as_mut().ok_or(Status::Error)?;
+            let control = BitValue::new(0u32)
+                .write_field(trb::control::TRB_TYPE, TrbType::Normal as u8)
+                .write_field(trb::control::ISP, 1)
+                .write_field(trb::control::IOC, 1)
+                .value();
+            let status = BitValue::new(0u32)
+                .write_field(trb::status::TRANSFER_LEN, length as u32)
+                .value();
+            let idx = ring.enqueue(phys.value() as u64, status, control);
+            ring.set_pending(idx, cell.clone());
+        }
+        ctrl.ring_doorbell(dev.slot_id(), ep_index as u8);
+        let completion = cell.wait();
+        status_from_code(completion.code)?;
+        return Ok(length.saturating_sub(completion.value as usize));
+    }
+
     let length = xfer.data.len();
     if length == 0 {
         return Ok(0);

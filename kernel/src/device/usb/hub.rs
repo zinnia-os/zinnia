@@ -226,6 +226,23 @@ impl Hub {
                 )
             })?;
 
+        // Identify the newly attached device in the log.
+        let (vendor_id, product_id, mfg_idx, prod_idx) = (*device.descriptor.lock())
+            .map_or((0, 0, 0, 0), |d| {
+                (d.vendor_id, d.product_id, d.manufacturer, d.product)
+            });
+        let manufacturer = device.get_string(mfg_idx).await;
+        let product = device.get_string(prod_idx).await;
+        log!(
+            "{} port {}: New USB device {:04x}:{:04x} \"{}\" \"{}\"",
+            self.name,
+            port + 1,
+            vendor_id,
+            product_id,
+            manufacturer.as_deref().unwrap_or("?"),
+            product.as_deref().unwrap_or("?"),
+        );
+
         // Read the configuration descriptor header to learn its total length.
         let mut header = [0u8; 9];
         device
