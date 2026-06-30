@@ -14,7 +14,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::time::Duration;
+use core::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 #[derive(Default)]
 struct TimerfdState {
@@ -192,6 +195,12 @@ impl FileOps for TimerfdFile {
 
 static ACTIVE_TIMERS: SpinMutex<Vec<Weak<TimerfdFile>>> = SpinMutex::new(Vec::new());
 
+static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn active_count() -> usize {
+    ACTIVE_COUNT.load(Ordering::Relaxed)
+}
+
 fn register(timer: &Arc<TimerfdFile>) {
     let mut list = ACTIVE_TIMERS.lock();
     let weak = Arc::downgrade(timer);
@@ -203,15 +212,17 @@ fn register(timer: &Arc<TimerfdFile>) {
         return;
     }
     list.push(weak);
+    ACTIVE_COUNT.store(list.len(), Ordering::Relaxed);
 }
 
-/// Called from the periodic clock tick. Advances all registered timerfds and
+/// Called from the ktimer thread. Advances all registered timerfds and
 /// wakes any waiters whose deadlines have elapsed. Drops registrations whose
 /// owning files have been closed.
 pub fn poll_timerfds(now: Duration) {
     let snapshot: Vec<Arc<TimerfdFile>> = {
         let mut list = ACTIVE_TIMERS.lock();
         list.retain(|w| w.strong_count() > 0);
+        ACTIVE_COUNT.store(list.len(), Ordering::Relaxed);
         list.iter().filter_map(Weak::upgrade).collect()
     };
 

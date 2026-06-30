@@ -359,6 +359,7 @@ impl Process {
         }
 
         PROCESS_TABLE.lock().remove(&proc.get_pid());
+        proc.real_timer.lock().disarm();
 
         let old_space = proc.replace_address_space(Arc::new(Mutex::new(AddressSpace::new_kernel(
             KERNEL_PAGE_TABLE.get().clone(),

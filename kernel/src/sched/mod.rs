@@ -1061,6 +1061,12 @@ pub fn SCHEDULER_STAGE() {
     reaper_task.bound.store(true, Ordering::Release);
     bsp.set_reaper_task(reaper_task);
 
+    // The ktimer thread takes over the timer work that must not run in the
+    // timer IRQ itself (Arc drops, timerfd/itimer polling).
+    let ktimer_task =
+        Arc::new(Task::new(crate::clock::ktimer_fn, 0, 0, Process::get_kernel(), false).unwrap());
+    crate::clock::set_ktimer_task(ktimer_task);
+
     // Create a dummy task to drop right after the first reschedule.
     let dummy = Arc::new(Task::new(dummy_fn, 0, 0, Process::get_kernel(), false).unwrap());
 

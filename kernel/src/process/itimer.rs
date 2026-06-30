@@ -1,11 +1,31 @@
 use crate::{
     posix::errno::{EResult, Errno},
-    process::{PROCESS_TABLE, signal},
+    process::{PROCESS_TABLE, Process, signal},
     uapi,
 };
 use alloc::sync::Weak;
 use core::ops::Bound;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
+
+/// Amount of currently armed interval timers.
+static ARMED_TIMERS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn armed_count() -> usize {
+    ARMED_TIMERS.load(Ordering::Relaxed)
+}
+
+fn note_transition(was_armed: bool, now_armed: bool) {
+    match (was_armed, now_armed) {
+        (false, true) => {
+            ARMED_TIMERS.fetch_add(1, Ordering::Relaxed);
+        }
+        (true, false) => {
+            ARMED_TIMERS.fetch_sub(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IntervalTimerState {
@@ -31,6 +51,8 @@ impl IntervalTimerState {
         value: uapi::time::itimerval,
     ) -> EResult<uapi::time::itimerval> {
         let old = self.snapshot(now);
+
+        let was_armed = self.next_deadline.is_some();
         self.interval = value.it_interval.to_duration()?;
 
         let initial = value.it_value.to_duration()?;
@@ -40,7 +62,15 @@ impl IntervalTimerState {
             Some(now.checked_add(initial).ok_or(Errno::EINVAL)?)
         };
 
+        note_transition(was_armed, self.next_deadline.is_some());
         Ok(old)
+    }
+
+    /// Disarms the timer.
+    pub(crate) fn disarm(&mut self) {
+        note_transition(self.next_deadline.is_some(), false);
+        self.next_deadline = None;
+        self.interval = Duration::ZERO;
     }
 }
 
@@ -65,10 +95,12 @@ pub fn poll_interval_timers(now: Duration) {
     }
 }
 
-fn poll_process_timer(now: Duration, proc: &alloc::sync::Arc<crate::process::Process>) {
+fn poll_process_timer(now: Duration, proc: &Process) {
     let should_signal = {
         let mut timer = proc.real_timer.lock();
-        match timer.next_deadline {
+
+        let was_armed = timer.next_deadline.is_some();
+        let result = match timer.next_deadline {
             Some(deadline) if deadline <= now => {
                 if timer.interval.is_zero() {
                     timer.next_deadline = None;
@@ -92,7 +124,10 @@ fn poll_process_timer(now: Duration, proc: &alloc::sync::Arc<crate::process::Pro
                 true
             }
             Some(_) | None => false,
-        }
+        };
+
+        note_transition(was_armed, timer.next_deadline.is_some());
+        result
     };
 
     if !should_signal {
