@@ -59,6 +59,44 @@ pub fn getegid() -> usize {
 }
 
 #[wrap_syscall]
+pub fn getgroups(size: i32, list: VirtAddr) -> EResult<usize> {
+    if size < 0 {
+        return Err(Errno::EINVAL);
+    }
+    let proc = Scheduler::get_current().get_process();
+    let groups = proc.identity.lock().groups.clone();
+    if size == 0 {
+        return Ok(groups.len());
+    }
+    if (size as usize) < groups.len() {
+        return Err(Errno::EINVAL);
+    }
+    UserPtr::<gid_t>::new(list)
+        .write_slice(&groups)
+        .ok_or(Errno::EFAULT)?;
+    Ok(groups.len())
+}
+
+#[wrap_syscall]
+pub fn setgroups(size: usize, list: VirtAddr) -> EResult<()> {
+    if size > uapi::sysconf::NGROUPS_MAX as usize {
+        return Err(Errno::EINVAL);
+    }
+    let proc = Scheduler::get_current().get_process();
+    if !proc.identity.lock().is_effective_superuser() {
+        return Err(Errno::EPERM);
+    }
+    let mut groups = alloc::vec![0 as gid_t; size];
+    if size != 0 {
+        UserPtr::<gid_t>::new(list)
+            .read_slice(&mut groups)
+            .ok_or(Errno::EFAULT)?;
+    }
+    proc.identity.lock().groups = groups;
+    Ok(())
+}
+
+#[wrap_syscall]
 pub fn getresuid(ruid: VirtAddr, euid: VirtAddr, suid: VirtAddr) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
     let ident = proc.identity.lock();

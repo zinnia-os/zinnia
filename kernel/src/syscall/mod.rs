@@ -254,8 +254,8 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::RECVMSG => socket::recvmsg,
 
         // Identity
-        numbers::GETGROUPS => sys_unimpl!("getgroups", Ok(0)),
-        numbers::SETGROUPS => sys_unimpl!("setgroups", Ok(0)),
+        numbers::GETGROUPS => process::getgroups,
+        numbers::SETGROUPS => process::setgroups,
         numbers::GETSID => process::getsid,
         numbers::SETSID => process::setsid,
         numbers::SETUID => process::setuid,

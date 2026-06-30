@@ -519,6 +519,9 @@ pub struct Identity {
 
     pub set_user_id: uapi::uid_t,
     pub set_group_id: uapi::gid_t,
+
+    /// Supplementary group IDs.
+    pub groups: Vec<uapi::gid_t>,
 }
 
 impl Identity {
@@ -531,6 +534,7 @@ impl Identity {
             effective_group_id: 0,
             set_user_id: 0,
             set_group_id: 0,
+            groups: Vec::new(),
         };
         &KERNEL_IDENTITY
     }
