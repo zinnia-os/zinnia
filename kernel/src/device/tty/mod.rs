@@ -362,6 +362,16 @@ pub fn get_tty_by_name(name: &str) -> Option<Arc<Tty>> {
     TTYS.lock().values().find(|t| t.name == name).cloned()
 }
 
+fn pgrp_in_session(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
+    let all: Vec<Arc<process::Process>> = process::PROCESS_TABLE
+        .lock()
+        .values()
+        .filter_map(alloc::sync::Weak::upgrade)
+        .collect();
+    all.iter()
+        .any(|p| *p.pgrp.lock() == pgrp && *p.session.lock() == session)
+}
+
 fn pgrp_is_orphaned(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
     let all: Vec<Arc<process::Process>> = process::PROCESS_TABLE
         .lock()
@@ -631,8 +641,25 @@ impl FileOps for TtyFileOps {
                 ptr.write(pgrp as i32).ok_or(Errno::EFAULT)?;
             }
             uapi::ioctls::TIOCSPGRP => {
+                let proc = Scheduler::get_current().get_process();
+                let session = *proc.session.lock();
+                let is_ctty = proc
+                    .controlling_tty
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, &self.tty));
+                if !is_ctty || *self.tty.session.lock() != Some(session) {
+                    return Err(Errno::ENOTTY);
+                }
                 let ptr: UserPtr<i32> = UserPtr::new(arg);
-                let pgrp = ptr.read().ok_or(Errno::EFAULT)?;
+                let pgrp = ptr.read().ok_or(Errno::EFAULT)? as uapi::pid_t;
+                if pgrp <= 0 {
+                    return Err(Errno::EINVAL);
+                }
+                self.tty.job_control_gate(false)?;
+                if !pgrp_in_session(pgrp, session) {
+                    return Err(Errno::EPERM);
+                }
                 *self.tty.foreground_pgrp.lock() = Some(pgrp);
             }
             uapi::ioctls::TIOCSCTTY => {
