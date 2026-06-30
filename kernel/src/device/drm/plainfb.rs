@@ -101,35 +101,186 @@ impl Device for PlainDevice {
         }))
     }
 
-    fn commit(&self, state: &AtomicState) {
-        // Copy from each buffer to the framebuffer
-        for crtc_state in state.crtc_states.values() {
-            if let Some(ref framebuffer) = crtc_state.framebuffer
-                && let Some(buffer) =
-                    (framebuffer.buffer.as_ref() as &dyn Any).downcast_ref::<PlainDumbBuffer>()
-            {
-                // Copy line by line so mismatched source/destination pitches don't corrupt the scanout image.
-                let src_base = buffer.addr.as_hhdm::<u8>();
-                let dst_base = self.addr.base() as *mut u8;
-                let src_stride = framebuffer.pitch as usize;
-                let dst_stride = self.stride as usize;
-                let bpp_bytes = (self.bpp.div_ceil(8)) as usize;
-                let copy_w = (framebuffer.width as usize).min(self.width as usize) * bpp_bytes;
-                let copy_h = (framebuffer.height as usize).min(self.height as usize);
+    fn set_cursor(
+        &self,
+        crtc_id: u32,
+        buffer: Option<Arc<dyn BufferObject>>,
+        width: u32,
+        height: u32,
+        hot_x: i32,
+        hot_y: i32,
+    ) -> EResult<()> {
+        let fb = match buffer {
+            Some(buffer) => Some(Arc::new(Framebuffer {
+                id: self.obj_counter.alloc(),
+                format: DRM_FORMAT_ARGB8888,
+                width,
+                height,
+                pitch: width.checked_mul(4).ok_or(Errno::EINVAL)?,
+                offset: 0,
+                buffer,
+            })),
+            None => None,
+        };
+        if let Some(plane) = self.cursor_plane() {
+            let mut state = plane.state.lock();
+            state.crtc_id = crtc_id;
+            state.crtc_w = width;
+            state.crtc_h = height;
+            state.src_x = 0;
+            state.src_y = 0;
+            state.src_w = width << 16;
+            state.src_h = height << 16;
+            state.hot_x = hot_x;
+            state.hot_y = hot_y;
+            state.fb = fb;
+        }
+        self.redraw();
+        Ok(())
+    }
 
-                for y in 0..copy_h {
-                    let src_off = y * src_stride + framebuffer.offset as usize;
-                    let dst_off = y * dst_stride;
-                    if src_off + copy_w > buffer.size || dst_off + copy_w > self.addr.len() {
-                        break;
+    fn move_cursor(&self, crtc_id: u32, x: i32, y: i32) -> EResult<()> {
+        if let Some(plane) = self.cursor_plane() {
+            let mut state = plane.state.lock();
+            state.crtc_id = crtc_id;
+            state.crtc_x = x;
+            state.crtc_y = y;
+        }
+        self.redraw();
+        Ok(())
+    }
+
+    fn commit(&self, _state: &AtomicState) {
+        self.redraw();
+    }
+}
+
+fn blend_over(src: u32, dst: u32, alpha: u32) -> u32 {
+    let inv = 255 - alpha;
+    let chan = |shift: u32| {
+        let s = (src >> shift) & 0xff;
+        let d = (dst >> shift) & 0xff;
+        ((s * alpha + d * inv) / 255) & 0xff
+    };
+    0xff00_0000 | (chan(16) << 16) | (chan(8) << 8) | chan(0)
+}
+
+impl PlainDevice {
+    fn cursor_plane(&self) -> Option<Arc<Plane>> {
+        self.state
+            .planes
+            .lock()
+            .iter()
+            .find(|p| p.plane_type == DRM_PLANE_TYPE_CURSOR)
+            .cloned()
+    }
+
+    fn redraw(&self) {
+        let (primary, cursor) = {
+            let planes = self.state.planes.lock();
+            let primary = planes
+                .iter()
+                .find(|p| p.plane_type == DRM_PLANE_TYPE_PRIMARY)
+                .and_then(|p| p.state.lock().fb.clone());
+            let cursor = planes
+                .iter()
+                .find(|p| p.plane_type == DRM_PLANE_TYPE_CURSOR)
+                .and_then(|p| {
+                    let s = p.state.lock();
+                    s.fb.clone()
+                        .map(|fb| (fb, s.crtc_x - s.hot_x, s.crtc_y - s.hot_y))
+                });
+            (primary, cursor)
+        };
+
+        if let Some(fb) = primary {
+            self.blit_primary(&fb);
+        }
+        if let Some((fb, x, y)) = cursor {
+            self.blend_cursor(&fb, x, y);
+        }
+    }
+
+    fn blit_primary(&self, framebuffer: &Framebuffer) {
+        let Some(buffer) =
+            (framebuffer.buffer.as_ref() as &dyn Any).downcast_ref::<PlainDumbBuffer>()
+        else {
+            return;
+        };
+        let src_base = buffer.addr.as_hhdm::<u8>();
+        let dst_base = self.addr.base() as *mut u8;
+        let src_stride = framebuffer.pitch as usize;
+        let dst_stride = self.stride as usize;
+        let bpp_bytes = (self.bpp.div_ceil(8)) as usize;
+        let copy_w = (framebuffer.width as usize).min(self.width as usize) * bpp_bytes;
+        let copy_h = (framebuffer.height as usize).min(self.height as usize);
+
+        for y in 0..copy_h {
+            let src_off = y * src_stride + framebuffer.offset as usize;
+            let dst_off = y * dst_stride;
+            if src_off + copy_w > buffer.size || dst_off + copy_w > self.addr.len() {
+                break;
+            }
+            // SAFETY: both ranges are bounds-checked against the buffer and the
+            // scanout region above, and the regions don't overlap.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src_base.add(src_off),
+                    dst_base.add(dst_off),
+                    copy_w,
+                );
+            }
+        }
+    }
+
+    fn blend_cursor(&self, framebuffer: &Framebuffer, pos_x: i32, pos_y: i32) {
+        let Some(buffer) =
+            (framebuffer.buffer.as_ref() as &dyn Any).downcast_ref::<PlainDumbBuffer>()
+        else {
+            return;
+        };
+        if self.bpp != 32 {
+            return;
+        }
+        let src_base = buffer.addr.as_hhdm::<u8>();
+        let dst_base = self.addr.base() as *mut u8;
+        let src_stride = framebuffer.pitch as usize;
+        let dst_stride = self.stride as usize;
+        let cur_w = framebuffer.width as i32;
+        let cur_h = framebuffer.height as i32;
+        let disp_w = self.width as i32;
+        let disp_h = self.height as i32;
+
+        for row in 0..cur_h {
+            let dy = pos_y + row;
+            if dy < 0 || dy >= disp_h {
+                continue;
+            }
+            for col in 0..cur_w {
+                let dx = pos_x + col;
+                if dx < 0 || dx >= disp_w {
+                    continue;
+                }
+                let src_off = row as usize * src_stride + col as usize * 4;
+                let dst_off = dy as usize * dst_stride + dx as usize * 4;
+                if src_off + 4 > buffer.size || dst_off + 4 > self.addr.len() {
+                    continue;
+                }
+                // SAFETY: both offsets are bounds-checked against the cursor buffer
+                // and the scanout region just above.
+                unsafe {
+                    let src = (src_base.add(src_off) as *const u32).read_unaligned();
+                    let alpha = (src >> 24) & 0xff;
+                    if alpha == 0 {
+                        continue;
                     }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src_base.add(src_off),
-                            dst_base.add(dst_off),
-                            copy_w,
-                        );
-                    }
+                    let dst_ptr = dst_base.add(dst_off) as *mut u32;
+                    let out = if alpha == 255 {
+                        src | 0xff00_0000
+                    } else {
+                        blend_over(src, dst_ptr.read_unaligned(), alpha)
+                    };
+                    dst_ptr.write_unaligned(out);
                 }
             }
         }
@@ -227,6 +378,13 @@ fn PLAINFB_STAGE() {
         DRM_PLANE_TYPE_PRIMARY,
         vec![DRM_FORMAT_XRGB8888],
     ));
+    {
+        let mut state = plane.state.lock();
+        state.crtc_w = fb.width as u32;
+        state.crtc_h = fb.height as u32;
+        state.src_w = (fb.width as u32) << 16;
+        state.src_h = (fb.height as u32) << 16;
+    }
     let mut modes = vec![synthesize_preferred_mode(fb.width as u32, fb.height as u32)];
     modes.extend(
         DMT_MODES
@@ -241,9 +399,11 @@ fn PLAINFB_STAGE() {
         modes,
         vec![encoder.clone()],
         drm_mode_connector_type::Virtual,
+        device
+            .state
+            .next_connector_type_id(drm_mode_connector_type::Virtual),
     ));
 
-    // Create a cursor plane
     let cursor_plane = Arc::new(Plane::new(
         device.obj_counter.alloc(),
         vec![crtc.clone()],

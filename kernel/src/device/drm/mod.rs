@@ -9,7 +9,8 @@ use crate::{
     uapi::{
         self,
         drm::{
-            self, DRM_FORMAT_XRGB8888, DRM_MODE_CURSOR_BO, DRM_MODE_CURSOR_MOVE, drm_mode_modeinfo,
+            self, DRM_FORMAT_XRGB8888, DRM_MODE_CURSOR_BO, DRM_MODE_CURSOR_MOVE,
+            drm_mode_connector_type, drm_mode_modeinfo,
         },
     },
     util::{event::Event, mutex::spin::SpinMutex},
@@ -53,6 +54,7 @@ pub struct DeviceState {
     pub connectors: SpinMutex<Vec<Arc<Connector>>>,
     pub planes: SpinMutex<Vec<Arc<Plane>>>,
     pub framebuffers: SpinMutex<Vec<Arc<Framebuffer>>>,
+    connector_type_ids: [AtomicU32; core::mem::variant_count::<drm_mode_connector_type>()],
 }
 
 impl DeviceState {
@@ -63,7 +65,12 @@ impl DeviceState {
             connectors: SpinMutex::new(Vec::new()),
             planes: SpinMutex::new(Vec::new()),
             framebuffers: SpinMutex::new(Vec::new()),
+            connector_type_ids: [const { AtomicU32::new(0) }; _],
         }
+    }
+
+    pub fn next_connector_type_id(&self, connector_type: drm_mode_connector_type) -> u32 {
+        self.connector_type_ids[connector_type as usize].fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
@@ -124,20 +131,12 @@ pub trait Device: Send + Sync {
         hot_y: i32,
     ) -> EResult<()> {
         let _ = (buffer, crtc_id, width, height, hot_x, hot_y);
-        warn!(
-            "drm::Device::set_cursor is not implemented for {}!",
-            self.driver_info().0
-        );
         Err(Errno::ENOTTY)
     }
 
     /// Move the cursor to a new position on the given CRTC.
     fn move_cursor(&self, crtc_id: u32, x: i32, y: i32) -> EResult<()> {
         let _ = (crtc_id, x, y);
-        warn!(
-            "drm::Device::move_cursor is not implemented for {}!",
-            self.driver_info().0
-        );
         Err(Errno::ENOTTY)
     }
 }
@@ -151,6 +150,8 @@ pub struct DrmFile {
     events: SpinMutex<Vec<PageFlipEvent>>,
     rd_event: Event,
     flip_sequence: AtomicU32,
+    atomic_cap: AtomicBool,
+    universal_planes_cap: AtomicBool,
 }
 
 #[repr(C)]
@@ -174,6 +175,8 @@ impl DrmFile {
             events: SpinMutex::new(Vec::new()),
             rd_event: Event::new(),
             flip_sequence: AtomicU32::new(0),
+            atomic_cap: AtomicBool::new(false),
+            universal_planes_cap: AtomicBool::new(false),
         })
     }
 
@@ -197,6 +200,113 @@ impl DrmFile {
             .find(|x| x.id == id)
             .cloned()
             .ok_or(Errno::EINVAL)
+    }
+
+    fn primary_plane(&self) -> Option<Arc<Plane>> {
+        self.device
+            .state()
+            .planes
+            .lock()
+            .iter()
+            .find(|p| p.plane_type == drm::DRM_PLANE_TYPE_PRIMARY)
+            .cloned()
+    }
+
+    fn plane_visible(&self, plane: &Plane) -> bool {
+        self.atomic_cap.load(Ordering::Relaxed)
+            || self.universal_planes_cap.load(Ordering::Relaxed)
+            || plane.plane_type == drm::DRM_PLANE_TYPE_OVERLAY
+    }
+
+    fn property_visible(&self, prop_id: u32) -> bool {
+        let Some(info) = object::property_info(prop_id) else {
+            return false;
+        };
+        self.atomic_cap.load(Ordering::Relaxed) || info.flags & drm::DRM_MODE_PROP_ATOMIC == 0
+    }
+
+    fn visible_prop_values(&self, props: Vec<(u32, u64)>) -> Vec<(u32, u64)> {
+        props
+            .into_iter()
+            .filter(|(prop_id, _)| self.property_visible(*prop_id))
+            .collect()
+    }
+
+    /// Point the primary plane at `fb`.
+    fn set_primary_fb(&self, crtc_id: u32, fb: Option<Arc<Framebuffer>>) {
+        if let Some(primary) = self.primary_plane() {
+            let mut s = primary.state.lock();
+            s.fb = fb;
+            s.crtc_id = crtc_id;
+        }
+    }
+
+    fn apply_atomic(&self, changes: &[(u32, u32, u64)]) -> EResult<()> {
+        use object::{
+            PROP_ACTIVE, PROP_CRTC_H, PROP_CRTC_ID, PROP_CRTC_W, PROP_CRTC_X, PROP_CRTC_Y,
+            PROP_FB_ID, PROP_MODE_ID, PROP_SRC_H, PROP_SRC_W, PROP_SRC_X, PROP_SRC_Y,
+        };
+        let state = self.device.state();
+        for &(obj_id, prop_id, value) in changes {
+            let fb = if prop_id == PROP_FB_ID && value != 0 {
+                Some(self.framebuffer_by_id(value as u32)?)
+            } else {
+                None
+            };
+
+            let plane = state
+                .planes
+                .lock()
+                .iter()
+                .find(|p| p.id() == obj_id)
+                .cloned();
+            if let Some(plane) = plane {
+                let mut s = plane.state.lock();
+                match prop_id {
+                    PROP_FB_ID => s.fb = fb,
+                    PROP_CRTC_ID => s.crtc_id = value as u32,
+                    PROP_CRTC_X => s.crtc_x = value as i32,
+                    PROP_CRTC_Y => s.crtc_y = value as i32,
+                    PROP_CRTC_W => s.crtc_w = value as u32,
+                    PROP_CRTC_H => s.crtc_h = value as u32,
+                    PROP_SRC_X => s.src_x = value as u32,
+                    PROP_SRC_Y => s.src_y = value as u32,
+                    PROP_SRC_W => s.src_w = value as u32,
+                    PROP_SRC_H => s.src_h = value as u32,
+                    _ => {}
+                }
+                continue;
+            }
+
+            let crtc = state
+                .crtcs
+                .lock()
+                .iter()
+                .find(|c| c.id() == obj_id)
+                .cloned();
+            if let Some(crtc) = crtc {
+                let mut a = crtc.atomic.lock();
+                match prop_id {
+                    PROP_ACTIVE => a.active = value as u32,
+                    PROP_MODE_ID => a.mode_id = value as u32,
+                    _ => {}
+                }
+                continue;
+            }
+
+            let conn = state
+                .connectors
+                .lock()
+                .iter()
+                .find(|c| c.id() == obj_id)
+                .cloned();
+            if let Some(conn) = conn
+                && prop_id == PROP_CRTC_ID
+            {
+                *conn.crtc_id.lock() = value as u32;
+            }
+        }
+        Ok(())
     }
 
     fn queue_flip_event(&self, user_data: u64) {
@@ -471,8 +581,19 @@ impl FileOps for DrmFile {
                     drm::DRM_CAP_DUMB_BUFFER => val.value = 1,
                     drm::DRM_CAP_DUMB_PREFERRED_DEPTH => val.value = 24,
                     drm::DRM_CAP_DUMB_PREFER_SHADOW => val.value = 1,
-                    drm::DRM_CAP_CURSOR_WIDTH => val.value = 64,
-                    drm::DRM_CAP_CURSOR_HEIGHT => val.value = 64,
+                    drm::DRM_CAP_CURSOR_WIDTH | drm::DRM_CAP_CURSOR_HEIGHT => {
+                        let has_cursor = self
+                            .device
+                            .state()
+                            .planes
+                            .lock()
+                            .iter()
+                            .any(|p| p.plane_type == drm::DRM_PLANE_TYPE_CURSOR);
+                        if !has_cursor {
+                            return Err(Errno::EINVAL);
+                        }
+                        val.value = 64;
+                    }
                     drm::DRM_CAP_TIMESTAMP_MONOTONIC => val.value = 1,
                     drm::DRM_CAP_PRIME => {
                         val.value = drm::DRM_PRIME_CAP_IMPORT | drm::DRM_PRIME_CAP_EXPORT
@@ -559,6 +680,7 @@ impl FileOps for DrmFile {
                 val.connection = connector.state as u32;
                 val.connector_type = connector.connector_type as u32;
                 val.connector_type_id = connector.connector_type_id;
+                val.encoder_id = connector.possible_encoders.first().map_or(0, |e| e.id());
 
                 // Modes
                 if val.modes_ptr != 0 {
@@ -580,6 +702,20 @@ impl FileOps for DrmFile {
                     }
                 }
                 val.count_encoders = connector.possible_encoders.len() as u32;
+
+                let props = self.visible_prop_values(connector.prop_values());
+                if val.props_ptr != 0
+                    && val.prop_values_ptr != 0
+                    && (val.count_props as usize) >= props.len()
+                {
+                    let props_ptr = UserPtr::<u32>::new(val.props_ptr.into());
+                    let values_ptr = UserPtr::<u64>::new(val.prop_values_ptr.into());
+                    for (i, (id, value)) in props.iter().enumerate() {
+                        props_ptr.offset(i).write(*id).ok_or(Errno::EFAULT)?;
+                        values_ptr.offset(i).write(*value).ok_or(Errno::EFAULT)?;
+                    }
+                }
+                val.count_props = props.len() as u32;
 
                 // TODO: Physical sizes
                 val.mm_width = 0;
@@ -626,10 +762,14 @@ impl FileOps for DrmFile {
                     .iter()
                     .find(|&x| x.id() == val.plane_id)
                     .ok_or(Errno::EINVAL)?;
+                if !self.plane_visible(plane) {
+                    return Err(Errno::EINVAL);
+                }
 
-                // Set basic plane info
-                val.crtc_id = 0; // Not currently bound to a CRTC
-                val.fb_id = 0; // Not currently displaying a framebuffer
+                let plane_state = plane.state.lock();
+                val.crtc_id = plane_state.crtc_id;
+                val.fb_id = plane_state.fb.as_ref().map_or(0, |fb| fb.id);
+                drop(plane_state);
 
                 // Create bitmask of possible CRTCs using indices
                 let crtcs = state.crtcs.lock();
@@ -662,12 +802,17 @@ impl FileOps for DrmFile {
                 let state = self.device.state();
 
                 let planes = state.planes.lock();
-                val.count_planes = planes.len() as u32;
+                let visible_planes: Vec<Arc<Plane>> = planes
+                    .iter()
+                    .filter(|plane| self.plane_visible(plane))
+                    .cloned()
+                    .collect();
+                val.count_planes = visible_planes.len() as u32;
 
                 // Fill plane IDs if user provided a buffer
                 if val.plane_id_ptr != 0 {
                     let plane_id_ptr = UserPtr::<u32>::new(val.plane_id_ptr.into());
-                    for (i, plane) in planes.iter().enumerate() {
+                    for (i, plane) in visible_planes.iter().enumerate() {
                         plane_id_ptr
                             .offset(i)
                             .write(plane.id())
@@ -879,7 +1024,8 @@ impl FileOps for DrmFile {
                 // Store active framebuffer for auto-flush
                 *self.active_fb.lock() = Some((val.crtc_id, fb.clone()));
 
-                // Commit the new CRTC state with framebuffer
+                // Keep the primary plane state and legacy CRTC state in sync.
+                self.set_primary_fb(val.crtc_id, Some(fb.clone()));
                 let mut state = AtomicState::new(self.device.clone());
                 state.set_crtc_framebuffer(val.crtc_id, fb);
                 self.device.commit(&state);
@@ -887,55 +1033,72 @@ impl FileOps for DrmFile {
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
             drm::DRM_IOCTL_MODE_ATOMIC => {
+                if !self.atomic_cap.load(Ordering::Relaxed) {
+                    return Err(Errno::EINVAL);
+                }
+
                 // Auto-flush before processing new atomic commit
                 self.auto_flush();
 
                 let ptr = UserPtr::<drm::drm_mode_atomic>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                // Read object IDs
                 let objs_ptr = UserPtr::<u32>::new(val.objs_ptr.into());
                 let count_props_ptr = UserPtr::<u32>::new(val.count_props_ptr.into());
                 let props_ptr = UserPtr::<u32>::new(val.props_ptr.into());
                 let prop_values_ptr = UserPtr::<u64>::new(val.prop_values_ptr.into());
 
-                let state = AtomicState::new(self.device.clone());
-
-                let mut prop_offset = 0;
+                // Read user memory first before acquiring a lock.
+                let mut changes: Vec<(u32, u32, u64)> = Vec::new();
+                let mut prop_offset = 0u32;
                 for i in 0..val.count_objs {
-                    let _obj_id = objs_ptr.offset(i as usize).read().ok_or(Errno::EFAULT)?;
+                    let obj_id = objs_ptr.offset(i as usize).read().ok_or(Errno::EFAULT)?;
                     let prop_count = count_props_ptr
                         .offset(i as usize)
                         .read()
                         .ok_or(Errno::EFAULT)?;
-
                     for j in 0..prop_count {
-                        let _prop_id = props_ptr
+                        let prop_id = props_ptr
                             .offset((prop_offset + j) as usize)
                             .read()
                             .ok_or(Errno::EFAULT)?;
-                        let _prop_value = prop_values_ptr
+                        let value = prop_values_ptr
                             .offset((prop_offset + j) as usize)
                             .read()
                             .ok_or(Errno::EFAULT)?;
-
-                        // Store property changes in state
-                        // TODO: Implement property handling
+                        changes.push((obj_id, prop_id, value));
                     }
-
                     prop_offset += prop_count;
                 }
 
-                // Check if this is a test-only commit
                 const DRM_MODE_ATOMIC_TEST_ONLY: u32 = 0x0100;
                 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
-                if val.flags & DRM_MODE_ATOMIC_TEST_ONLY == 0 {
-                    // Actually commit the state
-                    self.device.commit(&state);
 
-                    if val.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
-                        self.queue_flip_event(val.user_data);
+                for &(_, prop_id, value) in &changes {
+                    if prop_id == object::PROP_FB_ID && value != 0 {
+                        self.framebuffer_by_id(value as u32)?;
                     }
+                }
+
+                // Test-only commits validate references without updating state.
+                if val.flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
+                    return Ok(0);
+                }
+
+                self.apply_atomic(&changes)?;
+
+                // Mirror the primary plane into the legacy CRTC commit path.
+                let mut state = AtomicState::new(self.device.clone());
+                if let Some(primary) = self.primary_plane() {
+                    let s = primary.state.lock();
+                    if let Some(fb) = &s.fb {
+                        state.set_crtc_framebuffer(s.crtc_id, fb.clone());
+                    }
+                }
+                self.device.commit(&state);
+
+                if val.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
+                    self.queue_flip_event(val.user_data);
                 }
             }
             drm::DRM_IOCTL_SET_CLIENT_CAP => {
@@ -945,9 +1108,12 @@ impl FileOps for DrmFile {
                 // Accept atomic modesetting capability
                 match val.capability {
                     drm::DRM_CLIENT_CAP_ATOMIC => {
+                        self.atomic_cap.store(val.value != 0, Ordering::Relaxed);
                         log!("SET_CLIENT_CAP: ATOMIC = {}", val.value);
                     }
                     drm::DRM_CLIENT_CAP_UNIVERSAL_PLANES => {
+                        self.universal_planes_cap
+                            .store(val.value != 0, Ordering::Relaxed);
                         log!("SET_CLIENT_CAP: UNIVERSAL_PLANES = {}", val.value);
                     }
                     _ => {
@@ -959,48 +1125,65 @@ impl FileOps for DrmFile {
                 let mut ptr = UserPtr::<drm::drm_mode_get_property>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                // For now, we only support property ID 1 which is the "type" property for planes
-                if val.prop_id == 1 {
-                    // Copy "type" into the name field
-                    let name_bytes = b"type";
-                    val.name[..name_bytes.len()].copy_from_slice(name_bytes);
-                    val.name[name_bytes.len()] = 0; // null terminate
-
-                    // Property flags: this is an enum property with values
-                    val.flags = 0x8; // DRM_MODE_PROP_ENUM
-                    val.count_values = 0;
-
-                    // Enum values for plane type
-                    if val.enum_blob_ptr != 0 {
-                        let mut enum_ptr = UserPtr::new(val.enum_blob_ptr.into());
-
-                        // Type 0: Overlay
-                        let mut overlay = drm::drm_mode_property_enum {
-                            value: 0,
-                            name: [0; 32],
-                        };
-                        overlay.name[..7].copy_from_slice(b"Overlay");
-                        enum_ptr.write(overlay).ok_or(Errno::EFAULT)?;
-
-                        // Type 1: Primary
-                        let mut primary = drm::drm_mode_property_enum {
-                            value: 1,
-                            name: [0; 32],
-                        };
-                        primary.name[..7].copy_from_slice(b"Primary");
-                        enum_ptr.offset(1).write(primary).ok_or(Errno::EFAULT)?;
-
-                        // Type 2: Cursor
-                        let mut cursor = drm::drm_mode_property_enum {
-                            value: 2,
-                            name: [0; 32],
-                        };
-                        cursor.name[..6].copy_from_slice(b"Cursor");
-                        enum_ptr.offset(2).write(cursor).ok_or(Errno::EFAULT)?;
-                    }
-                    val.count_enum_blobs = 3; // 3 enum values
-                } else {
+                let info = object::property_info(val.prop_id).ok_or(Errno::EINVAL)?;
+                if info.flags & drm::DRM_MODE_PROP_ATOMIC != 0
+                    && !self.atomic_cap.load(Ordering::Relaxed)
+                {
                     return Err(Errno::EINVAL);
+                }
+                let value_capacity = val.count_values as usize;
+                let enum_capacity = val.count_enum_blobs as usize;
+
+                val.name.fill(0);
+                let n = info.name.len().min(val.name.len() - 1);
+                val.name[..n].copy_from_slice(&info.name[..n]);
+                val.flags = info.flags;
+                val.count_values = 0;
+                val.count_enum_blobs = 0;
+
+                match info.kind {
+                    object::PropKind::Range(min, max) => {
+                        val.count_values = 2;
+                        if val.values_ptr != 0 && value_capacity >= 2 {
+                            let mut vptr = UserPtr::<u64>::new(val.values_ptr.into());
+                            vptr.write(min).ok_or(Errno::EFAULT)?;
+                            vptr.offset(1).write(max).ok_or(Errno::EFAULT)?;
+                        }
+                    }
+                    object::PropKind::SignedRange(min, max) => {
+                        val.count_values = 2;
+                        if val.values_ptr != 0 && value_capacity >= 2 {
+                            let mut vptr = UserPtr::<u64>::new(val.values_ptr.into());
+                            vptr.write(min as u64).ok_or(Errno::EFAULT)?;
+                            vptr.offset(1).write(max as u64).ok_or(Errno::EFAULT)?;
+                        }
+                    }
+                    object::PropKind::Object(obj_type) => {
+                        val.count_values = 1;
+                        if val.values_ptr != 0 && value_capacity >= 1 {
+                            UserPtr::<u64>::new(val.values_ptr.into())
+                                .write(obj_type as u64)
+                                .ok_or(Errno::EFAULT)?;
+                        }
+                    }
+                    object::PropKind::Blob => {}
+                    object::PropKind::Enum(entries) => {
+                        val.count_enum_blobs = entries.len() as u32;
+                        if val.enum_blob_ptr != 0 && enum_capacity >= entries.len() {
+                            let eptr = UserPtr::<drm::drm_mode_property_enum>::new(
+                                val.enum_blob_ptr.into(),
+                            );
+                            for (i, (value, name)) in entries.iter().enumerate() {
+                                let mut e = drm::drm_mode_property_enum {
+                                    value: *value,
+                                    name: [0; 32],
+                                };
+                                let m = name.len().min(e.name.len() - 1);
+                                e.name[..m].copy_from_slice(&name[..m]);
+                                eptr.offset(i).write(e).ok_or(Errno::EFAULT)?;
+                            }
+                        }
+                    }
                 }
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
@@ -1010,74 +1193,58 @@ impl FileOps for DrmFile {
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
                 let state = self.device.state();
 
-                // For now, return empty property lists since we don't have full property tracking yet
-                // This allows atomic modesetting clients to query properties without failing
-
-                match val.obj_type {
-                    drm::DRM_MODE_OBJECT_CRTC => {
-                        // Verify CRTC exists
-                        let crtcs = state.crtcs.lock();
-                        let _crtc = crtcs
-                            .iter()
-                            .find(|x| x.id() == val.obj_id)
-                            .ok_or(Errno::EINVAL)?;
-                        // Return empty property list for now
-                        val.count_props = 0;
-                    }
-                    drm::DRM_MODE_OBJECT_CONNECTOR => {
-                        // Verify connector exists
-                        let connectors = state.connectors.lock();
-                        let _conn = connectors
-                            .iter()
-                            .find(|x| x.id() == val.obj_id)
-                            .ok_or(Errno::EINVAL)?;
-                        // Return empty property list for now
-                        val.count_props = 0;
-                    }
-                    drm::DRM_MODE_OBJECT_PLANE => {
-                        // Verify plane exists
-                        let planes = state.planes.lock();
-                        let plane = planes
-                            .iter()
-                            .find(|x| x.id() == val.obj_id)
-                            .ok_or(Errno::EINVAL)?;
-
-                        log!(
-                            "OBJ_GETPROPERTIES(PLANE): id={}, type={}",
-                            val.obj_id,
-                            plane.plane_type
-                        );
-
-                        // For now, we only expose the "type" property for planes
-                        // Property ID 1 = "type", value = plane.plane_type
-                        if val.props_ptr != 0 && val.prop_values_ptr != 0 {
-                            let mut props_ptr = UserPtr::<u32>::new(val.props_ptr.into());
-                            let mut values_ptr = UserPtr::<u64>::new(val.prop_values_ptr.into());
-
-                            // Return the "type" property
-                            props_ptr.write(1).ok_or(Errno::EFAULT)?; // property ID for "type"
-                            values_ptr
-                                .write(plane.plane_type as u64)
-                                .ok_or(Errno::EFAULT)?;
-                            log!("  -> prop_id=1, value={}", plane.plane_type);
-                        }
-                        val.count_props = 1; // We expose 1 property: "type"
-                    }
+                // Collect (prop id, value) pairs and release the object locks before any userspace copy.
+                let props: alloc::vec::Vec<(u32, u64)> = match val.obj_type {
+                    drm::DRM_MODE_OBJECT_CRTC => state
+                        .crtcs
+                        .lock()
+                        .iter()
+                        .find(|x| x.id() == val.obj_id)
+                        .ok_or(Errno::EINVAL)?
+                        .prop_values(),
+                    drm::DRM_MODE_OBJECT_CONNECTOR => state
+                        .connectors
+                        .lock()
+                        .iter()
+                        .find(|x| x.id() == val.obj_id)
+                        .ok_or(Errno::EINVAL)?
+                        .prop_values(),
+                    drm::DRM_MODE_OBJECT_PLANE => state
+                        .planes
+                        .lock()
+                        .iter()
+                        .find(|x| x.id() == val.obj_id)
+                        .ok_or(Errno::EINVAL)?
+                        .prop_values(),
                     drm::DRM_MODE_OBJECT_ENCODER => {
-                        // Verify encoder exists
-                        let encoders = state.encoders.lock();
-                        let _enc = encoders
+                        state
+                            .encoders
+                            .lock()
                             .iter()
                             .find(|x| x.id() == val.obj_id)
                             .ok_or(Errno::EINVAL)?;
-                        // Return empty property list for now
-                        val.count_props = 0;
+                        alloc::vec::Vec::new()
                     }
                     _ => {
                         warn!("Unknown object type: {}", val.obj_type);
                         return Err(Errno::EINVAL);
                     }
+                };
+                let props = self.visible_prop_values(props);
+
+                // Only fill the arrays if the caller allocated enough room.
+                if val.props_ptr != 0
+                    && val.prop_values_ptr != 0
+                    && (val.count_props as usize) >= props.len()
+                {
+                    let props_ptr = UserPtr::<u32>::new(val.props_ptr.into());
+                    let values_ptr = UserPtr::<u64>::new(val.prop_values_ptr.into());
+                    for (i, (id, value)) in props.iter().enumerate() {
+                        props_ptr.offset(i).write(*id).ok_or(Errno::EFAULT)?;
+                        values_ptr.offset(i).write(*value).ok_or(Errno::EFAULT)?;
+                    }
                 }
+                val.count_props = props.len() as u32;
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
@@ -1085,11 +1252,9 @@ impl FileOps for DrmFile {
                 let mut ptr = UserPtr::<drm::drm_mode_create_blob>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                // TODO: For now, just allocate a blob ID and ignore the data. Also just put a fake ID.
-                let blob_id = 0;
-                val.blob_id = blob_id;
-
-                log!("CREATEPROPBLOB: length={}, blob_id={}", val.length, blob_id);
+                // Blob IDs must be non-zero so property references remain valid.
+                static BLOB_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
+                val.blob_id = BLOB_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
@@ -1117,7 +1282,8 @@ impl FileOps for DrmFile {
 
                 *self.active_fb.lock() = Some((val.crtc_id, fb.clone()));
 
-                // Create an atomic state and commit it
+                // Keep the primary plane state and legacy CRTC state in sync.
+                self.set_primary_fb(val.crtc_id, Some(fb.clone()));
                 let mut state = AtomicState::new(self.device.clone());
                 state.set_crtc_framebuffer(val.crtc_id, fb);
                 self.device.commit(&state);
@@ -1267,9 +1433,12 @@ impl FileOps for DrmFile {
 static CARD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub fn register(device: Arc<dyn Device>) -> EResult<()> {
-    log!("Registering new DRM card");
-
     let minor = CARD_COUNTER.fetch_add(1, Ordering::SeqCst);
+    log!(
+        "Registering new DRM card {} ({})",
+        minor,
+        device.driver_info().0
+    );
 
     crate::device::register_char_node(
         format!("drm/card{}", minor).as_bytes(),

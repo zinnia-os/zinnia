@@ -451,6 +451,8 @@ impl VirtioGpuDevice {
                 modes,
                 vec![encoder.clone()],
                 drm_mode_connector_type::Virtual,
+                self.state
+                    .next_connector_type_id(drm_mode_connector_type::Virtual),
             ));
             all_connectors.push(connector);
         }

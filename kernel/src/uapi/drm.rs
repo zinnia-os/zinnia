@@ -96,7 +96,6 @@ pub const DRM_CAP_CRTC_IN_VBLANK_EVENT: u64 = 0x12;
 pub const DRM_CAP_SYNCOBJ: u64 = 0x13;
 pub const DRM_CAP_SYNCOBJ_TIMELINE: u64 = 0x14;
 pub const DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP: u64 = 0x15;
-pub const DRM_CAP_ATOMIC: u64 = 0x3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
