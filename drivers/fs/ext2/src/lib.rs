@@ -607,6 +607,113 @@ impl Ext2Super {
         Ok(())
     }
 
+    /// Free blocks at logical index `>= keep`, including unused indirect blocks.
+    pub fn truncate_blocks(&self, raw: &mut Ext2Inode, keep: u64) -> EResult<()> {
+        let ptrs = (self.block_size / 4) as u64;
+        let sectors_per_block = (self.block_size / 512) as u32;
+        let mut freed = 0u32;
+
+        // Direct blocks.
+        for i in 0..EXT2_NDIR_BLOCKS {
+            if i as u64 >= keep && raw.i_block[i] != 0 {
+                self.free_block(raw.i_block[i] as u64)?;
+                raw.i_block[i] = 0;
+                freed += 1;
+            }
+        }
+
+        // Indirect block trees. `base` is the first logical block each tree maps.
+        let ind_base = EXT2_NDIR_BLOCKS as u64;
+        let dind_base = ind_base + ptrs;
+        let tind_base = dind_base + ptrs * ptrs;
+        let mut slot = raw.i_block[EXT2_IND_BLOCK];
+        freed += self.truncate_indirect(&mut slot, 1, ind_base, keep)?;
+        raw.i_block[EXT2_IND_BLOCK] = slot;
+        let mut slot = raw.i_block[EXT2_DIND_BLOCK];
+        freed += self.truncate_indirect(&mut slot, 2, dind_base, keep)?;
+        raw.i_block[EXT2_DIND_BLOCK] = slot;
+        let mut slot = raw.i_block[EXT2_TIND_BLOCK];
+        freed += self.truncate_indirect(&mut slot, 3, tind_base, keep)?;
+        raw.i_block[EXT2_TIND_BLOCK] = slot;
+
+        raw.i_blocks = raw.i_blocks.saturating_sub(freed * sectors_per_block);
+        Ok(())
+    }
+
+    fn truncate_indirect(&self, slot: &mut u32, level: u32, base: u64, keep: u64) -> EResult<u32> {
+        let block = *slot as u64;
+        if block == 0 {
+            return Ok(0);
+        }
+
+        let ptrs = (self.block_size / 4) as u64;
+        let span = ptrs.pow(level - 1);
+        if base + span * ptrs <= keep {
+            return Ok(0);
+        }
+
+        let mut buf = zinnia::alloc::vec![0u8; self.block_size];
+        self.read_block(block, &mut buf)?;
+
+        let mut freed = 0u32;
+        let mut dirty = false;
+        for i in 0..ptrs as usize {
+            let off = i * 4;
+            let child = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+            if child == 0 {
+                continue;
+            }
+            let entry_base = base + i as u64 * span;
+            if entry_base >= keep {
+                freed += self.free_subtree(child as u64, level - 1)?;
+                buf[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                dirty = true;
+            } else if level > 1 {
+                let mut c = child;
+                freed += self.truncate_indirect(&mut c, level - 1, entry_base, keep)?;
+                if c != child {
+                    buf[off..off + 4].copy_from_slice(&c.to_le_bytes());
+                    dirty = true;
+                }
+            }
+        }
+
+        if dirty {
+            self.write_block(block, &buf)?;
+        }
+
+        // Drop the indirect block itself if its whole range is gone.
+        if base >= keep {
+            self.free_block(block)?;
+            *slot = 0;
+            freed += 1;
+        }
+
+        Ok(freed)
+    }
+
+    fn free_subtree(&self, block: u64, level: u32) -> EResult<u32> {
+        if block == 0 {
+            return Ok(0);
+        }
+
+        let mut freed = 0u32;
+        if level > 0 {
+            let mut buf = zinnia::alloc::vec![0u8; self.block_size];
+            self.read_block(block, &mut buf)?;
+            let ptrs = self.block_size / 4;
+            for i in 0..ptrs {
+                let off = i * 4;
+                let child =
+                    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]) as u64;
+                freed += self.free_subtree(child, level - 1)?;
+            }
+        }
+
+        self.free_block(block)?;
+        Ok(freed + 1)
+    }
+
     pub fn write_back_metadata(&self, inode: &INode) -> EResult<()> {
         let ino = inode.id as u32;
         if ino == 0 {
@@ -616,8 +723,8 @@ impl Ext2Super {
         let mut raw = self.read_inode(ino)?;
         let perm = inode.mode.lock().bits() as u16 & 0o7777;
         raw.i_mode = (raw.i_mode & S_IFMT) | perm;
-        raw.i_uid = *inode.uid.lock() as u16;
-        raw.i_gid = *inode.gid.lock() as u16;
+        raw.set_uid(*inode.uid.lock());
+        raw.set_gid(*inode.gid.lock());
         raw.i_atime = inode.atime.lock().tv_sec as u32;
         raw.i_mtime = inode.mtime.lock().tv_sec as u32;
         raw.i_ctime = inode.ctime.lock().tv_sec as u32;
@@ -650,8 +757,8 @@ impl Ext2Super {
             sb: Some(self.clone()),
             id: ino as usize,
             size: SpinMutex::new(raw.size() as usize),
-            uid: SpinMutex::new(raw.i_uid as _),
-            gid: SpinMutex::new(raw.i_gid as _),
+            uid: SpinMutex::new(raw.uid()),
+            gid: SpinMutex::new(raw.gid()),
             atime: SpinMutex::new(timespec {
                 tv_sec: raw.i_atime as _,
                 tv_nsec: 0,

@@ -191,15 +191,23 @@ impl RegularOps for Ext2Regular {
             return Err(Errno::EINVAL);
         }
 
-        // Update size.
+        // Release the data blocks past the new end of file.
+        let keep = new_length.div_ceil(self.sb.block_size as u64);
+        self.sb.truncate_blocks(&mut raw, keep)?;
+
+        // Update size and modification times.
         raw.i_size = new_length as u32;
         if raw.i_mode & S_IFMT == S_IFREG {
             raw.i_dir_acl = (new_length >> 32) as u32;
         }
+        let ts = uapi::time::timespec::now();
+        raw.i_mtime = ts.tv_sec as u32;
+        raw.i_ctime = ts.tv_sec as u32;
 
         self.cache.truncate(new_length as usize);
         self.sb.write_inode(self.ino, &raw)?;
         *node.size.lock() = new_length as usize;
+        node.update_time(Some(ts), None, Some(ts));
         Ok(())
     }
 }
@@ -254,12 +262,16 @@ impl FileOps for Ext2Regular {
         let new_size = (offset as usize + actual).max(inode.len());
         *inode.size.lock() = new_size;
 
-        // Update on-disk size.
+        // Update on-disk size and modification times.
         raw.i_size = new_size as u32;
         if raw.i_mode & S_IFMT == S_IFREG {
             raw.i_dir_acl = (new_size as u64 >> 32) as u32;
         }
+        let ts = uapi::time::timespec::now();
+        raw.i_mtime = ts.tv_sec as u32;
+        raw.i_ctime = ts.tv_sec as u32;
         self.sb.write_inode(self.ino, &raw)?;
+        inode.update_time(Some(ts), None, Some(ts));
 
         Ok(actual as _)
     }
@@ -593,19 +605,20 @@ impl DirectoryOps for Ext2Dir {
         _self_node: &Arc<INode>,
         entry: Arc<Entry>,
         mode: Mode,
-        _identity: &Identity,
+        identity: &Identity,
     ) -> EResult<()> {
         let group = (self.ino - 1) / self.sb.inodes_per_group;
         let new_ino = self.sb.alloc_inode(group)?;
 
-        // Create the on-disk inode.
-        let raw_inode = Ext2Inode {
+        // Create the on-disk inode, owned by the creating identity.
+        let secs = uapi::time::timespec::now().tv_sec as u32;
+        let mut raw_inode = Ext2Inode {
             i_mode: S_IFREG | (mode.bits() as u16 & 0o7777),
             i_uid: 0,
             i_size: 0,
-            i_atime: 0,
-            i_ctime: 0,
-            i_mtime: 0,
+            i_atime: secs,
+            i_ctime: secs,
+            i_mtime: secs,
             i_dtime: 0,
             i_gid: 0,
             i_links_count: 1,
@@ -619,6 +632,8 @@ impl DirectoryOps for Ext2Dir {
             i_faddr: 0,
             i_osd2: [0; 12],
         };
+        raw_inode.set_uid(identity.effective_user_id);
+        raw_inode.set_gid(identity.effective_group_id);
 
         self.sb.write_inode(new_ino, &raw_inode)?;
 
@@ -641,7 +656,7 @@ impl DirectoryOps for Ext2Dir {
         _self_node: &Arc<INode>,
         path: PathNode,
         mode: Mode,
-        _identity: &Identity,
+        identity: &Identity,
     ) -> EResult<()> {
         let group = (self.ino - 1) / self.sb.inodes_per_group;
         let new_ino = self.sb.alloc_inode(group)?;
@@ -649,13 +664,14 @@ impl DirectoryOps for Ext2Dir {
         let block_size = self.sb.block_size;
 
         // Allocate one block for `.` and `..`.
+        let secs = uapi::time::timespec::now().tv_sec as u32;
         let mut raw_inode = Ext2Inode {
             i_mode: S_IFDIR | (mode.bits() as u16 & 0o7777),
             i_uid: 0,
             i_size: block_size as u32,
-            i_atime: 0,
-            i_ctime: 0,
-            i_mtime: 0,
+            i_atime: secs,
+            i_ctime: secs,
+            i_mtime: secs,
             i_dtime: 0,
             i_gid: 0,
             i_links_count: 2, // . and parent's link
@@ -669,6 +685,8 @@ impl DirectoryOps for Ext2Dir {
             i_faddr: 0,
             i_osd2: [0; 12],
         };
+        raw_inode.set_uid(identity.effective_user_id);
+        raw_inode.set_gid(identity.effective_group_id);
 
         let data_block = self.sb.alloc_block_for_inode(new_ino, &mut raw_inode, 0)?;
 
@@ -735,18 +753,19 @@ impl DirectoryOps for Ext2Dir {
         _self_node: &Arc<INode>,
         path: PathNode,
         target_path: &[u8],
-        _identity: &Identity,
+        identity: &Identity,
     ) -> EResult<()> {
         let group = (self.ino - 1) / self.sb.inodes_per_group;
         let new_ino = self.sb.alloc_inode(group)?;
 
+        let secs = uapi::time::timespec::now().tv_sec as u32;
         let mut raw_inode = Ext2Inode {
             i_mode: S_IFLNK | 0o777,
             i_uid: 0,
             i_size: target_path.len() as u32,
-            i_atime: 0,
-            i_ctime: 0,
-            i_mtime: 0,
+            i_atime: secs,
+            i_ctime: secs,
+            i_mtime: secs,
             i_dtime: 0,
             i_gid: 0,
             i_links_count: 1,
@@ -760,6 +779,8 @@ impl DirectoryOps for Ext2Dir {
             i_faddr: 0,
             i_osd2: [0; 12],
         };
+        raw_inode.set_uid(identity.effective_user_id);
+        raw_inode.set_gid(identity.effective_group_id);
 
         if target_path.len() <= 60 {
             // Fast symlink: store in i_block.
@@ -768,7 +789,9 @@ impl DirectoryOps for Ext2Dir {
             };
             block_bytes[..target_path.len()].copy_from_slice(target_path);
         } else {
-            // Slow symlink: allocate a block.
+            if target_path.len() > self.sb.block_size {
+                return Err(Errno::ENAMETOOLONG);
+            }
             let block = self.sb.alloc_block_for_inode(new_ino, &mut raw_inode, 0)?;
             let mut buf = vec![0u8; self.sb.block_size];
             buf[..target_path.len()].copy_from_slice(target_path);

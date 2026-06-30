@@ -172,6 +172,26 @@ impl Ext2Inode {
         lo | hi
     }
 
+    pub fn uid(&self) -> u32 {
+        let hi = u16::from_le_bytes([self.i_osd2[4], self.i_osd2[5]]);
+        self.i_uid as u32 | ((hi as u32) << 16)
+    }
+
+    pub fn gid(&self) -> u32 {
+        let hi = u16::from_le_bytes([self.i_osd2[6], self.i_osd2[7]]);
+        self.i_gid as u32 | ((hi as u32) << 16)
+    }
+
+    pub fn set_uid(&mut self, uid: u32) {
+        self.i_uid = uid as u16;
+        self.i_osd2[4..6].copy_from_slice(&((uid >> 16) as u16).to_le_bytes());
+    }
+
+    pub fn set_gid(&mut self, gid: u32) {
+        self.i_gid = gid as u16;
+        self.i_osd2[6..8].copy_from_slice(&((gid >> 16) as u16).to_le_bytes());
+    }
+
     /// Returns true if this is a directory.
     pub fn is_dir(&self) -> bool {
         self.i_mode & S_IFMT == S_IFDIR
