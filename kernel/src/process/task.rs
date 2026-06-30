@@ -113,7 +113,7 @@ pub struct Task {
     pub load_counted: AtomicBool,
     /// Intrusive link into a CPU run queue.
     pub run_link: LinkedListAtomicLink,
-    /// Intrusive link into a CPU reap queue.
+    /// Intrusive link into the global reapable-task list.
     pub reap_link: LinkedListAtomicLink,
 }
 

@@ -273,8 +273,9 @@ unsafe extern "C" fn idt_handler(context: *mut Context) {
                 ..Default::default()
             };
 
-            let task = Scheduler::get_current();
-            signal::send_signal_info_to_thread(&task, sig, info);
+            unsafe {
+                Scheduler::with_current(|task| signal::force_signal_to_thread(task, sig, info))
+            };
         }
         // Kernel exceptions are fatal.
         0x00..0x20 => {

@@ -42,6 +42,11 @@ static SCHED_TICKS: AtomicUsize = AtomicUsize::new(0);
 intrusive_adapter!(TaskRunLink = UnsafeRef<Task>: Task { run_link => LinkedListAtomicLink });
 intrusive_adapter!(TaskReapLink = UnsafeRef<Task>: Task { reap_link => LinkedListAtomicLink });
 
+/// Dead tasks awaiting teardown.
+static REAPABLE_TASKS: SpinMutex<LinkedList<TaskReapLink>> =
+    SpinMutex::new(LinkedList::new(TaskReapLink::NEW));
+static REAPABLE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// An instance of a scheduler. Each CPU has one instance running to coordinate task management.
 #[derive(Debug)]
 pub struct Scheduler {
@@ -53,7 +58,6 @@ pub struct Scheduler {
     reschedule_pending: AtomicBool,
     load: AtomicUsize,
     run_queue: SpinMutex<RunQueue>,
-    reap_queue: SpinMutex<LinkedList<TaskReapLink>>,
     reaper_task: AtomicPtr<Task>,
 }
 
@@ -237,7 +241,6 @@ impl Scheduler {
             reschedule_pending: AtomicBool::new(false),
             load: AtomicUsize::new(0),
             run_queue: SpinMutex::new(RunQueue::new()),
-            reap_queue: SpinMutex::new(LinkedList::new(TaskReapLink::NEW)),
             reaper_task: AtomicPtr::new(null_mut()),
         };
     }
@@ -251,7 +254,11 @@ impl Scheduler {
             let mut state = task.state.lock();
             match *state {
                 // Already terminating, do not resurrect.
-                State::Dead | State::Dying => return,
+                State::Dead | State::Dying => {
+                    drop(state);
+                    self.queue_reap(task);
+                    return;
+                }
                 State::Running => {
                     task.wake_pending.store(true, Ordering::Release);
                     return;
@@ -441,6 +448,16 @@ impl Scheduler {
         CPU_DATA.get().scheduler.current()
     }
 
+    /// Borrows the current task without cloning its [`Arc`].
+    /// # Safety
+    /// The borrow must not span a voluntary reschedule, since the task may be reaped once it yields.
+    pub unsafe fn with_current<R>(f: impl FnOnce(&Task) -> R) -> R {
+        let ptr = CPU_DATA.get().scheduler.current.load(Ordering::Acquire);
+        debug_assert!(!ptr.is_null());
+        // SAFETY: `current` is alive for as long as the scheduler holds it.
+        f(unsafe { &*ptr })
+    }
+
     pub fn current(&self) -> Arc<Task> {
         let ptr = self.current.load(Ordering::Acquire);
         debug_assert!(!ptr.is_null());
@@ -619,6 +636,15 @@ impl Scheduler {
         };
         let pending_reschedule = self.reschedule_pending.load(Ordering::Acquire);
 
+        // Nudge the reaper while parked tasks await teardown/retry.
+        if tick % 128 == 0
+            && REAPABLE_COUNT.load(Ordering::Relaxed) > 0
+            && !self.reaper_task.load(Ordering::Acquire).is_null()
+        {
+            let reaper = self.reaper();
+            self.add_task(reaper);
+        }
+
         {
             let mut queue = self.run_queue.lock();
             queue.advance_timeshare();
@@ -725,6 +751,7 @@ impl Scheduler {
             if to_owned {
                 _ = unsafe { Arc::from_raw(to) };
             }
+            drop(irq_guard);
             return;
         }
 
@@ -777,7 +804,10 @@ impl Scheduler {
         let idle = CPU_DATA.get().scheduler.idle_task.load(Ordering::Acquire);
         if !previous.is_null() && previous != idle {
             let previous = unsafe { Arc::from_raw(previous) };
-            if Arc::strong_count(&previous) == 1 {
+            // Dead tasks always go to the reaper, even if still referenced.
+            if Arc::strong_count(&previous) == 1
+                || matches!(*previous.state.lock(), State::Dead | State::Dying)
+            {
                 CPU_DATA.get().scheduler.queue_reap(previous);
             }
         }
@@ -798,7 +828,7 @@ impl Scheduler {
         let new_ptr = Arc::into_raw(task);
         let old_ptr = self.current.swap(new_ptr as *mut _, Ordering::AcqRel);
         if !old_ptr.is_null() {
-            _ = unsafe { Arc::from_raw(old_ptr) }; // Arc is dropped here.
+            _ = unsafe { Arc::from_raw(old_ptr) };
         }
     }
 
@@ -810,13 +840,52 @@ impl Scheduler {
         }
     }
 
+    /// Parks a dead task for the reaper (IRQ-safe; no final drop here).
     fn queue_reap(&self, task: Arc<Task>) {
-        self.reap_queue
-            .lock()
-            .push_back(unsafe { UnsafeRef::from_raw(Arc::into_raw(task)) });
+        // Nudge only on newly-parked tasks; re-nudging a parked one livelocks.
+        if !Self::park_reapable(task) {
+            return;
+        }
 
-        let reaper = self.reaper();
-        self.add_task(reaper);
+        if !self.reaper_task.load(Ordering::Acquire).is_null() {
+            let reaper = self.reaper();
+            self.add_task(reaper);
+        }
+    }
+
+    /// Parks a task on [`REAPABLE_TASKS`]. Returns false if already parked.
+    fn park_reapable(task: Arc<Task>) -> bool {
+        let mut list = REAPABLE_TASKS.lock();
+        if task.reap_link.is_linked() {
+            return false;
+        }
+        REAPABLE_COUNT.fetch_add(1, Ordering::Relaxed);
+        list.push_back(unsafe { UnsafeRef::from_raw(Arc::into_raw(task)) });
+        true
+    }
+
+    /// Drops sole-owner dead tasks; re-queues still-referenced ones for retry.
+    fn reap_pass() {
+        // Drain into a local list so re-queues aren't reprocessed this pass.
+        let mut local: LinkedList<TaskReapLink> = LinkedList::new(TaskReapLink::NEW);
+        {
+            let mut list = REAPABLE_TASKS.lock();
+            while let Some(node) = list.pop_front() {
+                REAPABLE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                local.push_back(node);
+            }
+        }
+
+        while let Some(node) = local.pop_front() {
+            let task = unsafe { Arc::from_raw(UnsafeRef::into_raw(node)) };
+            if Arc::strong_count(&task) == 1 {
+                // Sole owner: full teardown (blocking shootdown is fine here).
+                drop(task);
+            } else {
+                // Still referenced (a transient cross-CPU ref); retry next pass.
+                Self::park_reapable(task);
+            }
+        }
     }
 
     fn reaper(&self) -> Arc<Task> {
@@ -1032,13 +1101,7 @@ pub extern "C" fn dummy_fn(_: usize, _: usize) {
 
 pub extern "C" fn reaper_fn(_: usize, _: usize) {
     loop {
-        loop {
-            let node = CPU_DATA.get().scheduler.reap_queue.lock().pop_front();
-            let Some(node) = node else {
-                break;
-            };
-            drop(unsafe { Arc::from_raw(UnsafeRef::into_raw(node)) });
-        }
+        Scheduler::reap_pass();
 
         CpuData::get().scheduler.do_yield();
     }

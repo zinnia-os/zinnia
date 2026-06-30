@@ -6,7 +6,6 @@ use crate::{
     },
     posix::errno::{EResult, Errno},
 };
-use alloc::vec::Vec;
 use core::num::NonZero;
 
 pub struct KernelStack {
@@ -15,19 +14,23 @@ pub struct KernelStack {
 }
 
 impl KernelStack {
-    /// Size of the kernel stack, including the guard page.
-    const SIZE: NonZero<usize> = NonZero::new(32 * 1024).unwrap(); // 32 KiB
+    const STACK_SIZE: usize = 0x7000;
+    const PHYS_LIST_END: PhysAddr = PhysAddr::new(usize::MAX);
 
     pub fn new() -> EResult<Self> {
         let page_size = arch::virt::get_page_size();
-        let virtual_address = KERNEL_VIRTUAL_ALLOCATOR.get().lock().allocate(Self::SIZE)?;
+        let guarded_size = Self::guarded_size();
+        let virtual_address = KERNEL_VIRTUAL_ALLOCATOR
+            .get()
+            .lock()
+            .allocate(guarded_size)?;
         let page_table = KERNEL_PAGE_TABLE.get();
 
-        for i in (page_size..Self::SIZE.get()).step_by(page_size) {
+        for i in (0..Self::STACK_SIZE).step_by(page_size) {
             let physical_page = KernelAlloc::alloc(1, AllocFlags::empty())?;
             page_table
                 .map_single::<KernelAlloc>(
-                    virtual_address + i,
+                    virtual_address + guarded_size.get() - Self::STACK_SIZE + i,
                     physical_page,
                     VmFlags::Read | VmFlags::Write,
                     VmCacheType::Normal,
@@ -37,12 +40,16 @@ impl KernelStack {
 
         Ok(Self {
             base: virtual_address,
-            top: virtual_address + Self::SIZE.get(),
+            top: virtual_address + guarded_size.get(),
         })
     }
 
     pub fn top(&self) -> VirtAddr {
         self.top
+    }
+
+    fn guarded_size() -> NonZero<usize> {
+        NonZero::new(Self::STACK_SIZE + arch::virt::get_page_size()).unwrap()
     }
 }
 
@@ -50,26 +57,31 @@ impl Drop for KernelStack {
     fn drop(&mut self) {
         let page_size = arch::virt::get_page_size();
         let page_table = KERNEL_PAGE_TABLE.get();
-        let mut pages = Vec::<PhysAddr>::new();
+        let guarded_size = Self::guarded_size();
 
-        for i in (page_size..Self::SIZE.get()).step_by(page_size) {
-            let phys = page_table.get_mapping(self.base + i).unwrap().unwrap();
+        let mut physical_stack = Self::PHYS_LIST_END;
+        for i in (0..Self::STACK_SIZE).step_by(page_size) {
+            let addr = self.base + guarded_size.get() - Self::STACK_SIZE + i;
+            let phys = page_table.get_mapping(addr).unwrap().unwrap();
             page_table
-                .unmap_single_no_shootdown::<KernelAlloc>(self.base + i)
+                .unmap_single_no_shootdown::<KernelAlloc>(addr)
                 .unwrap();
-            pages.push(phys);
+            unsafe { phys.as_hhdm::<PhysAddr>().write(physical_stack) };
+            physical_stack = phys;
         }
 
-        virt::shootdown::submit_shootdown(page_table, self.base.value(), Self::SIZE.get());
-
-        for phys in pages {
-            unsafe { KernelAlloc::dealloc(phys, 1) };
+        // Shoot down before freeing so no page is reused under a stale mapping.
+        virt::shootdown::submit_shootdown(page_table, self.base.value(), guarded_size.get());
+        while physical_stack != Self::PHYS_LIST_END {
+            let next = unsafe { physical_stack.as_hhdm::<PhysAddr>().read() };
+            unsafe { KernelAlloc::dealloc(physical_stack, 1) };
+            physical_stack = next;
         }
 
         KERNEL_VIRTUAL_ALLOCATOR
             .get()
             .lock()
-            .release(self.base, Self::SIZE)
+            .release(self.base, guarded_size)
             .unwrap();
     }
 }
