@@ -85,11 +85,19 @@ struct TcpInner {
     rcv_nxt: u32,
     peer_mss: usize,
     peer_window: usize,
+    last_adv_window: u16,
 }
 
 impl TcpInner {
     fn recv_window(&self) -> u16 {
         self.recv_buf.get_available_len().min(u16::MAX as usize) as u16
+    }
+
+    /// Current window, recording it as the value last advertised to the peer.
+    fn advertise_window(&mut self) -> u16 {
+        let w = self.recv_window();
+        self.last_adv_window = w;
+        w
     }
 
     fn send_window_available(&self) -> usize {
@@ -270,7 +278,7 @@ impl TcpSocket {
         };
         register_connection(local, endpoint, self_ref);
 
-        let window = self.inner.lock().recv_window();
+        let window = self.inner.lock().advertise_window();
         if let Err(e) = send_segment_raw(&interface, local, endpoint, iss, 0, SYN, window, &[]) {
             unregister_connection(local, endpoint);
             self.inner.lock().state = TcpState::Bound;
@@ -300,14 +308,14 @@ impl TcpSocket {
 
     fn send_current(&self, flags: u16, payload: &[u8]) -> EResult<()> {
         let (local, peer, seq, ack, window) = {
-            let inner = self.inner.lock();
+            let mut inner = self.inner.lock();
             let peer = inner.peer.ok_or(Errno::ENOTCONN)?;
             (
                 inner.local,
                 peer,
                 inner.snd_nxt,
                 inner.rcv_nxt,
-                inner.recv_window(),
+                inner.advertise_window(),
             )
         };
         send_segment(local, peer, seq, ack, flags, window, payload)
@@ -332,7 +340,13 @@ impl TcpSocket {
                 TcpState::CloseWait => TcpState::LastAck,
                 other => other,
             };
-            (inner.local, peer, seq, inner.rcv_nxt, inner.recv_window())
+            (
+                inner.local,
+                peer,
+                seq,
+                inner.rcv_nxt,
+                inner.advertise_window(),
+            )
         };
         send_segment(local, peer, seq, ack, ACK | FIN, window, &[])
     }
@@ -622,7 +636,13 @@ impl SocketOps for TcpSocket {
                 let peer = inner.peer.ok_or(Errno::ENOTCONN)?;
                 let seq = inner.snd_nxt;
                 inner.snd_nxt = inner.snd_nxt.wrapping_add(data.len() as u32);
-                (inner.local, peer, seq, inner.rcv_nxt, inner.recv_window())
+                (
+                    inner.local,
+                    peer,
+                    seq,
+                    inner.rcv_nxt,
+                    inner.advertise_window(),
+                )
             };
             send_segment(local, peer, seq, ack, ACK, window, &data)?;
             sent += data.len();
@@ -659,11 +679,26 @@ impl SocketOps for TcpSocket {
                     } else {
                         inner.recv_buf.read(&mut data)
                     };
+                    // Reading freed buffer space; tell the peer if its window can grow
+                    // meaningfully, else a filled window stalls until its persist probe.
+                    let want_update = got > 0
+                        && !peek
+                        && matches!(
+                            inner.state,
+                            TcpState::Established | TcpState::FinWait1 | TcpState::FinWait2
+                        )
+                        && (inner.recv_window() as usize)
+                            .saturating_sub(inner.last_adv_window as usize)
+                            >= min(inner.peer_mss, TCP_RECV_BUFFER_SIZE / 2);
+                    drop(inner);
                     if got > 0 {
                         buf.copy_from_slice(&data[..got])?;
                         if !peek {
                             self.wr_event.wake_all();
                         }
+                    }
+                    if want_update {
+                        let _ = self.send_ack();
                     }
                     return Ok((got as isize, 0, 0, 0));
                 }
@@ -794,14 +829,11 @@ impl SocketOps for TcpSocket {
     }
 
     fn poll_events(&self, mask: PollFlags) -> PollEventSet<'_> {
-        let wants_read = mask.intersects(PollFlags::Read);
-        let wants_write = mask.intersects(PollFlags::Write);
-
         let mut events = PollEventSet::new();
-        if wants_read || !wants_write {
+        if mask.wants_read_wake() {
             events = events.add(&self.rd_event).add(&self.accept_event);
         }
-        if wants_write || !wants_read {
+        if mask.wants_write_wake() {
             events = events.add(&self.wr_event);
         }
         events
@@ -909,6 +941,9 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
 
     let child = make_socket(TcpState::SynReceived)?;
     let iss = next_isn();
+    let synack_window = TCP_RECV_BUFFER_SIZE
+        .saturating_sub(1)
+        .min(u16::MAX as usize) as u16;
     {
         let mut inner = child.inner.lock();
         inner.local = Ipv4Endpoint {
@@ -924,6 +959,7 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
         inner.rcv_nxt = segment.seq.wrapping_add(1);
         inner.peer_mss = parse_mss(segment.options);
         inner.peer_window = segment.window as usize;
+        inner.last_adv_window = synack_window;
     }
     let (child_local, child_ref) = {
         let inner = child.inner.lock();
@@ -938,9 +974,7 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
         iss,
         segment.seq.wrapping_add(1),
         SYN | ACK,
-        TCP_RECV_BUFFER_SIZE
-            .saturating_sub(1)
-            .min(u16::MAX as usize) as u16,
+        synack_window,
         &[],
     );
     if let Err(e) = send_result {
@@ -981,6 +1015,7 @@ fn make_socket(state: TcpState) -> EResult<Arc<TcpSocket>> {
             rcv_nxt: 0,
             peer_mss: MAX_TCP_PAYLOAD_LEN,
             peer_window: 0,
+            last_adv_window: 0,
         }),
         rd_event: Event::new(),
         wr_event: Event::new(),
