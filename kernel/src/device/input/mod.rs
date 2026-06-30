@@ -22,6 +22,7 @@ use alloc::{
     collections::{btree_map::BTreeMap, vec_deque::VecDeque},
     sync::Arc,
     vec,
+    vec::Vec,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -286,22 +287,21 @@ impl FileOps for EventDeviceFile {
         if buffer.len() < ev_size {
             return Err(Errno::EINVAL);
         }
+        let max_events = buffer.len() / ev_size;
 
         if file.flags.lock().contains(OpenFlags::NonBlocking) {
-            let mut buf = self.events.lock();
-            if buf.is_empty() {
+            let events = self.take_events(max_events);
+            if events.is_empty() {
                 return Err(Errno::EAGAIN);
             }
-            return EventDevice::drain_events(&mut buf, buffer, ev_size);
+            return self.copy_events_out(&events, buffer);
         }
 
         loop {
             let guard = self.device.rd_event.guard();
-            {
-                let mut buf = self.events.lock();
-                if !buf.is_empty() {
-                    return EventDevice::drain_events(&mut buf, buffer, ev_size);
-                }
+            let events = self.take_events(max_events);
+            if !events.is_empty() {
+                return self.copy_events_out(&events, buffer);
             }
             guard.wait();
             if Scheduler::get_current().has_pending_signals() {
@@ -331,27 +331,36 @@ impl FileOps for EventDeviceFile {
     }
 }
 
-impl EventDevice {
-    /// Drain as many events as fit into the user buffer (in multiples of event size). Returns bytes copied.
-    fn drain_events(
-        buf: &mut VecDeque<InputEvent>,
-        buffer: &mut IovecIter,
-        ev_size: usize,
-    ) -> EResult<isize> {
-        let max_events = buffer.len() / ev_size;
-        let n = core::cmp::min(max_events, buf.len());
-        let mut total = 0isize;
+impl EventDeviceFile {
+    fn take_events(&self, max: usize) -> Vec<InputEvent> {
+        let mut buf = self.events.lock();
+        let n = max.min(buf.len());
+        buf.drain(..n).collect()
+    }
 
-        for _ in 0..n {
-            if let Some(ev) = buf.pop_front() {
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(&ev as *const InputEvent as *const u8, ev_size)
-                };
-                buffer.copy_from_slice(bytes)?;
-                total += ev_size as isize;
-            }
+    fn requeue_events(&self, events: &[InputEvent]) {
+        let mut buf = self.events.lock();
+        for ev in events.iter().rev() {
+            buf.push_front(*ev);
         }
+    }
 
+    fn copy_events_out(&self, events: &[InputEvent], buffer: &mut IovecIter) -> EResult<isize> {
+        let ev_size = size_of::<InputEvent>();
+        let mut total = 0isize;
+        for (idx, ev) in events.iter().enumerate() {
+            let bytes = unsafe {
+                core::slice::from_raw_parts(ev as *const InputEvent as *const u8, ev_size)
+            };
+            if let Err(err) = buffer.copy_from_slice(bytes) {
+                self.requeue_events(&events[idx..]);
+                if total > 0 {
+                    return Ok(total);
+                }
+                return Err(err);
+            }
+            total += ev_size as isize;
+        }
         Ok(total)
     }
 }
