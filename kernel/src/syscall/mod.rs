@@ -157,7 +157,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::SIGSUSPEND => signal::sigsuspend,
         numbers::SIGPENDING => signal::sigpending,
         numbers::SIGACTION => signal::sigaction,
-        numbers::SIGTIMEDWAIT => sys_unimpl!("sigtimedwait", Err(Errno::ENOSYS)),
+        numbers::SIGTIMEDWAIT => signal::sigtimedwait,
         numbers::SIGALTSTACK => {
             SyscallReturn::into_ctx(signal::sigaltstack(frame), frame);
             return;

@@ -3,10 +3,10 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::{
         Process,
-        signal::{Signal, SignalSet},
+        signal::{PendingQueue, SigInfoData, Signal, SignalSet},
     },
     sched::Scheduler,
-    uapi::signal::{SI_USER, signalfd_siginfo},
+    uapi::signal::signalfd_siginfo,
     util::mutex::spin::SpinMutex,
     vfs::{
         File,
@@ -31,30 +31,55 @@ impl SignalfdFile {
         }
     }
 
-    /// Dequeue the lowest-numbered pending signal matching the mask from the current task.
-    /// Returns the consumed signal, or None if none are pending.
-    fn dequeue_one(&self) -> Option<Signal> {
+    fn dequeue_one(&self) -> Option<(Signal, SigInfoData, PendingQueue)> {
         let mask = *self.mask.lock();
         let task = Scheduler::get_current();
-        let mut state = task.signal.lock();
-        let pending = state.pending & mask;
-        let sig = pending.first_set()?;
-        state.pending.set(sig, false);
-        Some(sig)
+        if Arc::ptr_eq(&task.get_process(), &self.process) {
+            if let Some(dequeued) = task.signal.lock().queue.dequeue(mask) {
+                return Some((dequeued.0, dequeued.1, PendingQueue::Thread));
+            }
+        }
+        self.process
+            .shared_pending
+            .lock()
+            .dequeue(mask)
+            .map(|(sig, info)| (sig, info, PendingQueue::Process))
+    }
+
+    fn requeue_one(&self, sig: Signal, info: SigInfoData, queue: PendingQueue) {
+        let task = Scheduler::get_current();
+        match queue {
+            PendingQueue::Thread if Arc::ptr_eq(&task.get_process(), &self.process) => {
+                task.signal.lock().queue.queue(sig, info);
+            }
+            PendingQueue::Thread | PendingQueue::Process => {
+                self.process.shared_pending.lock().queue(sig, info);
+            }
+        }
+        self.process.signal_event.wake_all();
     }
 
     fn has_pending(&self) -> bool {
         let mask = *self.mask.lock();
+        if self.process.shared_pending.lock().deliverable(mask) {
+            return true;
+        }
+        // Signals are only visible when the caller belongs to the signalfd's process.
         let task = Scheduler::get_current();
-        let state = task.signal.lock();
-        !(state.pending & mask).is_empty()
+        Arc::ptr_eq(&task.get_process(), &self.process)
+            && task.signal.lock().queue.deliverable(mask)
     }
 }
 
-fn make_siginfo(sig: Signal) -> signalfd_siginfo {
+fn make_siginfo(sig: Signal, info: SigInfoData) -> signalfd_siginfo {
     signalfd_siginfo {
         ssi_signo: sig as u32,
-        ssi_code: SI_USER as i32,
+        ssi_errno: info.errno,
+        ssi_code: info.code,
+        ssi_pid: info.pid as u32,
+        ssi_uid: info.uid,
+        ssi_status: info.status,
+        ssi_addr: info.addr as u64,
         ..Default::default()
     }
 }
@@ -67,9 +92,7 @@ impl FileOps for SignalfdFile {
         }
 
         loop {
-            // Register as a waiter *before* checking, so a signal delivered between the check and the wait()
-            // can't be missed.
-            let guard = self.process.signalfd_event.guard();
+            let guard = self.process.signal_event.guard();
 
             if self.has_pending() {
                 break;
@@ -81,8 +104,6 @@ impl FileOps for SignalfdFile {
 
             guard.wait();
 
-            // A pending signal that isn't in our mask would normally interrupt a blocking syscall.
-            // Return EINTR so userspace can handle it.
             if Scheduler::get_current().has_pending_signals() && !self.has_pending() {
                 return Err(Errno::EINTR);
             }
@@ -91,16 +112,31 @@ impl FileOps for SignalfdFile {
         let max_entries = buf.len() / entry_size;
         let mut written = 0isize;
         for _ in 0..max_entries {
-            let Some(sig) = self.dequeue_one() else { break };
-            let info = make_siginfo(sig);
+            let Some((sig, queued_info, queue)) = self.dequeue_one() else {
+                break;
+            };
+            let user_info = make_siginfo(sig, queued_info);
             let bytes = unsafe {
                 core::slice::from_raw_parts(
-                    &info as *const signalfd_siginfo as *const u8,
+                    &user_info as *const signalfd_siginfo as *const u8,
                     entry_size,
                 )
             };
-            let n = buf.copy_from_slice(bytes)?;
+            let n = match buf.copy_from_slice(bytes) {
+                Ok(n) => n,
+                Err(err) => {
+                    self.requeue_one(sig, queued_info, queue);
+                    if written > 0 {
+                        return Ok(written);
+                    }
+                    return Err(err);
+                }
+            };
             if (n as usize) < entry_size {
+                self.requeue_one(sig, queued_info, queue);
+                if written > 0 {
+                    return Ok(written);
+                }
                 return Err(Errno::EFAULT);
             }
             written += n;
@@ -118,6 +154,6 @@ impl FileOps for SignalfdFile {
     }
 
     fn poll_events(&self, _file: &File, _mask: PollFlags) -> PollEventSet<'_> {
-        PollEventSet::one(&self.process.signalfd_event)
+        PollEventSet::one(&self.process.signal_event)
     }
 }

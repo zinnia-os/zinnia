@@ -33,7 +33,7 @@ pub const RLIM_SAVED_CUR: super::rlim_t = -1i32 as super::rlim_t;
 pub const RLIM_NLIMITS: u32 = RLIMIT_NLIMITS;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct rusage {
     pub ru_utime: super::time::timeval,
     pub ru_stime: super::time::timeval,

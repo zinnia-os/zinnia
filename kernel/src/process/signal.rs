@@ -112,14 +112,6 @@ pub struct SignalSet {
     inner: signal::sigset_t,
 }
 
-/// Signals that can never be blocked.
-const UNBLOCKABLE: SignalSet = {
-    let mut set = SignalSet::new();
-    set.set(Signal::SigKill, true);
-    set.set(Signal::SigStop, true);
-    set
-};
-
 impl SignalSet {
     pub const fn new() -> Self {
         Self { inner: 0 }
@@ -163,9 +155,17 @@ impl SignalSet {
         Signal::try_from(bit + 1).ok()
     }
 
+    /// Signals that can never be blocked.
+    const UNBLOCKABLE: SignalSet = {
+        let mut set = SignalSet::new();
+        set.set(Signal::SigKill, true);
+        set.set(Signal::SigStop, true);
+        set
+    };
+
     /// Remove the unblockable signals (SIGKILL, SIGSTOP) from this set.
     pub fn sanitize_mask(&mut self) {
-        *self &= !UNBLOCKABLE;
+        *self &= !Self::UNBLOCKABLE;
     }
 }
 
@@ -366,31 +366,61 @@ pub struct SignalDelivery {
     pub altstack: AltStack,
 }
 
-/// Per-thread signal state.
 #[derive(Clone, Debug)]
+pub struct SigQueue {
+    pending: SignalSet,
+    info: [SigInfoData; (MAX_SIGNAL + 1) as usize],
+}
+
+impl SigQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: SignalSet::new(),
+            info: [SigInfoData::default(); (MAX_SIGNAL + 1) as usize],
+        }
+    }
+
+    pub const fn pending(&self) -> SignalSet {
+        self.pending
+    }
+
+    pub fn queue(&mut self, sig: Signal, info: SigInfoData) {
+        self.pending.set(sig, true);
+        self.info[sig as usize] = info;
+    }
+
+    pub fn dequeue(&mut self, allowed: SignalSet) -> Option<(Signal, SigInfoData)> {
+        let sig = (self.pending & allowed).first_set()?;
+        self.pending.set(sig, false);
+        Some((sig, self.info[sig as usize]))
+    }
+
+    pub fn discard(&mut self, sig: Signal) {
+        self.pending.set(sig, false);
+    }
+
+    pub fn deliverable(&self, allowed: SignalSet) -> bool {
+        !(self.pending & allowed).is_empty()
+    }
+}
+
+impl Default for SigQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-thread signal state.
+#[derive(Clone, Debug, Default)]
 pub struct ThreadSignalState {
     /// Signals pending delivery to this thread.
-    pub pending: SignalSet,
+    pub queue: SigQueue,
     /// Current signal mask (signals blocked from delivery).
     pub mask: SignalSet,
-    /// Per-signal info for the currently pending signals.
-    pub pending_info: [SigInfoData; (MAX_SIGNAL + 1) as usize],
     /// The alternate signal stack for this thread.
     pub altstack: AltStack,
     /// Mask to restore once the next signal is delivered.
     pub restore_mask: Option<SignalSet>,
-}
-
-impl Default for ThreadSignalState {
-    fn default() -> Self {
-        Self {
-            pending: SignalSet::new(),
-            mask: SignalSet::new(),
-            pending_info: [SigInfoData::default(); (MAX_SIGNAL + 1) as usize],
-            altstack: AltStack::default(),
-            restore_mask: None,
-        }
-    }
 }
 
 /// Signals whose default action stops the process.
@@ -405,11 +435,22 @@ pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
     send_signal_info_to_thread(task, sig, SigInfoData::kernel());
 }
 
-/// Queue a signal on the given thread and wake it if it is sleeping.
-pub fn send_signal_info_to_thread(task: &Arc<Task>, sig: Signal, info: SigInfoData) {
-    let proc = task.get_process();
+/// Discards all pending `sig` (shared + thread queues) when `action` ignores
+/// it, as POSIX requires when a disposition becomes SIG_IGN (or ignoring DFL).
+pub fn flush_if_ignored(proc: &Arc<Process>, sig: Signal, action: &SigAction) {
+    let ignored = action.is_ignore()
+        || (action.is_default() && sig.default_action() == DefaultAction::Ignore);
+    if !ignored {
+        return;
+    }
+    for thread in proc.threads.lock().iter() {
+        thread.signal.lock().queue.discard(sig);
+    }
+    proc.shared_pending.lock().discard(sig);
+}
 
-    // SIGCONT (and SIGKILL) must unblock a stopped process so it can run again.
+fn prepare_signal(proc: &Arc<Process>, sig: Signal, blocked: bool) -> bool {
+    // SIGCONT/SIGKILL unblock a stopped process even if blocked or ignored.
     if sig == Signal::SigCont || sig == Signal::SigKill {
         let was_stopped = {
             let mut state = proc.status.lock();
@@ -433,29 +474,48 @@ pub fn send_signal_info_to_thread(task: &Arc<Task>, sig: Signal, info: SigInfoDa
         }
     }
 
-    if !sig.is_uncatchable() {
+    // SIGCONT discards pending stop signals and vice versa, in every queue of the process.
+    let is_stop = STOP_SIGNALS.contains(&sig);
+    if sig == Signal::SigCont || is_stop {
+        let discard = |queue: &mut SigQueue| {
+            if is_stop {
+                queue.discard(Signal::SigCont);
+            } else {
+                for s in STOP_SIGNALS {
+                    queue.discard(s);
+                }
+            }
+        };
+        for thread in proc.threads.lock().iter() {
+            discard(&mut thread.signal.lock().queue);
+        }
+        discard(&mut proc.shared_pending.lock());
+    }
+
+    // Drop ignored signals at send time, unless they are blocked.
+    if !sig.is_uncatchable() && !blocked {
         let action = *proc.signal_actions.lock().get_action(sig);
         if action.is_ignore()
             || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
         {
-            return;
+            return false;
         }
     }
 
-    {
-        let mut state = task.signal.lock();
-        // SIGCONT discards pending stop signals and vice versa.
-        if sig == Signal::SigCont {
-            for s in STOP_SIGNALS {
-                state.pending.set(s, false);
-            }
-        } else if STOP_SIGNALS.contains(&sig) {
-            state.pending.set(Signal::SigCont, false);
-        }
-        state.pending.set(sig, true);
-        state.pending_info[sig as usize] = info;
+    true
+}
+
+/// Queue a signal on the given thread and wake it if it is sleeping.
+pub fn send_signal_info_to_thread(task: &Arc<Task>, sig: Signal, info: SigInfoData) {
+    let proc = task.get_process();
+    let blocked = task.signal.lock().mask.is_set(sig);
+
+    if !prepare_signal(&proc, sig, blocked) {
+        return;
     }
-    proc.signalfd_event.wake_all();
+
+    task.signal.lock().queue.queue(sig, info);
+    proc.signal_event.wake_all();
     Scheduler::wake_task(task.clone());
 }
 
@@ -464,22 +524,42 @@ pub fn send_signal_to_process(proc: &Arc<Process>, sig: Signal) -> bool {
     send_signal_info_to_process(proc, sig, SigInfoData::kernel())
 }
 
-/// Deliver a process-directed signal, choosing a thread that has it unblocked.
+/// Queue a signal and wake a thread to handle it.
+/// Returns false if the process has no threads to deliver to.
 pub fn send_signal_info_to_process(proc: &Arc<Process>, sig: Signal, info: SigInfoData) -> bool {
-    let target = {
+    // Choose which thread to wake; prefer one with the signal unblocked.
+    let (target, all_blocked) = {
         let threads = proc.threads.lock();
-        threads
+        let target = threads
             .iter()
             .find(|t| !t.signal.lock().mask.is_set(sig))
             .or_else(|| threads.first())
-            .cloned()
+            .cloned();
+        let all_blocked = threads.iter().all(|t| t.signal.lock().mask.is_set(sig));
+        (target, all_blocked)
     };
 
     let Some(target) = target else {
         return false;
     };
 
-    send_signal_info_to_thread(&target, sig, info);
+    if !prepare_signal(proc, sig, all_blocked) {
+        return true;
+    }
+
+    proc.shared_pending.lock().queue(sig, info);
+    proc.signal_event.wake_all();
+
+    if sig == Signal::SigKill {
+        // Wake every thread so the whole process dies promptly.
+        let threads = proc.threads.lock().clone();
+        for thread in threads {
+            Scheduler::wake_task(thread);
+        }
+    } else {
+        Scheduler::wake_task(target);
+    }
+
     true
 }
 
@@ -508,19 +588,54 @@ pub fn notify_parent_of_child_state_change(proc: &Arc<Process>, code: i32, statu
 }
 
 pub fn force_signal_to_thread(task: &Task, sig: Signal, info: SigInfoData) {
-    // Unmask the signal so it's deliverable.
+    let proc = task.get_process();
+    let blocked = task.signal.lock().mask.is_set(sig);
+
     {
-        let mut state = task.signal.lock();
-        state.mask.set(sig, false);
-        state.pending.set(sig, true);
-        state.pending_info[sig as usize] = info;
+        let mut actions = proc.signal_actions.lock();
+        if actions.get_action(sig).is_ignore() || blocked {
+            actions.set_action(sig, SigAction::default());
+        }
     }
 
-    // Reset the handler to SIG_DFL so the default action (terminate) is taken.
-    let proc = task.get_process();
-    proc.signal_actions
+    let mut state = task.signal.lock();
+    state.mask.set(sig, false);
+    state.queue.queue(sig, info);
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PendingQueue {
+    Thread,
+    Process,
+}
+
+pub(crate) fn dequeue_signal(
+    task: &Task,
+    proc: &Process,
+    set: SignalSet,
+) -> Option<(Signal, SigInfoData, PendingQueue)> {
+    let mut state = task.signal.lock();
+    if let Some((sig, info)) = state.queue.dequeue(set) {
+        return Some((sig, info, PendingQueue::Thread));
+    }
+    proc.shared_pending
         .lock()
-        .set_action(sig, SigAction::default());
+        .dequeue(set)
+        .map(|(sig, info)| (sig, info, PendingQueue::Process))
+}
+
+pub(crate) fn requeue_signal(
+    task: &Task,
+    proc: &Process,
+    queue: PendingQueue,
+    sig: Signal,
+    info: SigInfoData,
+) {
+    match queue {
+        PendingQueue::Thread => task.signal.lock().queue.queue(sig, info),
+        PendingQueue::Process => proc.shared_pending.lock().queue(sig, info),
+    }
+    proc.signal_event.wake_all();
 }
 
 /// Send a signal to every process in the given process group.
@@ -551,31 +666,49 @@ pub fn deliver_pending_signals(context: &mut Context, syscall: Option<SyscallRes
         let task = Scheduler::get_current();
         let proc = task.get_process();
 
-        let sig = {
-            let state = task.signal.lock();
-            (state.pending & !state.mask).first_set()
+        // If the process was stopped, park here until SIGCONT/SIGKILL.
+        if matches!(*proc.status.lock(), State::Stopped(_)) {
+            wait_while_stopped(&proc);
+            continue;
+        }
+
+        // Dequeue the lowest deliverable signal: thread queue first, then shared.
+        let dequeued = {
+            let mut state = task.signal.lock();
+            let unblocked = !state.mask;
+            let dequeued = state
+                .queue
+                .dequeue(unblocked)
+                .or_else(|| proc.shared_pending.lock().dequeue(unblocked));
+            if dequeued.is_none() {
+                // Restore the sigsuspend/pselect mask once nothing is deliverable.
+                if let Some(mask) = state.restore_mask.take() {
+                    state.mask = mask;
+                }
+            }
+            dequeued
         };
 
-        let Some(sig) = sig else {
+        let Some((sig, info)) = dequeued else {
             // If a syscall was interrupted by such a signal, restart it transparently.
             if let Some(sc) = syscall.as_ref().filter(|_| restartable) {
                 context.restart_syscall(sc);
             }
-
-            let mut state = task.signal.lock();
-            if let Some(mask) = state.restore_mask.take() {
-                state.mask = mask;
-            }
             return;
         };
 
-        let info = {
-            let mut state = task.signal.lock();
-            state.pending.set(sig, false);
-            state.pending_info[sig as usize]
+        // Apply SA_RESETHAND under the actions lock so it can't fire twice.
+        let action = {
+            let mut actions = proc.signal_actions.lock();
+            let action = *actions.get_action(sig);
+            if !action.is_ignore()
+                && !action.is_default()
+                && action.flags & signal::SA_RESETHAND != 0
+            {
+                actions.set_action(sig, SigAction::default());
+            }
+            action
         };
-
-        let action = *proc.signal_actions.lock().get_action(sig);
 
         if action.is_ignore() {
             continue;
@@ -585,6 +718,9 @@ pub fn deliver_pending_signals(context: &mut Context, syscall: Option<SyscallRes
             match sig.default_action() {
                 DefaultAction::Ignore | DefaultAction::Continue => continue,
                 DefaultAction::Terminate | DefaultAction::CoreDump => {
+                    // exit() never returns; drop our Arcs so they aren't stranded.
+                    drop(task);
+                    drop(proc);
                     Process::exit(State::Signaled(sig));
                 }
                 DefaultAction::Stop => {
@@ -604,27 +740,18 @@ pub fn deliver_pending_signals(context: &mut Context, syscall: Option<SyscallRes
             }
         }
 
-        // The mask restored on sigreturn, or otherwise the current mask.
+        // Stage the mask sigreturn restores, then apply the handler-entry mask.
         let (old_mask, altstack) = {
             let mut state = task.signal.lock();
             let old_mask = state.restore_mask.take().unwrap_or(state.mask);
-            (old_mask, state.altstack)
-        };
-
-        {
-            let mut state = task.signal.lock();
+            let altstack = state.altstack;
             if action.flags & signal::SA_NODEFER == 0 {
                 state.mask.set(sig, true);
             }
             state.mask |= action.mask;
             state.mask.sanitize_mask();
-        }
-
-        if action.flags & signal::SA_RESETHAND != 0 {
-            proc.signal_actions
-                .lock()
-                .set_action(sig, SigAction::default());
-        }
+            (old_mask, altstack)
+        };
 
         let delivery = SignalDelivery {
             handler: action.handler,
@@ -648,8 +775,12 @@ fn enter_stopped_state(proc: &Arc<Process>, sig: Signal) {
     proc.stop_unwaited.store(true, Ordering::Release);
     notify_parent_of_child_state_change(proc, signal::CLD_STOPPED as i32, sig as i32);
 
-    // Park on cont_event until SIGCONT (or SIGKILL) flips us out of Stopped.
+    wait_while_stopped(proc);
+}
+
+fn wait_while_stopped(proc: &Arc<Process>) {
     loop {
+        // Register before checking, so a wakeup between check and wait() is not missed.
         let guard = proc.cont_event.guard();
         if !matches!(*proc.status.lock(), State::Stopped(_)) {
             break;

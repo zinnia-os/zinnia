@@ -21,21 +21,25 @@ pub fn sigaction(sig: u32, act_ptr: VirtAddr, oact_ptr: VirtAddr) -> EResult<usi
     }
 
     let proc = Scheduler::get_current().get_process();
-    let mut actions = proc.signal_actions.lock();
 
-    // Return old action if requested.
+    // Read user memory before locking.
+    let new_action = if !act_ptr.is_null() {
+        let act: UserPtr<uapi::signal::sigaction> = UserPtr::new(act_ptr);
+        Some(SigAction::from_user(&act.read().ok_or(Errno::EFAULT)?))
+    } else {
+        None
+    };
+
+    let old = *proc.signal_actions.lock().get_action(sig);
+
     if !oact_ptr.is_null() {
-        let old = actions.get_action(sig).to_user();
         let mut oact: UserPtr<uapi::signal::sigaction> = UserPtr::new(oact_ptr);
-        oact.write(old).ok_or(Errno::EFAULT)?;
+        oact.write(old.to_user()).ok_or(Errno::EFAULT)?;
     }
 
-    // Install new action if provided.
-    if !act_ptr.is_null() {
-        let act: UserPtr<uapi::signal::sigaction> = UserPtr::new(act_ptr);
-        let user_act = act.read().ok_or(Errno::EFAULT)?;
-        let action = SigAction::from_user(&user_act);
-        actions.set_action(sig, action);
+    if let Some(action) = new_action {
+        proc.signal_actions.lock().set_action(sig, action);
+        signal::flush_if_ignored(&proc, sig, &action);
     }
 
     Ok(0)
@@ -44,35 +48,36 @@ pub fn sigaction(sig: u32, act_ptr: VirtAddr, oact_ptr: VirtAddr) -> EResult<usi
 #[wrap_syscall]
 pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<usize> {
     let task = Scheduler::get_current();
-    let mut sig_state = task.signal.lock();
 
-    // Return old mask if requested.
+    // Read user memory before locking.
+    let new_set = if !set_ptr.is_null() {
+        let how = how as u32;
+        if how < uapi::signal::SIG_BLOCK || how > uapi::signal::SIG_SETMASK {
+            return Err(Errno::EINVAL);
+        }
+        let set: UserPtr<uapi::signal::sigset_t> = UserPtr::new(set_ptr);
+        let mut new_set = SignalSet::from_raw(set.read().ok_or(Errno::EFAULT)?);
+        new_set.sanitize_mask();
+        Some((how, new_set))
+    } else {
+        None
+    };
+
+    let old_mask = task.signal.lock().mask;
+
     if !old_ptr.is_null() {
         let mut old: UserPtr<uapi::signal::sigset_t> = UserPtr::new(old_ptr);
-        old.write(sig_state.mask.as_raw()).ok_or(Errno::EFAULT)?;
+        old.write(old_mask.as_raw()).ok_or(Errno::EFAULT)?;
     }
 
-    // Modify mask if set is provided.
-    if !set_ptr.is_null() {
-        let set: UserPtr<uapi::signal::sigset_t> = UserPtr::new(set_ptr);
-        let raw_set = set.read().ok_or(Errno::EFAULT)?;
-        let mut new_set = SignalSet::from_raw(raw_set);
-        new_set.sanitize_mask();
-
-        match how as u32 {
-            uapi::signal::SIG_BLOCK => {
-                sig_state.mask |= new_set;
-            }
-            uapi::signal::SIG_UNBLOCK => {
-                sig_state.mask = sig_state.mask & !new_set;
-            }
-            uapi::signal::SIG_SETMASK => {
-                sig_state.mask = new_set;
-            }
-            _ => return Err(Errno::EINVAL),
+    if let Some((how, new_set)) = new_set {
+        let mut sig_state = task.signal.lock();
+        match how {
+            uapi::signal::SIG_BLOCK => sig_state.mask |= new_set,
+            uapi::signal::SIG_UNBLOCK => sig_state.mask = sig_state.mask & !new_set,
+            uapi::signal::SIG_SETMASK => sig_state.mask = new_set,
+            _ => unreachable!(),
         }
-
-        // Ensure SIGKILL and SIGSTOP are never blocked.
         sig_state.mask.sanitize_mask();
     }
 
@@ -81,6 +86,9 @@ pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<
 
 #[wrap_syscall]
 pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
+    if sig > uapi::signal::MAX_SIGNAL as usize {
+        return Err(Errno::EINVAL);
+    }
     let sig_num = sig as u32;
 
     // Signal 0 is used to check permissions / process existence without sending.
@@ -121,18 +129,19 @@ pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
             Ok(0)
         }
         -1 => {
-            // Send to every process except PID 1 (init) and PID 0 (kernel).
+            // Send to every process except PID 1 (init), PID 0 (kernel) and the calling process itself.
             if sig_num == 0 {
                 return Ok(0);
             }
 
+            let sender_pid = sender.get_pid();
             let sig = Signal::try_from(sig_num).unwrap();
             let targets = {
                 let table = PROCESS_TABLE.lock();
                 table
                     .iter()
                     .filter_map(|(&target_pid, proc)| {
-                        if target_pid <= 1 {
+                        if target_pid <= 1 || target_pid == sender_pid {
                             return None;
                         }
                         proc.upgrade()
@@ -189,10 +198,62 @@ pub fn sigreturn(frame: &mut Context) -> ! {
 #[wrap_syscall]
 pub fn sigpending(set_ptr: VirtAddr) -> EResult<usize> {
     let task = Scheduler::get_current();
-    let pending = task.signal.lock().pending.as_raw();
+    let proc = task.get_process();
+    let (thread_pending, mask) = {
+        let state = task.signal.lock();
+        (state.queue.pending(), state.mask)
+    };
+    let shared_pending = proc.shared_pending.lock().pending();
+    let pending = ((thread_pending | shared_pending) & mask).as_raw();
     let mut ptr: UserPtr<uapi::signal::sigset_t> = UserPtr::new(set_ptr);
     ptr.write(pending).ok_or(Errno::EFAULT)?;
     Ok(0)
+}
+
+#[wrap_syscall]
+pub fn sigtimedwait(
+    set_ptr: VirtAddr,
+    info_ptr: VirtAddr,
+    timeout_ptr: VirtAddr,
+) -> EResult<usize> {
+    let task = Scheduler::get_current();
+    let proc = task.get_process();
+
+    let set: UserPtr<uapi::signal::sigset_t> = UserPtr::new(set_ptr);
+    let mut wait_set = SignalSet::from_raw(set.read().ok_or(Errno::EFAULT)?);
+    // SIGKILL and SIGSTOP cannot be waited for.
+    wait_set.sanitize_mask();
+
+    let deadline = super::system::read_timeout_deadline(timeout_ptr)?;
+    let timeout_guard = deadline.map(crate::clock::timeout_at);
+
+    loop {
+        let guard = proc.signal_event.guard();
+
+        if let Some((sig, info, queue)) = signal::dequeue_signal(&task, &proc, wait_set) {
+            if !info_ptr.is_null() {
+                let wrote = UserPtr::<uapi::signal::siginfo_t>::new(info_ptr)
+                    .write(info.to_user(sig))
+                    .is_some();
+                if !wrote {
+                    signal::requeue_signal(&task, &proc, queue, sig, info);
+                    return Err(Errno::EFAULT);
+                }
+            }
+            return Ok(sig as usize);
+        }
+
+        // A deliverable signal outside the waited set interrupts the wait.
+        if task.has_pending_signals() {
+            return Err(Errno::EINTR);
+        }
+
+        if timeout_guard.as_ref().is_some_and(|g| g.expired()) {
+            return Err(Errno::EAGAIN);
+        }
+
+        guard.wait();
+    }
 }
 
 #[wrap_syscall]
@@ -213,7 +274,7 @@ pub fn sigsuspend(set_ptr: VirtAddr) -> EResult<usize> {
 
     // Block until a signal becomes deliverable under the temporary mask.
     loop {
-        let guard = proc.signalfd_event.guard();
+        let guard = proc.signal_event.guard();
         if task.has_pending_signals() {
             break;
         }

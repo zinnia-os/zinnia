@@ -448,7 +448,12 @@ fn encode_stopped(sig: u32) -> i32 {
 }
 
 #[wrap_syscall]
-pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
+pub fn waitpid(
+    pid: pid_t,
+    stat_loc: VirtAddr,
+    options: i32,
+    rusage_loc: VirtAddr,
+) -> EResult<pid_t> {
     let proc = Scheduler::get_current().get_process();
     let caller_pgrp = *proc.pgrp.lock();
     let mut stat_ptr: UserPtr<i32> = UserPtr::new(stat_loc);
@@ -458,6 +463,17 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
             Ok(())
         } else {
             p.write(s).ok_or(Errno::EFAULT).map(|_| ())
+        }
+    };
+
+    let write_rusage = || -> EResult<()> {
+        if rusage_loc.is_null() {
+            Ok(())
+        } else {
+            UserPtr::<uapi::resource::rusage>::new(rusage_loc)
+                .write(uapi::resource::rusage::default())
+                .ok_or(Errno::EFAULT)
+                .map(|_| ())
         }
     };
 
@@ -472,7 +488,7 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
 
             let mut saw_match = false;
             let mut reap: Option<(usize, pid_t, i32)> = None;
-            let mut report: Option<(pid_t, i32)> = None;
+            let mut report: Option<(pid_t, i32, Arc<Process>, bool)> = None;
 
             for (idx, child) in children.iter().enumerate() {
                 if !waitpid_matches(pid, caller_pgrp, child) {
@@ -492,15 +508,20 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
                     }
                     State::Stopped(sig)
                         if (options & uapi::wait::WUNTRACED) != 0
-                            && child.stop_unwaited.swap(false, Ordering::AcqRel) =>
+                            && child.stop_unwaited.load(Ordering::Acquire) =>
                     {
-                        report = Some((child.get_pid(), encode_stopped(sig as u32)));
+                        report = Some((
+                            child.get_pid(),
+                            encode_stopped(sig as u32),
+                            child.clone(),
+                            true,
+                        ));
                         break;
                     }
                     _ if (options & uapi::wait::WCONTINUED) != 0
-                        && child.continue_unwaited.swap(false, Ordering::AcqRel) =>
+                        && child.continue_unwaited.load(Ordering::Acquire) =>
                     {
-                        report = Some((child.get_pid(), 0xffff));
+                        report = Some((child.get_pid(), 0xffff, child.clone(), false));
                         break;
                     }
                     _ => {}
@@ -509,12 +530,19 @@ pub fn waitpid(pid: pid_t, stat_loc: VirtAddr, options: i32) -> EResult<pid_t> {
 
             if let Some((idx, child_pid, status)) = reap {
                 write_status(&mut stat_ptr, status)?;
+                write_rusage()?;
                 children.remove(idx);
                 return Ok(child_pid);
             }
 
-            if let Some((child_pid, status)) = report {
+            if let Some((child_pid, status, child, stopped)) = report {
                 write_status(&mut stat_ptr, status)?;
+                write_rusage()?;
+                if stopped {
+                    child.stop_unwaited.store(false, Ordering::Release);
+                } else {
+                    child.continue_unwaited.store(false, Ordering::Release);
+                }
                 return Ok(child_pid);
             }
 

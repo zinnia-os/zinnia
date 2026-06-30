@@ -398,7 +398,7 @@ fn find_futex_queue(pointer: VirtAddr) -> Option<Arc<FutexQueue>> {
     found
 }
 
-fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<Duration>> {
+pub(super) fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<Duration>> {
     if timeout.is_null() {
         return Ok(None);
     }

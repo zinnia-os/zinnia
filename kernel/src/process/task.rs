@@ -262,8 +262,14 @@ impl Task {
 
     /// Returns true if this task has any pending signals that are not blocked.
     pub fn has_pending_signals(&self) -> bool {
-        let state = self.signal.lock();
-        !(state.pending & !state.mask).is_empty()
+        let mask = {
+            let state = self.signal.lock();
+            if state.queue.deliverable(!state.mask) {
+                return true;
+            }
+            state.mask
+        };
+        self.process.shared_pending.lock().deliverable(!mask)
     }
 
     pub(crate) fn next_block_token(&self) -> BlockToken {

@@ -420,7 +420,8 @@ pub(in crate::arch) unsafe fn jump_to_context(context: *mut Context) -> ! {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SignalFrame {
-    saved_mask: u64,
+    /// User address of the [`Ucontext`] written by [`setup_signal_frame`].
+    uc_addr: u64,
     saved_context: Context,
 }
 
@@ -516,7 +517,7 @@ pub(in crate::arch) fn setup_signal_frame(context: &mut Context, delivery: &Sign
     };
 
     let frame = SignalFrame {
-        saved_mask: delivery.old_mask.as_raw(),
+        uc_addr: uc_addr as u64,
         saved_context: *context,
     };
 
@@ -550,9 +551,30 @@ pub(in crate::arch) fn restore_signal_frame(context: &mut Context) {
     let Some(frame) = ptr.read() else {
         Process::exit(State::Signaled(Signal::SigSegv));
     };
+    let Some(uc) = UserPtr::<Ucontext>::new(VirtAddr::new(frame.uc_addr as usize)).read() else {
+        Process::exit(State::Signaled(Signal::SigSegv));
+    };
 
     // Restore the saved context.
     *context = frame.saved_context;
+    let gregs = &uc.uc_mcontext.gregs;
+    context.rax = gregs[0];
+    context.rbx = gregs[1];
+    context.rcx = gregs[2];
+    context.rdx = gregs[3];
+    context.rsi = gregs[4];
+    context.rdi = gregs[5];
+    context.rbp = gregs[6];
+    context.rsp = gregs[7];
+    context.r8 = gregs[8];
+    context.r9 = gregs[9];
+    context.r10 = gregs[10];
+    context.r11 = gregs[11];
+    context.r12 = gregs[12];
+    context.r13 = gregs[13];
+    context.r14 = gregs[14];
+    context.r15 = gregs[15];
+    context.rip = uc.uc_mcontext.pc;
 
     // Make sure the user doesn't do anything funky with the context.
     context.cs = offset_of!(Gdt, user_code64) as u64 | consts::CPL_USER as u64;
@@ -562,6 +584,7 @@ pub(in crate::arch) fn restore_signal_frame(context: &mut Context) {
     // Restore the signal mask.
     let task = Scheduler::get_current();
     let mut sig_state = task.signal.lock();
-    sig_state.mask = SignalSet::from_raw(frame.saved_mask);
+    sig_state.mask = SignalSet::from_raw(uc.uc_sigmask);
     sig_state.mask.sanitize_mask();
+    sig_state.restore_mask = None;
 }

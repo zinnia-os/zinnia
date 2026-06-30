@@ -14,7 +14,7 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::{
         itimer::IntervalTimerState,
-        signal::{Signal, SignalState},
+        signal::{SigQueue, Signal, SignalState},
         task::Task,
     },
     sched::Scheduler,
@@ -77,6 +77,8 @@ pub struct Process {
     pub open_files: SpinMutex<FdTable>,
     /// Per-process signal action table.
     pub signal_actions: SpinMutex<SignalState>,
+    /// Process-directed pending signals.
+    pub shared_pending: SpinMutex<SigQueue>,
     /// Process group ID.
     pub pgrp: SpinMutex<uapi::pid_t>,
     /// Session ID.
@@ -90,9 +92,8 @@ pub struct Process {
     pub child_event: Event,
     /// Event used by stopped threads to wait for SIGCONT.
     pub cont_event: Event,
-    /// Event signalled whenever a signal is queued to a thread of this process.
-    /// Used by signalfd readers to wake up when new signals arrive.
-    pub signalfd_event: Event,
+    /// Event signalled whenever this process may have new pending signals.
+    pub signal_event: Event,
     /// Latched when this process transitions into Stopped; cleared when a
     /// waiter observes it via WUNTRACED.
     pub stop_unwaited: AtomicBool,
@@ -176,13 +177,14 @@ impl Process {
             identity: SpinMutex::new(self.identity.lock().clone()),
             open_files: SpinMutex::new(self.open_files.lock().clone()),
             signal_actions: SpinMutex::new(self.signal_actions.lock().clone()),
+            shared_pending: SpinMutex::new(SigQueue::new()),
             pgrp: SpinMutex::new(*self.pgrp.lock()),
             session: SpinMutex::new(*self.session.lock()),
             controlling_tty: SpinMutex::new(self.controlling_tty.lock().clone()),
-            real_timer: SpinMutex::new(*self.real_timer.lock()),
+            real_timer: SpinMutex::new(IntervalTimerState::default()),
             child_event: Event::new(),
             cont_event: Event::new(),
-            signalfd_event: Event::new(),
+            signal_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
@@ -195,7 +197,16 @@ impl Process {
 
         // Create the main thread.
         let forked_thread = Arc::new(Task::new(to_user_context, raw_ctx as _, 0, &forked, true)?);
-        forked_thread.signal.lock().mask = Scheduler::get_current().signal.lock().mask;
+        {
+            let parent_task = Scheduler::get_current();
+            let (mask, altstack) = {
+                let state = parent_task.signal.lock();
+                (state.mask, state.altstack)
+            };
+            let mut child_state = forked_thread.signal.lock();
+            child_state.mask = mask;
+            child_state.altstack = altstack;
+        }
         forked.threads.lock().push(forked_thread.clone());
         self.children.lock().push(forked.clone());
         PROCESS_TABLE
@@ -251,13 +262,14 @@ impl Process {
             identity: SpinMutex::new(identity),
             open_files: SpinMutex::new(FdTable::new()),
             signal_actions: SpinMutex::new(SignalState::new()),
+            shared_pending: SpinMutex::new(SigQueue::new()),
             pgrp: SpinMutex::new(pgrp),
             session: SpinMutex::new(session),
             controlling_tty: SpinMutex::new(ctty),
             real_timer: SpinMutex::new(IntervalTimerState::default()),
             child_event: Event::new(),
             cont_event: Event::new(),
-            signalfd_event: Event::new(),
+            signal_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
             umask: AtomicU32::new(0o022),
@@ -299,6 +311,16 @@ impl Process {
             let new_address_space = Arc::new(Mutex::new(info.space));
             init_task.address_space = new_address_space.clone();
             let init = Arc::try_new(init_task)?;
+
+            if is_current_process {
+                let (mask, queue) = {
+                    let state = current.signal.lock();
+                    (state.mask, state.queue.clone())
+                };
+                let mut state = init.signal.lock();
+                state.mask = mask;
+                state.queue = queue;
+            }
 
             // Adopt the new executable's basename as the name.
             if let Some(basename) = info
