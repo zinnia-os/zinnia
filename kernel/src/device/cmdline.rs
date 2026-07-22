@@ -21,7 +21,7 @@ impl FileOps for CmdlineFile {
 }
 
 #[initgraph::task(
-    name = "generic.device.memfiles",
+    name = "generic.device.cmdline",
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
 fn CMDLINE_STAGE() {
