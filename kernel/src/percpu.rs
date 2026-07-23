@@ -4,7 +4,6 @@ use super::{memory::VirtAddr, sched::Scheduler};
 use crate::{
     arch,
     memory::{
-        self,
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
         virt::{
             VmCacheType, VmFlags,
@@ -163,8 +162,8 @@ pub(crate) fn allocate_cpu() -> EResult<&'static CpuData> {
     let percpu_size = &raw const LD_PERCPU_END as usize - &raw const LD_PERCPU_START as usize;
     let percpu_new = &raw const LD_PERCPU_START as usize + (percpu_size * id as usize);
 
-    let phys = memory::pmm::KernelAlloc::alloc_bytes(percpu_size, AllocFlags::empty())
-        .map_err(|_| Errno::ENOMEM)?;
+    let phys =
+        KernelAlloc::alloc_bytes(percpu_size, AllocFlags::empty()).map_err(|_| Errno::ENOMEM)?;
 
     PageTable::get_kernel()
         .map_range::<KernelAlloc>(
