@@ -50,11 +50,9 @@ static KNOWN_FORMATS: SpinMutex<BTreeMap<String, &'static dyn ExecFormat>> =
 
 /// Attempts to identify the format of this executable file.
 pub fn identify(file: &File) -> Option<&'static dyn ExecFormat> {
-    KNOWN_FORMATS
-        .lock()
-        .values()
-        .copied()
-        .find(|f| f.identify(file))
+    // We must not hold the lock before calling identify.
+    let formats: Vec<_> = KNOWN_FORMATS.lock().values().copied().collect();
+    formats.into_iter().find(|f| f.identify(file))
 }
 
 /// Installs a new executable format.
