@@ -147,7 +147,7 @@ fn days_since_epoch(year: u32, month: u32, day: u32) -> Option<i64> {
     Some(days)
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.rtc",
     depends = [crate::clock::CLOCK_STAGE],
 )]

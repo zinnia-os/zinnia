@@ -52,7 +52,7 @@ impl ClockSource for TscClock {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.tsc",
     depends = [super::hpet::HPET_STAGE],
     entails = [crate::clock::CLOCK_STAGE],

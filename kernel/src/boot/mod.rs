@@ -17,6 +17,8 @@ use crate::{cmdline::CmdLine, memory::PhysAddr};
 ))]
 pub mod limine;
 
+pub mod initgraph;
+
 /// Information passed from the bootloader. Memory is reclaimed after initialization.
 #[derive(Debug)]
 pub struct BootInfo {

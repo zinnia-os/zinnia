@@ -8,9 +8,6 @@ license = "GPL-2.0-only"
 crate-type = ["dylib"]
 
 [dependencies]
-initgraph = { path = "crates/initgraph" }
-kernel_proc = { path = "crates/kernel_proc" }
-
 uacpi-sys = { path = "../bindings/uacpi" }
 flanterm-sys = { path = "../bindings/flanterm" }
 

@@ -336,7 +336,7 @@ impl FileOps for TmpRegular {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.vfs.tmpfs",
     depends = [crate::memory::MEMORY_STAGE],
     entails = [crate::vfs::VFS_STAGE],

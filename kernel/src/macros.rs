@@ -128,3 +128,87 @@ macro_rules! assert_trait_impl {
         };
     };
 }
+
+#[macro_export]
+macro_rules! task {
+    // Callback: `fn NAME() { … }`
+    attr(
+        name = $display:literal
+        $(, depends = [ $($dep:path),* $(,)? ])?
+        $(, entails = [ $($ent:path),* $(,)? ])?
+        $(,)?
+    ) {
+        $(#[$meta:meta])*
+        $vis:vis fn $name:ident() $body:block
+    } => {
+        $(#[$meta])*
+        #[used]
+        #[doc(hidden)]
+        #[unsafe(link_section = ".initgraph.nodes")]
+        $vis static $name: $crate::boot::initgraph::Node = $crate::boot::initgraph::Node::new(
+            $display,
+            $crate::boot::initgraph::Action::Callback(|| $body),
+        );
+
+        $crate::__initgraph_edges!($name; $([$($dep),*])? ; $([$($ent),*])?);
+    };
+
+    // Gate: `fn NAME() -> bool { … }`
+    attr(
+        name = $display:literal
+        $(, depends = [ $($dep:path),* $(,)? ])?
+        $(, entails = [ $($ent:path),* $(,)? ])?
+        $(,)?
+    ) {
+        $(#[$meta:meta])*
+        $vis:vis fn $name:ident() -> bool $body:block
+    } => {
+        $(#[$meta])*
+        #[used]
+        #[doc(hidden)]
+        #[unsafe(link_section = ".initgraph.nodes")]
+        $vis static $name: $crate::boot::initgraph::Node = $crate::boot::initgraph::Node::new(
+            $display,
+            $crate::boot::initgraph::Action::Gate(|| $body),
+        );
+
+        $crate::__initgraph_edges!($name; $([$($dep),*])? ; $([$($ent),*])?);
+    };
+}
+
+/// Internal helper for [`task!`], do not use directly.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __initgraph_edges {
+    ($node:ident; $([ $($dep:path),* ])? ; $([ $($ent:path),* ])?) => {
+        // `depends`: edge dep -> node, propagating the disabled state forward.
+        $($(
+            const _: () = {
+                #[used]
+                #[doc(hidden)]
+                static __EDGE: $crate::boot::initgraph::Edge =
+                    $crate::boot::initgraph::Edge::new(&$dep, &$node, true);
+
+                #[used]
+                #[doc(hidden)]
+                #[unsafe(link_section = ".initgraph.ctors")]
+                static __EDGE_CTOR: fn() = || __EDGE.register();
+            };
+        )*)?
+
+        // `entails`: edge node -> ent, not propagating the disabled state.
+        $($(
+            const _: () = {
+                #[used]
+                #[doc(hidden)]
+                static __EDGE: $crate::boot::initgraph::Edge =
+                    $crate::boot::initgraph::Edge::new(&$node, &$ent, false);
+
+                #[used]
+                #[doc(hidden)]
+                #[unsafe(link_section = ".initgraph.ctors")]
+                static __EDGE_CTOR: fn() = || __EDGE.register();
+            };
+        )*)?
+    };
+}

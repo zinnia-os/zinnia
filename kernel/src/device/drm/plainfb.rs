@@ -334,7 +334,7 @@ impl MemoryObject for PlainDumbBuffer {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.drm.plainfb",
     depends = [crate::vfs::VFS_DEV_MOUNT_STAGE, crate::process::PROCESS_STAGE]
 )]

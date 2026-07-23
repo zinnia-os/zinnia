@@ -176,7 +176,7 @@ impl LoggerSink for FbCon {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.fbcon",
     depends = [
         crate::memory::MEMORY_STAGE,

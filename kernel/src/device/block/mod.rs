@@ -144,7 +144,7 @@ pub fn write_all_from(
     write_all_from_at(dev, buffer, 0, num_lba, lba)
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.block",
     depends = [devtmpfs::DEVTMPFS_STAGE]
 )]

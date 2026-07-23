@@ -12,7 +12,7 @@ use crate::{
 use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use parser::Parser;
 
-#[initgraph::task(name = "device.usb.hid", depends = [crate::memory::MEMORY_STAGE])]
+#[task(name = "device.usb.hid", depends = [crate::memory::MEMORY_STAGE])]
 pub fn HID_STAGE() {
     DRIVER.register();
 }

@@ -1447,7 +1447,7 @@ pub fn register(device: Arc<dyn Device>) -> EResult<()> {
     )
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.drm",
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]

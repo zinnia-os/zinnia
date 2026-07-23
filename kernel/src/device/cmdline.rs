@@ -20,7 +20,7 @@ impl FileOps for CmdlineFile {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.cmdline",
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]

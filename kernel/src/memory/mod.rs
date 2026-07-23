@@ -210,7 +210,7 @@ pub unsafe extern "C" fn free(ptr: *mut core::ffi::c_void, size: usize) {
 }
 
 /// Bootstraps the memory allocators and kernel virtual page table.
-#[initgraph::task(
+#[task(
     name = "generic.memory",
     depends = [crate::arch::EARLY_INIT_STAGE],
 )]

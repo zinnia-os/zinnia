@@ -543,7 +543,7 @@ pub fn get_isa_irq(irq: u8) -> Option<Arc<IoApicLine>> {
     Some(gsi)
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.find-ioapics",
     depends = [crate::device::acpi::INIT_STAGE],
 )]

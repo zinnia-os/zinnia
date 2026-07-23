@@ -22,7 +22,7 @@ impl FileSystem for DevTmpFs {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.vfs.devtmpfs",
     depends = [super::tmpfs::TMPFS_INIT_STAGE],
     entails = [crate::vfs::VFS_STAGE],

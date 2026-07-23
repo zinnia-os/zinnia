@@ -11,7 +11,7 @@ use uacpi_sys::{
     uacpi_table_find_by_signature, uacpi_table_unref,
 };
 
-#[initgraph::task(
+#[task(
     name = "device.acpi.mcfg",
     depends = [
         super::TABLES_STAGE,

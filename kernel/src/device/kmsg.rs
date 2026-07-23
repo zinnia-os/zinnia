@@ -39,7 +39,7 @@ impl FileOps for Console {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.console",
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]

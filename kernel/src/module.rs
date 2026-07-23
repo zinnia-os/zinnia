@@ -85,7 +85,7 @@ impl Drop for ModuleLoadGuard {
 }
 
 /// Sets up the module system.
-#[initgraph::task(
+#[task(
     name = "generic.module",
     depends = [super::memory::MEMORY_STAGE],
 )]

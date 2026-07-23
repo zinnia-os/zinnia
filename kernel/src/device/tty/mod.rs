@@ -752,7 +752,7 @@ fn get_controlling_tty() -> EResult<Arc<Tty>> {
     proc.controlling_tty.lock().clone().ok_or(Errno::ENXIO)
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.tty.ctty",
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]

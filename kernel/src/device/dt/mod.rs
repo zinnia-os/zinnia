@@ -449,7 +449,7 @@ fn get_str(strings: &[u8], off: u32) -> Option<&[u8]> {
 pub static TREE: Once<Option<DeviceTree>> = Once::new();
 pub static DEVICES: Once<Vec<&Node>> = Once::new();
 
-#[initgraph::task(
+#[task(
     name = "system.dt.parse-blob",
     depends = [crate::memory::MEMORY_STAGE],
 )]

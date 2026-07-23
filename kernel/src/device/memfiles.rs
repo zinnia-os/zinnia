@@ -105,7 +105,7 @@ impl FileOps for RandomFile {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.memfiles",
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]

@@ -1,10 +1,8 @@
-#![no_std]
-
+use super::BootInfo;
+use crate::util::mutex::spin::{SpinMutex, SpinMutexGuard};
+use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use intrusive_collections::{LinkedList, LinkedListLink, intrusive_adapter};
-use spin::{Mutex, MutexGuard};
-
-pub use initgraph_proc::*;
 
 intrusive_adapter!(pub InLinkAdapter = &'static Edge: Edge { in_link => LinkedListLink });
 intrusive_adapter!(pub OutLinkAdapter = &'static Edge: Edge { out_link => LinkedListLink });
@@ -14,6 +12,8 @@ pub struct Edge {
     source: &'static Node,
     target: &'static Node,
 
+    propagates_disable: bool,
+
     in_link: LinkedListLink,
     out_link: LinkedListLink,
 }
@@ -21,10 +21,16 @@ pub struct Edge {
 unsafe impl Sync for Edge {}
 
 impl Edge {
-    pub const fn new(source: &'static Node, target: &'static Node) -> Self {
+    pub const fn new(
+        source: &'static Node,
+        target: &'static Node,
+        propagates_disable: bool,
+    ) -> Self {
         Self {
             source,
             target,
+
+            propagates_disable,
 
             in_link: LinkedListLink::new(),
             out_link: LinkedListLink::new(),
@@ -50,6 +56,7 @@ impl Edge {
 pub enum Action {
     Empty,
     Callback(fn()),
+    Gate(fn() -> bool),
 }
 
 pub struct Node {
@@ -58,9 +65,10 @@ pub struct Node {
     unsatisfied_deps: AtomicUsize,
     wanted: AtomicBool,
     done: AtomicBool,
+    disabled: AtomicBool,
 
-    in_edges: Mutex<LinkedList<InLinkAdapter>>,
-    out_edges: Mutex<LinkedList<OutLinkAdapter>>,
+    in_edges: SpinMutex<LinkedList<InLinkAdapter>>,
+    out_edges: SpinMutex<LinkedList<OutLinkAdapter>>,
     pending_link: LinkedListLink,
 
     action: Action,
@@ -77,9 +85,10 @@ impl Node {
             unsatisfied_deps: AtomicUsize::new(0),
             wanted: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            disabled: AtomicBool::new(false),
 
-            in_edges: Mutex::new(LinkedList::new(InLinkAdapter::NEW)),
-            out_edges: Mutex::new(LinkedList::new(OutLinkAdapter::NEW)),
+            in_edges: SpinMutex::new(LinkedList::new(InLinkAdapter::NEW)),
+            out_edges: SpinMutex::new(LinkedList::new(OutLinkAdapter::NEW)),
             pending_link: LinkedListLink::new(),
         }
     }
@@ -88,11 +97,15 @@ impl Node {
         self.display_name
     }
 
-    pub fn in_edges(&self) -> MutexGuard<'_, LinkedList<InLinkAdapter>> {
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Relaxed)
+    }
+
+    pub fn in_edges(&self) -> SpinMutexGuard<'_, LinkedList<InLinkAdapter>> {
         self.in_edges.lock()
     }
 
-    pub fn out_edges(&self) -> MutexGuard<'_, LinkedList<OutLinkAdapter>> {
+    pub fn out_edges(&self) -> SpinMutexGuard<'_, LinkedList<OutLinkAdapter>> {
         self.out_edges.lock()
     }
 
@@ -102,9 +115,16 @@ impl Node {
         assert!(!self.done.load(Ordering::Relaxed));
         assert_eq!(self.unsatisfied_deps.load(Ordering::Relaxed), 0);
 
-        match self.action {
-            Action::Empty => {}
-            Action::Callback(func) => func(),
+        if !self.disabled.load(Ordering::Relaxed) {
+            match self.action {
+                Action::Empty => {}
+                Action::Callback(func) => func(),
+                Action::Gate(func) => {
+                    if !func() {
+                        self.disabled.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
         }
 
         self.done.store(true, Ordering::Relaxed);
@@ -118,7 +138,7 @@ unsafe extern "C" {
     static LD_INIT_END: u8;
 }
 
-pub fn get_all_nodes() -> &'static [Node] {
+fn get_all_nodes() -> &'static [Node] {
     let nodes_start = &raw const LD_INIT_START as *const Node;
     let nodes_end = &raw const LD_INIT_END as *const Node;
 
@@ -127,7 +147,7 @@ pub fn get_all_nodes() -> &'static [Node] {
 
 /// # Safety
 /// This function must be called exactly once.
-pub unsafe fn initialize_edges() {
+unsafe fn initialize_edges() {
     let ctors_start = &raw const LD_INIT_CTORS_START as *const fn();
     let ctors_end = &raw const LD_INIT_CTORS_END as *const fn();
 
@@ -138,7 +158,7 @@ pub unsafe fn initialize_edges() {
     }
 }
 
-pub fn execute_graph(goal: Option<&'static Node>, mut on_node_reached: impl FnMut(&Node)) {
+fn execute_graph(goal: Option<&'static Node>, mut on_node_reached: impl FnMut(&Node)) {
     let nodes = get_all_nodes();
 
     if let Some(goal) = goal {
@@ -177,12 +197,18 @@ pub fn execute_graph(goal: Option<&'static Node>, mut on_node_reached: impl FnMu
         on_node_reached(node);
         node.on_reached();
 
+        let disabled = node.disabled.load(Ordering::Relaxed);
+
         for edge in node.out_edges.lock().iter() {
             let successor = edge.target;
 
             assert_ne!(successor.unsatisfied_deps.load(Ordering::Relaxed), 0);
 
             successor.unsatisfied_deps.fetch_sub(1, Ordering::Relaxed);
+
+            if disabled && edge.propagates_disable {
+                successor.disabled.store(true, Ordering::Relaxed);
+            }
 
             if successor.wanted.load(Ordering::Relaxed)
                 && !successor.done.load(Ordering::Relaxed)
@@ -199,5 +225,45 @@ pub fn execute_graph(goal: Option<&'static Node>, mut on_node_reached: impl FnMu
             "The dependencies for node {:?} could not be resolved!",
             node.display_name()
         );
+    }
+}
+
+/// Runs the global initialization sequence.
+pub fn run() {
+    unsafe {
+        initialize_edges();
+    }
+
+    execute_graph(None, |node| {
+        if node.is_disabled() {
+            status!("Skipping stage \"{}\"", node.display_name());
+        } else {
+            status!("Running stage \"{}\"", node.display_name());
+        }
+    });
+
+    status!("All stages are complete!");
+
+    if BootInfo::get()
+        .command_line
+        .get_bool("initgraph")
+        .unwrap_or(false)
+    {
+        let mut graph = String::new();
+
+        graph += "digraph initgraph {\n";
+        graph += "\tsubgraph {\n";
+
+        for node in get_all_nodes() {
+            graph += &format!("\t\tn{:p} [label={:?}];\n", node, node.display_name());
+
+            for edge in node.in_edges().iter() {
+                graph += &format!("\t\t\tn{:p} -> n{:p};\n", edge.source(), edge.target());
+            }
+        }
+
+        graph += "\t}\n}";
+
+        log!("{}", graph);
     }
 }

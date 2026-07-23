@@ -468,7 +468,7 @@ pub fn input_bytes(data: &[u8]) {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.vt",
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]

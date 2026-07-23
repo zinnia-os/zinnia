@@ -492,7 +492,7 @@ impl IrqHandler for MouseIrqHandler {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.ps2",
     depends = [
         crate::device::input::INPUT_STAGE,

@@ -16,7 +16,7 @@ use core::{
 };
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 
-#[initgraph::task(name = "generic.clock")]
+#[task(name = "generic.clock")]
 pub fn CLOCK_STAGE() {}
 
 pub trait ClockSource: Send {

@@ -1,9 +1,0 @@
-[package]
-name = "initgraph"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-initgraph_proc = { path = "../initgraph_proc" }
-intrusive-collections = { workspace = true }
-spin = "0.10.0"

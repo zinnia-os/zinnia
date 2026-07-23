@@ -7,7 +7,7 @@ mod uacpi;
 
 static RSDP_ADDRESS: Once<PhysAddr> = Once::new();
 
-#[initgraph::task(
+#[task(
     name = "device.acpi.tables",
     depends = [crate::memory::MEMORY_STAGE],
 )]
@@ -36,7 +36,7 @@ pub fn TABLES_STAGE() {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "system.acpi",
     depends = [
         TABLES_STAGE,
@@ -44,6 +44,7 @@ pub fn TABLES_STAGE() {
         crate::clock::CLOCK_STAGE,
         crate::memory::MEMORY_STAGE,
     ],
+    entails = [crate::device::pci::PCI_STAGE],
 )]
 pub fn INIT_STAGE() {
     let mut uacpi_status = unsafe { uacpi::uacpi_initialize(0) };

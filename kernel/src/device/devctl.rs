@@ -209,7 +209,7 @@ pub fn notify_destroy(relpath: &[u8]) {
     DEVCTL.get().enqueue(format_line("DESTROY", relpath));
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.devctl",
     depends = [DEVTMPFS_STAGE],
 )]

@@ -611,7 +611,7 @@ impl ExecFormat for ElfFormat {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.vfs.exec-elf",
     depends = [crate::memory::MEMORY_STAGE],
     entails = [crate::vfs::VFS_STAGE],

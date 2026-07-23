@@ -336,7 +336,7 @@ fn start_ap(temp_cr3: u32, id: u32) {
 
 static FOUND_APS: SpinMutex<Vec<u32>> = SpinMutex::new(Vec::new());
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.discover-aps",
     depends = [
         crate::memory::MEMORY_STAGE,
@@ -400,7 +400,7 @@ fn DISCOVER_APS_STAGE() {
     };
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.init-aps",
     depends = [DISCOVER_APS_STAGE, crate::clock::CLOCK_STAGE, crate::sched::SCHEDULER_STAGE],
     entails = [crate::arch::INIT_STAGE],

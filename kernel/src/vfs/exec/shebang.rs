@@ -68,7 +68,7 @@ impl ExecFormat for ShebangFormat {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.vfs.exec-shebang",
     depends = [crate::memory::MEMORY_STAGE],
     entails = [crate::vfs::VFS_STAGE],

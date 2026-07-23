@@ -273,7 +273,7 @@ pub fn get_dir_entries(
     Ok(num_read)
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.vfs",
     depends = [crate::memory::MEMORY_STAGE],
 )]
@@ -294,7 +294,7 @@ pub fn VFS_STAGE() {
     unsafe { ROOT.init(root_path.clone()) };
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.vfs.dev-mount",
     depends = [VFS_STAGE, devtmpfs::DEVTMPFS_STAGE, PROCESS_STAGE],
 )]

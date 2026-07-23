@@ -87,7 +87,7 @@ impl IrqHandler for SerialIrqHandler {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.serial",
     entails = [crate::arch::EARLY_INIT_STAGE],
 )]
@@ -115,7 +115,7 @@ fn SERIAL_STAGE() {
     log::add_sink(Box::new(SerialLogger));
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.serial_file",
     depends = [
         crate::vfs::VFS_STAGE,

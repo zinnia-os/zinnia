@@ -435,7 +435,7 @@ impl CharacterDevice for PtmxDevice {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.tty.ptmx",
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]

@@ -58,7 +58,7 @@ pub fn register_nic(nic: Arc<dyn NicDevice>) -> EResult<()> {
     Ok(())
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.net",
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]

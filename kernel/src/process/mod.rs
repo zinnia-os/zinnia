@@ -583,7 +583,7 @@ static KERNEL_PROCESS: Once<Arc<Process>> = Once::new();
 pub static PROCESS_TABLE: SpinMutex<BTreeMap<uapi::pid_t, Weak<Process>>> =
     SpinMutex::new(BTreeMap::new());
 
-#[initgraph::task(
+#[task(
     name = "generic.process",
     depends = [crate::memory::MEMORY_STAGE, crate::vfs::VFS_STAGE],
 )]

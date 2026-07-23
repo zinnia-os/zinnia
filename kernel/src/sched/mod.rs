@@ -1107,7 +1107,7 @@ pub extern "C" fn reaper_fn(_: usize, _: usize) {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.scheduler",
     depends = [crate::memory::MEMORY_STAGE, super::process::PROCESS_STAGE],
 )]

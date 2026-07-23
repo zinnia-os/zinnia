@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Registers the hub class driver with the USB core during boot.
-#[initgraph::task(name = "device.usb.hub", depends = [crate::memory::MEMORY_STAGE])]
+#[task(name = "device.usb.hub", depends = [crate::memory::MEMORY_STAGE])]
 pub fn HUB_STAGE() {
     DRIVER.register();
 }

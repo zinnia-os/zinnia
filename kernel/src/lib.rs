@@ -39,7 +39,6 @@ pub mod boot;
 pub mod clock;
 pub mod cmdline;
 pub mod device;
-pub mod init;
 pub mod irq;
 pub mod log;
 pub mod memory;
@@ -76,7 +75,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub fn init() -> ! {
     {
         let _irq = IrqLock::lock();
-        init::run();
+        boot::initgraph::run();
     }
 
     CpuData::get().online.store(true, Ordering::Release);

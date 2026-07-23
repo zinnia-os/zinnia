@@ -574,7 +574,7 @@ fn letter_key_byte(code: u16) -> Option<u8> {
     })
 }
 
-#[initgraph::task(
+#[task(
     name = "generic.device.input",
     depends = [devtmpfs::DEVTMPFS_STAGE],
 )]

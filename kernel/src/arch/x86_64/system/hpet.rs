@@ -77,7 +77,7 @@ impl Hpet {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.x86_64.hpet",
     depends = [crate::device::acpi::TABLES_STAGE],
 )]

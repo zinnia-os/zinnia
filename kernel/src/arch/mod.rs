@@ -27,10 +27,10 @@ pub mod irq;
 pub mod sched;
 pub mod virt;
 
-#[initgraph::task(name = "arch.early-init")]
+#[task(name = "arch.early-init")]
 pub fn EARLY_INIT_STAGE() {}
 
-#[initgraph::task(
+#[task(
     name = "arch.init",
     depends = [EARLY_INIT_STAGE],
 )]

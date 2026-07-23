@@ -33,7 +33,7 @@ impl LoggerSink for SbiLogger {
     }
 }
 
-#[initgraph::task(
+#[task(
     name = "arch.riscv64.sbi-serial",
     entails = [crate::arch::EARLY_INIT_STAGE],
 )]

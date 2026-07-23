@@ -14,7 +14,7 @@ use crate::{
 use alloc::{format, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-#[initgraph::task(name = "device.usb.storage", depends = [crate::memory::MEMORY_STAGE])]
+#[task(name = "device.usb.storage", depends = [crate::memory::MEMORY_STAGE])]
 pub fn STORAGE_STAGE() {
     DRIVER.register();
 }
