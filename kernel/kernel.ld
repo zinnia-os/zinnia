@@ -2,9 +2,9 @@
 
 PHDRS
 {
-    text    PT_LOAD	    FLAGS(5);
-    rodata  PT_LOAD	    FLAGS(4);
-    data    PT_LOAD	    FLAGS(6);
+    text    PT_LOAD     FLAGS(5);
+    rodata  PT_LOAD     FLAGS(4);
+    data    PT_LOAD     FLAGS(6);
     dynamic PT_DYNAMIC  FLAGS(6);
     percpu  PT_LOAD     FLAGS(6);
 }
