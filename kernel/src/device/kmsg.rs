@@ -40,7 +40,7 @@ impl FileOps for Console {
 }
 
 #[task(
-    name = "generic.device.console",
+    name = "generic.device.kmsg",
     depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
 )]
 fn KMSG_STAGE() {
