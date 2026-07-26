@@ -20,6 +20,7 @@ pub const SIOCDELRT: u32 = 0x890c;
 
 pub const IFF_UP: i16 = 0x1;
 pub const IFF_BROADCAST: i16 = 0x2;
+pub const IFF_LOOPBACK: i16 = 0x8;
 pub const IFF_RUNNING: i16 = 0x40;
 pub const IFF_MULTICAST: i16 = 0x1000;
 

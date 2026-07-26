@@ -191,7 +191,7 @@ impl UdpSocket {
         let interface = if let Some(device) = bound_device {
             device
         } else if bound_addr == Ipv4Addr::ANY || bound_addr == Ipv4Addr::BROADCAST {
-            interface::default_ipv4_interface().ok_or(Errno::ENETUNREACH)?
+            interface::interface_for_dest(destination.addr).ok_or(Errno::ENETUNREACH)?
         } else {
             interface::interface_for_source(bound_addr).ok_or(Errno::ENETUNREACH)?
         };

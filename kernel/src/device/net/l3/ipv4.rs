@@ -36,6 +36,16 @@ pub struct Ipv4Addr {
 impl Ipv4Addr {
     pub const ANY: Self = Self { buf: [0; 4] };
     pub const BROADCAST: Self = Self { buf: [0xff; 4] };
+    pub const LOOPBACK: Self = Self {
+        buf: [127, 0, 0, 1],
+    };
+    pub const LOOPBACK_MASK: Self = Self {
+        buf: [255, 0, 0, 0],
+    };
+
+    pub const fn is_loopback(self) -> bool {
+        self.buf[0] == 127
+    }
 
     pub const fn new(bytes: [u8; 4]) -> Self {
         Self { buf: bytes }

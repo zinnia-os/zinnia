@@ -250,7 +250,7 @@ impl TcpSocket {
 
         let bound_addr = self.inner.lock().local.addr;
         let interface = if bound_addr == Ipv4Addr::ANY {
-            interface::default_ipv4_interface()
+            interface::interface_for_dest(endpoint.addr)
         } else {
             interface::interface_for_source(bound_addr)
         }

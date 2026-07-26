@@ -11,7 +11,7 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::{Process, task::Task},
     sched::Scheduler,
-    uapi::net::{IFF_BROADCAST, IFF_MULTICAST, IFF_RUNNING, IFF_UP, IFNAMSIZ},
+    uapi::net::{IFF_BROADCAST, IFF_LOOPBACK, IFF_MULTICAST, IFF_RUNNING, IFF_UP, IFNAMSIZ},
     util::mutex::spin::SpinMutex,
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -33,6 +33,7 @@ pub struct ManagedInterface {
     gateway: AtomicU32,
     flags: AtomicU16,
     arp_cache: ArpCache,
+    loopback: bool,
 }
 
 impl ManagedInterface {
@@ -56,7 +57,28 @@ impl ManagedInterface {
             gateway: AtomicU32::new(gateway.map_or(0, Ipv4Addr::as_u32)),
             flags: AtomicU16::new(flags as u16),
             arp_cache: ArpCache::new(),
+            loopback: false,
         }
+    }
+
+    pub fn new_loopback(nic: Arc<dyn NicDevice>, name: [u8; IFNAMSIZ], index: u32) -> Self {
+        let flags = IFF_UP | IFF_RUNNING | IFF_LOOPBACK;
+        Self {
+            mac: nic.mac(),
+            nic,
+            name,
+            index,
+            ip: AtomicU32::new(Ipv4Addr::LOOPBACK.as_u32()),
+            netmask: AtomicU32::new(Ipv4Addr::LOOPBACK_MASK.as_u32()),
+            gateway: AtomicU32::new(0),
+            flags: AtomicU16::new(flags as u16),
+            arp_cache: ArpCache::new(),
+            loopback: true,
+        }
+    }
+
+    pub fn is_loopback(&self) -> bool {
+        self.loopback
     }
 
     pub fn mac(&self) -> MacAddr {
@@ -142,6 +164,10 @@ impl ManagedInterface {
     }
 
     pub fn resolve_ipv4(&self, dst: Ipv4Addr) -> EResult<MacAddr> {
+        if self.loopback {
+            return Ok(self.mac);
+        }
+
         let next_hop = self.ipv4_next_hop(dst);
         if next_hop == Ipv4Addr::BROADCAST {
             return Ok(MacAddr::BROADCAST);
@@ -205,7 +231,23 @@ pub fn register_interface(interface: Arc<ManagedInterface>) {
 }
 
 pub fn default_ipv4_interface() -> Option<Arc<ManagedInterface>> {
-    INTERFACES.lock().first().cloned()
+    INTERFACES
+        .lock()
+        .iter()
+        .find(|interface| !interface.is_loopback())
+        .cloned()
+}
+
+pub fn interface_for_dest(dest: Ipv4Addr) -> Option<Arc<ManagedInterface>> {
+    if dest.is_loopback() {
+        return INTERFACES
+            .lock()
+            .iter()
+            .find(|interface| interface.is_loopback())
+            .cloned();
+    }
+
+    default_ipv4_interface()
 }
 
 pub fn interface_for_source(source: Ipv4Addr) -> Option<Arc<ManagedInterface>> {
