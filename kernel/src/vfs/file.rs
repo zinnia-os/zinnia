@@ -10,6 +10,7 @@ use crate::{
     },
     vfs::{
         cache::{LookupFlags, PathNode},
+        fs::anonfs,
         inode::{Mode, NodeOps},
     },
 };
@@ -43,6 +44,7 @@ bitflags::bitflags! {
         const CloseOnExec = O_CLOEXEC;
         const Sync = O_SYNC;
         const SyncRead = O_RSYNC;
+        const Direct = O_DIRECT;
         const LargeFile = O_LARGEFILE;
         /// Don't update the access time.
         const NoAccessTime = O_NOATIME;
@@ -90,7 +92,7 @@ pub struct File {
     /// Operations that can be performed on this file.
     pub ops: Arc<dyn FileOps>,
     /// The opened inode.
-    pub inode: Option<Arc<INode>>,
+    pub inode: Arc<INode>,
     /// File open flags.
     pub flags: SpinMutex<OpenFlags>,
     pub position: FilePosition,
@@ -204,7 +206,7 @@ pub trait FileOps: Sync + Send + Any {
     /// Returns actual bytes written.
     fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
         let _ = (offset, buffer, file);
-        Ok(0)
+        Err(Errno::EINVAL)
     }
 
     /// Performs a generic ioctl operation on the file.
@@ -212,6 +214,10 @@ pub trait FileOps: Sync + Send + Any {
     fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         _ = (arg, request, file);
         Err(Errno::ENOTTY)
+    }
+
+    fn seekable(&self) -> bool {
+        false
     }
 
     /// Polls this file with a mask.
@@ -346,17 +352,34 @@ impl File {
         }
     }
 
-    pub fn open_disconnected(ops: Arc<dyn FileOps>, flags: OpenFlags) -> EResult<Arc<File>> {
+    pub fn open_with_anon_inode(
+        inode: Arc<INode>,
+        ops: Arc<dyn FileOps>,
+        flags: OpenFlags,
+    ) -> EResult<Arc<File>> {
         let file = File {
             path: None,
             abs_path: None,
             ops,
-            inode: None,
+            inode,
             flags: SpinMutex::new(flags),
             position: FilePosition::Stream,
         };
 
         Ok(Arc::try_new(file)?)
+    }
+
+    pub fn open_anonymous(
+        ops: Arc<dyn FileOps>,
+        flags: OpenFlags,
+        identity: &Identity,
+    ) -> EResult<Arc<File>> {
+        let inode = anonfs::create_anon_inode(
+            NodeOps::Anonymous(ops.clone()),
+            Mode::from_bits_truncate(0o600),
+            identity,
+        )?;
+        Self::open_with_anon_inode(inode, ops, flags)
     }
 
     fn do_open_inode(
@@ -374,6 +397,12 @@ impl File {
             }
         }
 
+        if matches!(&inode.node_ops, NodeOps::Directory(_))
+            && flags.intersects(OpenFlags::Write | OpenFlags::Create | OpenFlags::Truncate)
+        {
+            return Err(Errno::EISDIR);
+        }
+
         inode.try_access(identity, flags, false)?;
         let file = match &inode.node_ops {
             NodeOps::Regular(x) => {
@@ -388,7 +417,7 @@ impl File {
                     path: Some(file_path),
                     abs_path: None,
                     ops: x.clone(),
-                    inode: Some(inode.clone()),
+                    inode: inode.clone(),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
                 };
@@ -402,7 +431,7 @@ impl File {
                     path: Some(file_path),
                     abs_path,
                     ops: x.clone().open(flags)?,
-                    inode: Some(inode.clone()),
+                    inode: inode.clone(),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
                 };
@@ -415,13 +444,24 @@ impl File {
                     path: Some(file_path),
                     abs_path,
                     ops: x.clone().open(flags)?,
-                    inode: Some(inode.clone()),
+                    inode: inode.clone(),
                     flags: SpinMutex::new(flags),
                     position: Self::position_for_inode(inode),
                 };
                 Arc::try_new(result)?
             }
-            NodeOps::FIFO(_) => todo!(),
+            NodeOps::FIFO(pipe) => {
+                let ops = pipe.open_fifo(flags)?;
+                let result = File {
+                    path: Some(file_path),
+                    abs_path: None,
+                    ops,
+                    inode: inode.clone(),
+                    flags: SpinMutex::new(flags),
+                    position: FilePosition::Stream,
+                };
+                Arc::try_new(result)?
+            }
             NodeOps::SymbolicLink(_) => return Err(Errno::ELOOP),
             // Doesn't make sense to call open() on anything else.
             _ => return Err(Errno::ENOTSUP),
@@ -481,16 +521,25 @@ impl File {
             return Ok(0);
         }
 
+        let append = self.flags.lock().contains(OpenFlags::Append);
+        let _append_guard = append.then(|| self.inode.append_lock.lock());
+
         let written = match &self.position {
             FilePosition::Stream => self.ops.write(self, buf, 0),
             FilePosition::AtomicPosition(offset) => {
                 let mut offset = offset.lock();
+                if append {
+                    *offset = self.inode.len() as u64;
+                }
                 let written = self.ops.write(self, buf, *offset)?;
                 Self::advance_offset(&mut offset, written)?;
                 Ok(written)
             }
             FilePosition::Position(offset) => {
                 let mut pos = *offset.lock();
+                if append {
+                    pos = self.inode.len() as u64;
+                }
                 let written = self.ops.write(self, buf, pos)?;
                 Self::advance_offset(&mut pos, written)?;
                 *offset.lock() = pos;
@@ -498,8 +547,17 @@ impl File {
             }
         }?;
 
+        Self::check_progress(written)?;
         self.sync_after_write(written)?;
         Ok(written)
+    }
+
+    fn check_progress(written: isize) -> EResult<()> {
+        if written == 0 {
+            warn!("write reported zero progress for a non-empty buffer");
+            return Err(Errno::EIO);
+        }
+        Ok(())
     }
 
     /// Writes a buffer to a file at a specified offset.
@@ -513,6 +571,7 @@ impl File {
         }
 
         let written = self.ops.write(self, buf, offset)?;
+        Self::check_progress(written)?;
         self.sync_after_write(written)?;
         Ok(written)
     }
@@ -539,9 +598,27 @@ impl File {
         Ok(())
     }
 
+    pub fn tell(&self) -> u64 {
+        match &self.position {
+            FilePosition::Stream => 0,
+            FilePosition::Position(position) | FilePosition::AtomicPosition(position) => {
+                *position.lock()
+            }
+        }
+    }
+
     pub fn seek(&self, offset: SeekAnchor) -> EResult<u64> {
-        match self.inode.as_ref().ok_or(Errno::ESPIPE)?.node_ops {
-            NodeOps::CharacterDevice(_) | NodeOps::Socket(_) | NodeOps::FIFO(_) => {
+        match self.inode.node_ops {
+            NodeOps::CharacterDevice(_) if self.ops.seekable() => {
+                return match offset {
+                    SeekAnchor::Start(x) => Ok(x),
+                    SeekAnchor::Current(x) | SeekAnchor::End(x) => Ok(x.max(0) as u64),
+                };
+            }
+            NodeOps::CharacterDevice(_)
+            | NodeOps::Socket(_)
+            | NodeOps::FIFO(_)
+            | NodeOps::Anonymous(_) => {
                 return Err(Errno::ESPIPE);
             }
             _ => (),
@@ -565,7 +642,7 @@ impl File {
                 Ok(new)
             }
             SeekAnchor::End(x) => {
-                let size = self.inode.as_ref().ok_or(Errno::EINVAL)?.size.lock();
+                let size = self.inode.size.lock();
 
                 let new = if x.is_negative() {
                     size.checked_add_signed(x as _).ok_or(Errno::EINVAL)?

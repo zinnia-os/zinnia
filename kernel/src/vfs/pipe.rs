@@ -18,6 +18,7 @@ pub struct PipeBuffer {
     inner: SpinMutex<PipeInner>,
     rd_queue: Event,
     wr_queue: Event,
+    open_queue: Event,
 }
 
 pub struct PipeFile {
@@ -31,6 +32,8 @@ struct PipeInner {
     buffer: RingBuffer,
     readers: usize,
     writers: usize,
+    r_opens: u64,
+    w_opens: u64,
 }
 
 impl PipeBuffer {
@@ -40,9 +43,12 @@ impl PipeBuffer {
                 buffer: RingBuffer::new(0x10000),
                 readers: 0,
                 writers: 0,
+                r_opens: 0,
+                w_opens: 0,
             }),
             rd_queue: Event::new(),
             wr_queue: Event::new(),
+            open_queue: Event::new(),
         }
     }
 
@@ -52,6 +58,10 @@ impl PipeBuffer {
     }
 
     pub fn open_endpoint(self: &Arc<Self>, flags: OpenFlags) -> EResult<Arc<PipeFile>> {
+        Ok(self.register_endpoint(flags)?.0)
+    }
+
+    fn register_endpoint(self: &Arc<Self>, flags: OpenFlags) -> EResult<(Arc<PipeFile>, u64)> {
         let readable = flags.contains(OpenFlags::Read);
         let writable = flags.contains(OpenFlags::Write);
         let file = Arc::try_new(PipeFile {
@@ -60,18 +70,69 @@ impl PipeBuffer {
             writable,
         })?;
 
-        {
+        let peer_opens = {
             let mut inner = self.inner.lock();
 
             if readable {
                 inner.readers += 1;
+                inner.r_opens += 1;
             }
             if writable {
                 inner.writers += 1;
+                inner.w_opens += 1;
             }
+
+            if readable {
+                inner.w_opens
+            } else {
+                inner.r_opens
+            }
+        };
+
+        self.open_queue.wake_all();
+
+        Ok((file, peer_opens))
+    }
+
+    pub fn open_fifo(self: &Arc<Self>, flags: OpenFlags) -> EResult<Arc<PipeFile>> {
+        let readable = flags.contains(OpenFlags::Read);
+        let writable = flags.contains(OpenFlags::Write);
+        let nonblock = flags.contains(OpenFlags::NonBlocking);
+
+        if writable && !readable && nonblock && self.inner.lock().readers == 0 {
+            return Err(Errno::ENXIO);
         }
 
-        Ok(file)
+        let (file, peer_opens) = self.register_endpoint(flags)?;
+
+        if nonblock || (readable && writable) {
+            return Ok(file);
+        }
+
+        loop {
+            let guard = self.open_queue.guard();
+
+            {
+                let inner = self.inner.lock();
+                let (peers, opens) = if readable {
+                    (inner.writers, inner.w_opens)
+                } else {
+                    (inner.readers, inner.r_opens)
+                };
+
+                if peers > 0 || opens != peer_opens {
+                    return Ok(file);
+                }
+            }
+
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::ERESTART);
+            }
+            guard.wait();
+            if Scheduler::get_current().has_pending_signals() {
+                return Err(Errno::ERESTART);
+            }
+        }
     }
 }
 

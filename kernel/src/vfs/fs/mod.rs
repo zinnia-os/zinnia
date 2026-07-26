@@ -1,3 +1,4 @@
+pub mod anonfs;
 pub mod devtmpfs;
 pub mod initramfs;
 mod tmpfs;

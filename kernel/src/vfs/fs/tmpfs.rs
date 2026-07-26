@@ -14,6 +14,7 @@ use crate::{
         file::{File, FileOps, FilePosition, MmapFlags, OpenFlags},
         fs::{FileSystem, Mount},
         inode::{DirectoryOps, INode, MknodTarget, Mode, NodeOps, RegularOps, SymlinkOps},
+        pipe::PipeBuffer,
     },
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -68,6 +69,7 @@ impl TmpSuper {
             size: SpinMutex::default(),
             uid: SpinMutex::default(),
             gid: SpinMutex::default(),
+            append_lock: Mutex::new(()),
         })?)
     }
 }
@@ -116,7 +118,7 @@ impl DirectoryOps for TmpDir {
             path: Some(path),
             abs_path: None,
             ops: node.file_ops(),
-            inode: Some(node.clone()),
+            inode: node.clone(),
             flags: SpinMutex::new(flags),
             position: FilePosition::AtomicPosition(Mutex::new(0)),
         };
@@ -227,6 +229,7 @@ impl DirectoryOps for TmpDir {
                 MknodTarget::BlockDevice(x) => NodeOps::BlockDevice(x),
                 MknodTarget::CharacterDevice(x) => NodeOps::CharacterDevice(x),
                 MknodTarget::Socket(x) => NodeOps::Socket(x),
+                MknodTarget::Fifo => NodeOps::FIFO(Arc::try_new(PipeBuffer::new())?),
             },
             mode,
         )
@@ -276,7 +279,7 @@ impl RegularOps for TmpRegular {
 
 impl FileOps for TmpRegular {
     fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+        let inode = &file.inode;
         let start = offset;
 
         if start as usize >= inode.len() {
@@ -292,13 +295,18 @@ impl FileOps for TmpRegular {
     }
 
     fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+        let inode = &file.inode;
         let mut size_lock = inode.size.lock();
         let start = offset;
 
         let mut v = vec![0u8; buffer.len()];
         buffer.copy_to_slice(&mut v)?;
         let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, start as usize)?;
+
+        if actual == 0 && !v.is_empty() {
+            return Err(Errno::ENOMEM);
+        }
+
         *size_lock = (*size_lock).max(start as usize + actual);
 
         Ok(actual as _)

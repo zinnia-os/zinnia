@@ -365,7 +365,7 @@ impl RegularOps for Ext2Regular {
 
 impl FileOps for Ext2Regular {
     fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+        let inode = &file.inode;
         let file_size = inode.len();
 
         if offset as usize >= file_size {
@@ -374,14 +374,18 @@ impl FileOps for Ext2Regular {
 
         let copy_size = buffer.len().min(file_size - offset as usize);
         let mut v = vec![0u8; copy_size];
-        let actual = (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, offset as usize)?;
+        let actual = if file.flags.lock().contains(OpenFlags::Direct) {
+            self.cache.read_direct(&mut v, offset as usize)?
+        } else {
+            (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, offset as usize)?
+        };
         buffer.copy_from_slice(&v[..actual])?;
 
         Ok(actual as _)
     }
 
     fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
-        let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+        let inode = &file.inode;
         let write_end = offset as usize + buffer.len();
 
         // Ensure blocks are allocated for the write range.
@@ -397,9 +401,23 @@ impl FileOps for Ext2Regular {
             }
         }
 
+        let new_size = write_end.max(inode.len());
+        if new_size as u64 > raw.size() {
+            raw.i_size = new_size as u32;
+            if raw.i_mode & S_IFMT == S_IFREG {
+                raw.i_dir_acl = (new_size as u64 >> 32) as u32;
+            }
+            self.sb.write_inode(self.ino, &raw)?;
+            *inode.size.lock() = new_size;
+        }
+
         let mut v = vec![0u8; buffer.len()];
         buffer.copy_to_slice(&mut v)?;
         let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, offset as usize)?;
+
+        if actual == 0 && !v.is_empty() {
+            return Err(Errno::EIO);
+        }
 
         // Mark pages dirty.
         let page_size = arch::virt::get_page_size();
@@ -407,6 +425,10 @@ impl FileOps for Ext2Regular {
         let end_page = (offset as usize + actual).div_ceil(page_size);
         for p in start_page..end_page {
             self.cache.mark_dirty(p);
+        }
+
+        if file.flags.lock().contains(OpenFlags::Direct) {
+            self.cache.sync_range(start_page, end_page)?;
         }
 
         // Update file size if needed.
@@ -743,7 +765,7 @@ impl DirectoryOps for Ext2Dir {
         let file = File {
             path: Some(path),
             ops: node.file_ops(),
-            inode: Some(node.clone()),
+            inode: node.clone(),
             flags: SpinMutex::new(flags),
             position: FilePosition::AtomicPosition(Mutex::new(0)),
             abs_path: None,

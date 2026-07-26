@@ -194,13 +194,20 @@ pub fn mmap(
     return Ok(addr);
 }
 
-pub fn pipe(flags: OpenFlags) -> EResult<(Arc<File>, Arc<File>)> {
+pub fn pipe(flags: OpenFlags, identity: &Identity) -> EResult<(Arc<File>, Arc<File>)> {
     let pipe = Arc::try_new(pipe::PipeBuffer::new())?;
     let status_flags = flags & OpenFlags::NonBlocking;
     let endpoint1_ops = pipe.open_endpoint(OpenFlags::Read | status_flags)?;
     let endpoint2_ops = pipe.open_endpoint(OpenFlags::Write | status_flags)?;
-    let endpoint1 = File::open_disconnected(endpoint1_ops, OpenFlags::Read | status_flags)?;
-    let endpoint2 = File::open_disconnected(endpoint2_ops, OpenFlags::Write | status_flags)?;
+    let inode = fs::anonfs::create_anon_inode(
+        NodeOps::FIFO(pipe.clone()),
+        Mode::from_bits_truncate(0o600),
+        identity,
+    )?;
+    let endpoint1 =
+        File::open_with_anon_inode(inode.clone(), endpoint1_ops, OpenFlags::Read | status_flags)?;
+    let endpoint2 =
+        File::open_with_anon_inode(inode, endpoint2_ops, OpenFlags::Write | status_flags)?;
 
     Ok((endpoint1, endpoint2))
 }
@@ -214,8 +221,8 @@ pub fn get_dir_entries(
         return Ok(0);
     }
 
-    let inode = file.inode.clone().ok_or(Errno::EBADF)?;
-    let path = file.path.clone().unwrap();
+    let inode = file.inode.clone();
+    let path = file.path.clone().ok_or(Errno::ENOTDIR)?;
 
     let mut offset = match &file.position {
         FilePosition::Stream => return Err(Errno::EBADF),

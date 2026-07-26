@@ -19,6 +19,10 @@ impl FileOps for NullFile {
     fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
         Ok(buffer.len() as _)
     }
+
+    fn seekable(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -33,6 +37,10 @@ impl FileOps for ZeroFile {
     fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
         Ok(buffer.len() as _)
     }
+
+    fn seekable(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -46,6 +54,10 @@ impl FileOps for FullFile {
 
     fn write(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
         Err(Errno::ENOSPC)
+    }
+
+    fn seekable(&self) -> bool {
+        true
     }
 }
 
@@ -102,6 +114,10 @@ impl FileOps for RandomFile {
     fn write(&self, _: &File, buffer: &mut IovecIter, _: u64) -> EResult<isize> {
         // Accept and discard any entropy written back to the device.
         Ok(buffer.len() as isize)
+    }
+
+    fn seekable(&self) -> bool {
+        true
     }
 }
 

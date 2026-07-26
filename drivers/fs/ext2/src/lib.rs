@@ -772,6 +772,7 @@ impl Ext2Super {
                 tv_nsec: 0,
             }),
             mode: SpinMutex::new(Mode::from_bits_truncate(mode_bits as u32)),
+            append_lock: Mutex::new(()),
         }))
     }
 

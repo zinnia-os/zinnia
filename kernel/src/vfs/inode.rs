@@ -4,10 +4,11 @@ use crate::{
     posix::errno::{EResult, Errno},
     process::Identity,
     uapi::{self, dirent::dirent, off_t, stat::*, time::timespec},
-    util::mutex::spin::SpinMutex,
+    util::mutex::{Mutex, spin::SpinMutex},
     vfs::{
         Entry, PathNode,
         file::{File, FileOps, OpenFlags},
+        pipe::PipeBuffer,
     },
 };
 use alloc::sync::Arc;
@@ -30,6 +31,8 @@ pub struct INode {
     pub mtime: SpinMutex<timespec>,
     pub ctime: SpinMutex<timespec>,
     pub mode: SpinMutex<Mode>,
+
+    pub append_lock: Mutex<()>,
 }
 
 impl INode {
@@ -45,6 +48,7 @@ impl INode {
             mtime: SpinMutex::new(timespec::default()),
             ctime: SpinMutex::new(timespec::default()),
             mode: SpinMutex::new(Mode::empty()),
+            append_lock: Mutex::new(()),
         }
     }
 
@@ -109,11 +113,14 @@ impl INode {
             NodeOps::Regular(x) => x.clone(),
             NodeOps::Directory(x) => x.clone(),
             NodeOps::SymbolicLink(x) => x.clone(),
-            NodeOps::FIFO(x) => x.clone(),
+            NodeOps::FIFO(_) => {
+                unreachable!("FIFOs must be opened through PipeBuffer::open_fifo")
+            }
             NodeOps::BlockDevice(_) | NodeOps::CharacterDevice(_) => {
                 unreachable!("Devices must be opened through device::Device")
             }
             NodeOps::Socket(s) => s.clone(),
+            NodeOps::Anonymous(x) => x.clone(),
         }
     }
 }
@@ -128,16 +135,19 @@ pub enum NodeOps {
     Regular(Arc<dyn RegularOps>),
     Directory(Arc<dyn DirectoryOps>),
     SymbolicLink(Arc<dyn SymlinkOps>),
-    FIFO(Arc<dyn FileOps>),
+    FIFO(Arc<PipeBuffer>),
     BlockDevice(Arc<dyn BlockDevice>),
     CharacterDevice(Arc<dyn Device>),
     Socket(Arc<Socket>),
+    /// A file which no file system can produce.
+    Anonymous(Arc<dyn FileOps>),
 }
 
 pub enum MknodTarget {
     BlockDevice(Arc<dyn BlockDevice>),
     CharacterDevice(Arc<dyn Device>),
     Socket(Arc<Socket>),
+    Fifo,
 }
 
 /// Operations for directory [`INode`]s.
@@ -278,6 +288,8 @@ pub trait DirectoryOps: FileOps + Any {
                     NodeOps::BlockDevice(_) => uapi::dirent::DT_BLK,
                     NodeOps::CharacterDevice(_) => uapi::dirent::DT_CHR,
                     NodeOps::Socket(_) => uapi::dirent::DT_SOCK,
+                    // Never reachable: anonymous nodes have no directory entry.
+                    NodeOps::Anonymous(_) => uapi::dirent::DT_UNKNOWN,
                 },
                 d_name: [0u8; _],
             };

@@ -1,3 +1,5 @@
+use alloc::string::String;
+
 use crate::{
     memory::{UserCStr, VirtAddr},
     posix::errno::{EResult, Errno},
@@ -24,10 +26,16 @@ pub fn module_insert(path: VirtAddr, cmdline: VirtAddr) -> EResult<()> {
     let cwd = proc.working_dir.lock().clone();
     let file = File::open(root, cwd, &path, OpenFlags::Read, Mode::empty(), &ident)?;
 
-    let file_len: usize = file.inode.clone().ok_or(Errno::EBADF)?.len();
+    let file_len: usize = file.inode.len();
     let mut data = vec![0u8; file_len];
 
     file.pread_kernel(&mut data, 0)?;
 
-    crate::module::load(&data, &cmdline)
+    crate::module::load(&data, &cmdline).inspect_err(|err| {
+        warn!(
+            "Failed to load module \"{}\": {:?}",
+            String::from_utf8_lossy(&path),
+            err
+        );
+    })
 }

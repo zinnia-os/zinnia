@@ -155,10 +155,7 @@ pub fn load(root: PathNode, target: PathNode, data: &[u8]) -> EResult<()> {
                     tv_sec: (mtime / 1000000) as _,
                     tv_nsec: mtime as _,
                 };
-                file.inode
-                    .as_ref()
-                    .unwrap()
-                    .update_time(Some(time), Some(time), Some(time));
+                file.inode.update_time(Some(time), Some(time), Some(time));
             }
             SYM_LINK => {
                 let (dir, file_name) =

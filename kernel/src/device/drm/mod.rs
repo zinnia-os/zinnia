@@ -503,10 +503,11 @@ impl FileOps for DrmFile {
                     .ok_or(Errno::EINVAL)?
                     .clone();
 
-                let ops: Arc<dyn FileOps> = Arc::new(PrimeBuffer { buffer });
-                let file = File::open_disconnected(ops, OpenFlags::ReadWrite)?;
-
                 let proc = Scheduler::get_current().get_process();
+                let identity = proc.identity.lock().clone();
+                let ops: Arc<dyn FileOps> = Arc::new(PrimeBuffer { buffer });
+                let file = File::open_anonymous(ops, OpenFlags::ReadWrite, &identity)?;
+
                 let fd = proc
                     .open_files
                     .lock()

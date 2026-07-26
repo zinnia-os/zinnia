@@ -1,6 +1,5 @@
 use crate::{
     clock,
-    device::net::Socket,
     memory::{IovecIter, UserCStr, VirtAddr, user::UserPtr},
     percpu::CpuData,
     posix::errno::{EResult, Errno},
@@ -28,8 +27,7 @@ use crate::{
         eventfd::EventfdFile,
         file::{FileDescription, FileOps, OpenFlags, PollFlags, SeekAnchor},
         fs,
-        inode::{INode, Mode, NodeOps},
-        pipe::PipeFile,
+        inode::{INode, MknodTarget, Mode, NodeOps},
         signalfd::SignalfdFile,
         timerfd::TimerfdFile,
     },
@@ -272,6 +270,7 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
                     NodeOps::BlockDevice(_) => S_IFBLK,
                     NodeOps::CharacterDevice(_) => S_IFCHR,
                     NodeOps::Socket(_) => S_IFSOCK,
+                    NodeOps::Anonymous(_) => S_IFREG,
                 },
             st_nlink: Arc::strong_count(inode) as _,
             st_uid: *inode.uid.lock(),
@@ -299,28 +298,7 @@ pub fn fstat(fd: i32, statbuf: VirtAddr) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
 
     let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
-    if let Some(inode) = file.inode.as_ref() {
-        write_stat(inode, &mut statbuf)?;
-    } else {
-        // Files without INodes need a fake stat.
-        let ops_any = file.ops.as_ref() as &dyn core::any::Any;
-        let mode = if ops_any.is::<PipeFile>() {
-            S_IFIFO
-        } else if ops_any.is::<Socket>() {
-            S_IFSOCK
-        } else {
-            S_IFIFO
-        };
-        statbuf
-            .write(stat {
-                st_mode: mode,
-                st_nlink: 1,
-                ..Default::default()
-            })
-            .ok_or(Errno::EFAULT)?;
-    }
-
-    Ok(())
+    write_stat(&file.inode, &mut statbuf)
 }
 
 #[wrap_syscall]
@@ -352,8 +330,6 @@ pub fn fstatat(at: i32, path: UserCStr, statbuf: VirtAddr, flags: usize) -> ERes
                 .ok_or(Errno::EBADF)?
                 .file
                 .inode
-                .as_ref()
-                .ok_or(Errno::EINVAL)?
                 .clone()
         };
 
@@ -438,6 +414,47 @@ pub fn dup3(fd1: i32, fd2: i32, flags: usize) -> EResult<i32> {
     };
     drop(displaced);
     result
+}
+
+#[wrap_syscall]
+pub fn mknodat(fd: i32, path: VirtAddr, mode: mode_t, _dev: u64) -> EResult<i32> {
+    let path = UserCStr::new(path);
+    let v = path.as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
+
+    let target = match mode & S_IFMT {
+        S_IFIFO => MknodTarget::Fifo,
+        S_IFCHR | S_IFBLK => return Err(Errno::EPERM),
+        _ => return Err(Errno::ENOTSUP),
+    };
+
+    let proc = Scheduler::get_current().get_process();
+    let parent = if fd == AT_FDCWD as _ {
+        proc.working_dir.lock().clone()
+    } else {
+        let inner = proc.open_files.lock();
+        inner
+            .get_fd(fd)
+            .ok_or(Errno::EBADF)?
+            .file
+            .path
+            .as_ref()
+            .ok_or(Errno::ENOTDIR)?
+            .clone()
+    };
+    let umask = proc.umask.load(core::sync::atomic::Ordering::Relaxed);
+    let root = proc.root_dir.lock().clone();
+    let identity = proc.identity.lock().clone();
+
+    vfs::mknod(
+        root,
+        parent,
+        &v,
+        Mode::from_bits_truncate(mode & !umask & !S_IFMT),
+        Some(target),
+        &identity,
+    )?;
+
+    Ok(0)
 }
 
 #[wrap_syscall]
@@ -766,8 +783,9 @@ pub fn pipe(filedes: VirtAddr, flags: usize) -> EResult<()> {
     let mut filedes = UserPtr::<[i32; 2]>::new(filedes);
     let fds = {
         let proc = Scheduler::get_current().get_process();
+        let identity = proc.identity.lock().clone();
         let mut files = proc.open_files.lock();
-        let (pipe1, pipe2) = vfs::pipe(flags)?;
+        let (pipe1, pipe2) = vfs::pipe(flags, &identity)?;
         let close_on_exec = flags.contains(OpenFlags::CloseOnExec);
         [
             files
@@ -825,7 +843,6 @@ pub fn faccessat(fd: i32, path: UserCStr, amode: usize, flag: usize) -> EResult<
                 .file
                 .inode
                 .clone()
-                .ok_or(Errno::EBADF)?
         }
     } else {
         let parent = if fd == AT_FDCWD as _ {
@@ -914,8 +931,7 @@ pub fn fstatvfs(fd: i32, buf: VirtAddr) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
 
     let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
-    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
-    let sb = inode.sb.as_ref().ok_or(Errno::ENOSYS)?;
+    let sb = file.inode.sb.as_ref().ok_or(Errno::ENOSYS)?;
 
     let result = sb.clone().statvfs()?;
     buf.write(result).ok_or(Errno::EFAULT)
@@ -1008,8 +1024,7 @@ pub fn fchmod(fd: i32, mode: mode_t) -> EResult<()> {
     let proc = Scheduler::get_current().get_process();
 
     let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
-    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
-    inode.chmod(Mode::from_bits_truncate(mode));
+    file.inode.chmod(Mode::from_bits_truncate(mode));
     Ok(())
 }
 
@@ -1026,7 +1041,7 @@ pub fn ftruncate(fd: i32, length: i64) -> EResult<()> {
         return Err(Errno::EINVAL);
     }
 
-    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+    let inode = &file.inode;
     match &inode.node_ops {
         NodeOps::Regular(ops) => ops.truncate(inode, length as u64),
         _ => Err(Errno::EINVAL),
@@ -1046,7 +1061,7 @@ pub fn fallocate(fd: i32, offset: i64, length: i64) -> EResult<()> {
         return Err(Errno::EBADF);
     }
 
-    let inode = file.inode.as_ref().ok_or(Errno::EINVAL)?;
+    let inode = &file.inode;
     let NodeOps::Regular(ops) = &inode.node_ops else {
         return Err(Errno::ENODEV);
     };
@@ -1081,14 +1096,7 @@ pub fn fchmodat(fd: i32, path: VirtAddr, mode: mode_t, flags: usize) -> EResult<
                 .get_inode()
                 .ok_or(Errno::ENOENT)?
         } else {
-            files
-                .get_fd(fd)
-                .ok_or(Errno::EBADF)?
-                .file
-                .inode
-                .as_ref()
-                .ok_or(Errno::EINVAL)?
-                .clone()
+            files.get_fd(fd).ok_or(Errno::EBADF)?.file.inode.clone()
         };
 
         inode.chmod(Mode::from_bits_truncate(mode));
@@ -1152,14 +1160,7 @@ pub fn fchownat(fd: i32, path: VirtAddr, uid: u32, gid: u32, flags: usize) -> ER
                 .get_inode()
                 .ok_or(Errno::ENOENT)?
         } else {
-            files
-                .get_fd(fd)
-                .ok_or(Errno::EBADF)?
-                .file
-                .inode
-                .as_ref()
-                .ok_or(Errno::EINVAL)?
-                .clone()
+            files.get_fd(fd).ok_or(Errno::EBADF)?.file.inode.clone()
         };
 
         inode.chown(uid, gid);
@@ -1250,14 +1251,7 @@ pub fn utimensat(fd: i32, path: VirtAddr, times: VirtAddr, flags: usize) -> ERes
                 .get_inode()
                 .ok_or(Errno::ENOENT)?
         } else {
-            files
-                .get_fd(fd)
-                .ok_or(Errno::EBADF)?
-                .file
-                .inode
-                .as_ref()
-                .ok_or(Errno::EINVAL)?
-                .clone()
+            files.get_fd(fd).ok_or(Errno::EBADF)?.file.inode.clone()
         }
     } else {
         let path_buf = path_buf.unwrap();
@@ -1646,10 +1640,11 @@ pub fn epoll_create(flags: i32) -> EResult<i32> {
         return Err(Errno::EINVAL);
     }
 
-    let ops: Arc<dyn FileOps> = Arc::new(EpollFile::new());
-    let file = File::open_disconnected(ops, OpenFlags::ReadWrite)?;
-
     let proc = Scheduler::get_current().get_process();
+    let identity = proc.identity.lock().clone();
+    let ops: Arc<dyn FileOps> = Arc::new(EpollFile::new());
+    let file = File::open_anonymous(ops, OpenFlags::ReadWrite, &identity)?;
+
     let mut open_files = proc.open_files.lock();
     let fd = open_files
         .open_file(
@@ -1758,9 +1753,10 @@ pub fn timerfd_create(clockid: i32, flags: i32) -> EResult<i32> {
     if flags & TFD_NONBLOCK as i32 != 0 {
         open_flags |= OpenFlags::NonBlocking;
     }
-    let file = File::open_disconnected(ops, open_flags)?;
-
     let proc = Scheduler::get_current().get_process();
+    let identity = proc.identity.lock().clone();
+    let file = File::open_anonymous(ops, open_flags, &identity)?;
+
     let mut open_files = proc.open_files.lock();
     open_files
         .open_file(
@@ -1851,7 +1847,8 @@ pub fn signalfd_create(mask: UserPtr<sigset_t>, flags: i32) -> EResult<i32> {
     if flags & SFD_NONBLOCK as i32 != 0 {
         open_flags |= OpenFlags::NonBlocking;
     }
-    let file = File::open_disconnected(ops, open_flags)?;
+    let identity = proc.identity.lock().clone();
+    let file = File::open_anonymous(ops, open_flags, &identity)?;
 
     let mut open_files = proc.open_files.lock();
     open_files
@@ -1881,7 +1878,8 @@ pub fn eventfd_create(initval: u32, flags: i32) -> EResult<i32> {
     if flags & O_NONBLOCK as i32 != 0 {
         open_flags |= OpenFlags::NonBlocking;
     }
-    let file = File::open_disconnected(ops, open_flags)?;
+    let identity = proc.identity.lock().clone();
+    let file = File::open_anonymous(ops, open_flags, &identity)?;
 
     let mut open_files = proc.open_files.lock();
     open_files

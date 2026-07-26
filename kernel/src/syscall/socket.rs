@@ -8,11 +8,14 @@ use crate::{
     },
     memory::{IovecIter, UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
+    process::Identity,
     sched::Scheduler,
     uapi::socket::*,
     vfs::{
         File,
-        file::{FileDescription, FileOps, OpenFlags},
+        file::{FileDescription, OpenFlags},
+        fs::anonfs,
+        inode::{Mode, NodeOps},
     },
     wrap_syscall,
 };
@@ -27,6 +30,19 @@ fn get_socket(fd: i32) -> EResult<Arc<Socket>> {
 
     // Downcast Arc<dyn FileOps> to Arc<Socket>.
     Arc::downcast(desc.file.ops.clone()).map_err(|_| Errno::ENOTSOCK)
+}
+
+fn open_socket_file(
+    socket: Arc<Socket>,
+    flags: OpenFlags,
+    identity: &Identity,
+) -> EResult<Arc<File>> {
+    let inode = anonfs::create_anon_inode(
+        NodeOps::Socket(socket.clone()),
+        Mode::from_bits_truncate(0o777),
+        identity,
+    )?;
+    File::open_with_anon_inode(inode, socket, flags)
 }
 
 /// Check if the file for an fd has NonBlocking set.
@@ -97,9 +113,10 @@ pub fn socket(family: i32, socket_type: i32, protocol: i32) -> EResult<usize> {
         open_flags |= OpenFlags::NonBlocking;
     }
 
-    let file = File::open_disconnected(socket as Arc<dyn FileOps>, open_flags)?;
-
     let proc = Scheduler::get_current().get_process();
+    let identity = proc.identity.lock().clone();
+    let file = open_socket_file(socket, open_flags, &identity)?;
+
     let mut files = proc.open_files.lock();
     let fd = files
         .open_file(
@@ -130,10 +147,11 @@ pub fn socketpair(domain: i32, type_and_flags: u32, _protocol: i32) -> EResult<u
     }
     let cloexec = flags.contains(SocketFlags::CloseOnExec);
 
-    let file_a = File::open_disconnected(sa as Arc<dyn FileOps>, open_flags)?;
-    let file_b = File::open_disconnected(sb as Arc<dyn FileOps>, open_flags)?;
-
     let proc = Scheduler::get_current().get_process();
+    let identity = proc.identity.lock().clone();
+    let file_a = open_socket_file(sa, open_flags, &identity)?;
+    let file_b = open_socket_file(sb, open_flags, &identity)?;
+
     let mut files = proc.open_files.lock();
 
     let fd0 = files
@@ -204,9 +222,10 @@ pub fn accept(
         open_flags |= OpenFlags::NonBlocking;
     }
 
-    let file = File::open_disconnected(new_socket as Arc<dyn FileOps>, open_flags)?;
-
     let proc = Scheduler::get_current().get_process();
+    let identity = proc.identity.lock().clone();
+    let file = open_socket_file(new_socket, open_flags, &identity)?;
+
     let mut files = proc.open_files.lock();
     let new_fd = files
         .open_file(
