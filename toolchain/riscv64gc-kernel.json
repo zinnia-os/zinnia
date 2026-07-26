@@ -8,6 +8,7 @@
 	"dynamic-linking": true,
 	"env": "none",
 	"features": "+m,+a,+f,+d,+c,+zicsr,+zihintpause,+zifencei",
+	"frame-pointer": "always",
 	"linker-flavor": "ld.lld",
 	"linker": "rust-lld",
 	"llvm-abiname": "lp64",

@@ -1,9 +1,11 @@
 {
+	"abi": "softfloat",
 	"arch": "aarch64",
 	"crt-objects-fallback": "false",
 	"data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
 	"disable-redzone": true,
-	"features": "+v8a,+strict-align,+neon,+fp-armv8",
+	"features": "+v8a,+strict-align,-neon",
+	"frame-pointer": "always",
 	"linker": "rust-lld",
 	"linker-flavor": "gnu-lld",
 	"llvm-target": "aarch64-unknown-none",
