@@ -109,6 +109,20 @@ impl Ring {
         slice.write_reg(trb::CONTROL, control);
     }
 
+    pub fn reserve(&mut self, n: usize) {
+        if self.index + n > self.size - 1 {
+            let link = BitValue::new(0u32)
+                .write_field(trb::control::TRB_TYPE, TrbType::Link as u8)
+                .write_field(trb::control::TC, 1)
+                .write_field(trb::control::C, self.cycle as u8)
+                .value();
+            let base = self.phys().value() as u64;
+            self.write_trb(self.index, base, 0, link);
+            self.index = 0;
+            self.cycle = !self.cycle;
+        }
+    }
+
     pub fn enqueue(&mut self, parameter: u64, status: u32, control: u32) -> usize {
         // The last slot is reserved for the Link TRB.
         if self.index == self.size - 1 {

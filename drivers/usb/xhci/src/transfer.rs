@@ -5,6 +5,7 @@ use crate::{
     spec::{CompletionCode, TrbType, trb},
 };
 use zinnia::{
+    alloc::vec::Vec,
     arch,
     device::usb::{Status, Transfer, TransferFlags, UsbResult},
     memory::{AllocFlags, BitValue, OwnedPhysPages},
@@ -141,20 +142,37 @@ pub fn data(ctrl: &XhciController, dev: &XhciDevice, xfer: &mut Transfer) -> Usb
         if length == 0 {
             return Ok(0);
         }
+
+        let base = phys.value();
+        let mut chunks: Vec<(u64, u32)> = Vec::new();
+        let mut off = 0usize;
+        while off < length {
+            let addr = base + off;
+            let to_boundary = 0x1_0000 - (addr & 0xffff);
+            let chunk = (length - off).min(0x1_0000).min(to_boundary);
+            chunks.push((addr as u64, chunk as u32));
+            off += chunk;
+        }
+
         let cell = CompletionCell::new();
         {
             let mut ring = dev.ep_rings[ep_index - 1].lock();
             let ring = ring.as_mut().ok_or(Status::Error)?;
-            let control = BitValue::new(0u32)
-                .write_field(trb::control::TRB_TYPE, TrbType::Normal as u8)
-                .write_field(trb::control::ISP, 1)
-                .write_field(trb::control::IOC, 1)
-                .value();
-            let status = BitValue::new(0u32)
-                .write_field(trb::status::TRANSFER_LEN, length as u32)
-                .value();
-            let idx = ring.enqueue(phys.value() as u64, status, control);
-            ring.set_pending(idx, cell.clone());
+            ring.reserve(chunks.len());
+            let last = chunks.len() - 1;
+            for (i, (addr, chunk)) in chunks.iter().enumerate() {
+                let control = BitValue::new(0u32)
+                    .write_field(trb::control::TRB_TYPE, TrbType::Normal as u8)
+                    .write_field(trb::control::ISP, 1)
+                    .write_field(trb::control::CH, (i != last) as u8)
+                    .write_field(trb::control::IOC, (i == last) as u8)
+                    .value();
+                let status = BitValue::new(0u32)
+                    .write_field(trb::status::TRANSFER_LEN, *chunk)
+                    .value();
+                let idx = ring.enqueue(*addr, status, control);
+                ring.set_pending(idx, cell.clone());
+            }
         }
         ctrl.ring_doorbell(dev.slot_id(), ep_index as u8);
         let completion = cell.wait();
