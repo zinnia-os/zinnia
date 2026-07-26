@@ -908,6 +908,10 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
         return socket.process_segment(&segment);
     }
 
+    if segment.flags & RST != 0 {
+        return Ok(false);
+    }
+
     if segment.flags & SYN == 0 || segment.flags & ACK != 0 {
         send_reset(interface, &segment)?;
         return Ok(false);
