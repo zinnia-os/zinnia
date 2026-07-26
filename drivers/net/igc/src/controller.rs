@@ -202,10 +202,49 @@ impl IgcController {
         Ok(last.read_field(mdic::DATA).value())
     }
 
+    fn mmd_read(&self, dev: u8, reg: u16) -> EResult<u16> {
+        self.mdic_write(PHY_MMDAC, dev as u16)?;
+        self.mdic_write(PHY_MMDAAD, reg)?;
+        self.mdic_write(PHY_MMDAC, MMDAC_FUNC_DATA | dev as u16)?;
+        let data = self.mdic_read(PHY_MMDAAD)?;
+        self.mdic_write(PHY_MMDAC, 0)?;
+        Ok(data)
+    }
+
+    fn mmd_write(&self, dev: u8, reg: u16, value: u16) -> EResult<()> {
+        self.mdic_write(PHY_MMDAC, dev as u16)?;
+        self.mdic_write(PHY_MMDAAD, reg)?;
+        self.mdic_write(PHY_MMDAC, MMDAC_FUNC_DATA | dev as u16)?;
+        self.mdic_write(PHY_MMDAAD, value)?;
+        self.mdic_write(PHY_MMDAC, 0)
+    }
+
+    fn setup_autoneg(&self) -> EResult<()> {
+        let adv = self.mdic_read(PHY_AUTONEG_ADV)?;
+        self.mdic_write(
+            PHY_AUTONEG_ADV,
+            adv | NWAY_AR_10T_HD_CAPS
+                | NWAY_AR_10T_FD_CAPS
+                | NWAY_AR_100TX_HD_CAPS
+                | NWAY_AR_100TX_FD_CAPS,
+        )?;
+
+        let ctrl1000 = self.mdic_read(PHY_1000T_CTRL)?;
+        self.mdic_write(
+            PHY_1000T_CTRL,
+            (ctrl1000 & !CR_1000T_HD_CAPS) | CR_1000T_FD_CAPS,
+        )?;
+
+        let mgbt = self.mmd_read(MMD_AN, ANEG_MULTIGBT_AN_CTRL)?;
+        self.mmd_write(MMD_AN, ANEG_MULTIGBT_AN_CTRL, mgbt | CR_2500T_FD_CAPS)
+    }
+
     pub fn phy_power_up_autoneg(&self) -> EResult<()> {
         self.acquire_swfw_sync(SWFW_PHY0_SM)?;
 
         let result = (|| {
+            self.setup_autoneg()?;
+
             let bmcr = self.mdic_read(0)?;
             if bmcr & MII_CR_POWER_DOWN != 0 {
                 log!("PHY was powered down, powering up");

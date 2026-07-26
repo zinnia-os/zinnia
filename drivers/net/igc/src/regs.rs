@@ -211,6 +211,24 @@ pub const MII_CR_RESTART_AUTO_NEG: u16 = 0x0200;
 pub const MII_CR_POWER_DOWN: u16 = 0x0800;
 pub const MII_CR_AUTO_NEG_EN: u16 = 0x1000;
 
+pub const PHY_AUTONEG_ADV: u8 = 4;
+pub const PHY_1000T_CTRL: u8 = 9;
+pub const PHY_MMDAC: u8 = 13;
+pub const PHY_MMDAAD: u8 = 14;
+
+pub const NWAY_AR_10T_HD_CAPS: u16 = 0x0020;
+pub const NWAY_AR_10T_FD_CAPS: u16 = 0x0040;
+pub const NWAY_AR_100TX_HD_CAPS: u16 = 0x0080;
+pub const NWAY_AR_100TX_FD_CAPS: u16 = 0x0100;
+
+pub const CR_1000T_HD_CAPS: u16 = 0x0100;
+pub const CR_1000T_FD_CAPS: u16 = 0x0200;
+
+pub const MMDAC_FUNC_DATA: u16 = 0x4000;
+pub const MMD_AN: u8 = 7;
+pub const ANEG_MULTIGBT_AN_CTRL: u16 = 0x0020;
+pub const CR_2500T_FD_CAPS: u16 = 0x0080;
+
 pub const DESC_SIZE: usize = 16;
 
 pub const RXD_STATUS_OFFSET: usize = 8;
