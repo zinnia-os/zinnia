@@ -188,6 +188,10 @@ impl<'a> Ipv4Header<'a> {
     pub fn payload(&self) -> &'a [u8] {
         &self.packet[self.header_len..self.total_len]
     }
+
+    pub fn header_bytes(&self) -> &'a [u8] {
+        &self.packet[..self.header_len]
+    }
 }
 
 pub fn process_packet(interface: &ManagedInterface, eth: &EthHeader<'_>) -> EResult<bool> {
@@ -222,6 +226,10 @@ fn process_icmp(
     dst_mac: MacAddr,
     header: &Ipv4Header<'_>,
 ) -> EResult<bool> {
+    if super::icmp::process_dest_unreachable(header.payload()) {
+        return Ok(true);
+    }
+
     let Some(request) = EchoRequest::parse(header.payload()) else {
         return Ok(false);
     };

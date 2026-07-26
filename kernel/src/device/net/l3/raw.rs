@@ -1,6 +1,6 @@
 use crate::{
     device::net::{
-        ShutdownFlags, Socket, SocketOps,
+        ShutdownFlags, SockOptState, Socket, SocketOps,
         interface::{self, MAX_IPV4_PAYLOAD_LEN},
         l3::ipv4::{self, IPV4_HEADER_LEN, Ipv4Addr, Ipv4Protocol},
     },
@@ -39,11 +39,13 @@ pub struct RawSocket {
     inner: SpinMutex<RawInner>,
     rd_event: Event,
     wr_event: Event,
+    sockopts: SockOptState,
 }
 
 impl RawSocket {
     pub fn new(protocol: i32) -> EResult<Arc<Self>> {
         let socket = Arc::try_new(Self {
+            sockopts: SockOptState::default(),
             inner: SpinMutex::new(RawInner {
                 protocol: protocol as u8,
                 peer: None,
@@ -213,7 +215,7 @@ impl SocketOps for RawSocket {
             SO_SNDBUF | SO_RCVBUF => MAX_IPV4_PAYLOAD_LEN as i32,
             SO_DOMAIN => AF_INET as i32,
             SO_PROTOCOL => self.inner.lock().protocol as i32,
-            _ => return Err(Errno::ENOPROTOOPT),
+            _ => self.sockopts.get(optname).ok_or(Errno::ENOPROTOOPT)?,
         };
         let bytes = val.to_ne_bytes();
         let len = min(bytes.len(), buf.len());
@@ -221,9 +223,13 @@ impl SocketOps for RawSocket {
         Ok(size_of::<i32>())
     }
 
-    fn setsockopt(&self, level: i32, _optname: i32, _buf: &[u8]) -> EResult<()> {
+    fn setsockopt(&self, level: i32, optname: i32, buf: &[u8]) -> EResult<()> {
         match level as u32 {
-            SOL_SOCKET | SOL_IP => Ok(()),
+            SOL_IP => Ok(()),
+            SOL_SOCKET => {
+                self.sockopts.set(optname, buf);
+                Ok(())
+            }
             _ => Err(Errno::ENOPROTOOPT),
         }
     }

@@ -3,7 +3,7 @@ use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 use core::cmp::min;
 use core::sync::atomic::AtomicBool;
 
-use crate::device::net::ShutdownFlags;
+use crate::device::net::{ShutdownFlags, SockOptState};
 use crate::{
     memory::IovecIter,
     posix::errno::{EResult, Errno},
@@ -115,6 +115,7 @@ pub struct LocalSocket {
     rd_event: Event,
     wr_event: Event,
     accept_event: Event,
+    sockopts: SockOptState,
 }
 
 fn current_cred() -> ucred {
@@ -129,6 +130,7 @@ fn current_cred() -> ucred {
 
 fn make_socket(state: State, sock_type: u32) -> EResult<Arc<LocalSocket>> {
     let this = Arc::try_new(LocalSocket {
+        sockopts: SockOptState::default(),
         inner: SpinMutex::new(LocalInner {
             state,
             sock_type,
@@ -879,7 +881,13 @@ impl SocketOps for LocalSocket {
                 buf[..len].copy_from_slice(&bytes[..len]);
                 Ok(size_of::<ucred>())
             }
-            _ => Err(Errno::ENOPROTOOPT),
+            _ => {
+                let val = self.sockopts.get(optname).ok_or(Errno::ENOPROTOOPT)?;
+                let bytes = val.to_ne_bytes();
+                let len = min(bytes.len(), buf.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                Ok(size_of::<i32>())
+            }
         }
     }
 
@@ -897,8 +905,8 @@ impl SocketOps for LocalSocket {
                 self.inner.lock().passcred = i32::from_ne_bytes(bytes) != 0;
                 Ok(())
             }
-            SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR => Ok(()),
-            _ => Err(Errno::ENOPROTOOPT),
+            SO_SNDBUF | SO_RCVBUF => Ok(()),
+            _ => self.sockopts.set(optname, buf).ok_or(Errno::ENOPROTOOPT),
         }
     }
 

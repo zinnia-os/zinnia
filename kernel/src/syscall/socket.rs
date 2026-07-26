@@ -227,6 +227,14 @@ pub fn connect(fd: i32, addr_ptr: VirtAddr, addr_length: usize) -> EResult<()> {
     let addr = read_sockaddr(addr_ptr, addr_length)?;
     let socket = get_socket(fd)?;
     let nonblocking = is_fd_nonblocking(fd)?;
+
+    if addr.len() >= size_of::<sa_family_t>() {
+        let family = sa_family_t::from_ne_bytes([addr[0], addr[1]]);
+        if family as u32 == AF_UNSPEC {
+            return socket.ops.disconnect();
+        }
+    }
+
     socket.ops.connect(&addr, nonblocking)
 }
 

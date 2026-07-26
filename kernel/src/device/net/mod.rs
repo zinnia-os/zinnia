@@ -10,7 +10,10 @@ use crate::{
 };
 use alloc::sync::Arc;
 use bitflags::bitflags;
-use core::any::Any;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 pub mod dev;
 pub mod interface;
@@ -25,6 +28,56 @@ pub struct Socket {
     pub ops: Arc<dyn SocketOps>,
     pub socket_type: u32,
     pub family: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct SockOptState {
+    reuse_addr: AtomicBool,
+    reuse_port: AtomicBool,
+    keep_alive: AtomicBool,
+    broadcast: AtomicBool,
+    dont_route: AtomicBool,
+    oob_inline: AtomicBool,
+    debug: AtomicBool,
+}
+
+impl SockOptState {
+    fn flag(&self, optname: u32) -> Option<&AtomicBool> {
+        Some(match optname {
+            uapi::socket::SO_REUSEADDR => &self.reuse_addr,
+            uapi::socket::SO_REUSEPORT => &self.reuse_port,
+            uapi::socket::SO_KEEPALIVE => &self.keep_alive,
+            uapi::socket::SO_BROADCAST => &self.broadcast,
+            uapi::socket::SO_DONTROUTE => &self.dont_route,
+            uapi::socket::SO_OOBINLINE => &self.oob_inline,
+            uapi::socket::SO_DEBUG => &self.debug,
+            _ => return None,
+        })
+    }
+
+    pub fn get(&self, optname: i32) -> Option<i32> {
+        let flag = self.flag(optname as u32)?;
+        Some(flag.load(Ordering::Relaxed) as i32)
+    }
+
+    pub fn set(&self, optname: i32, buf: &[u8]) -> Option<()> {
+        let flag = self.flag(optname as u32)?;
+
+        // Read an i32 or less from the buffer.
+        let i = {
+            let mut value = [0u8; 4];
+            let len = buf.len().min(4);
+            value[..len].copy_from_slice(&buf[..len]);
+            i32::from_ne_bytes(value)
+        };
+
+        flag.store(i != 0, Ordering::Relaxed);
+        Some(())
+    }
+
+    pub fn reuse_addr(&self) -> bool {
+        self.reuse_addr.load(Ordering::Relaxed)
+    }
 }
 
 impl Socket {
@@ -72,6 +125,10 @@ pub trait SocketOps: Send + Sync + Any {
     /// Connect to a remote/local address.
     fn connect(&self, addr: &[u8], nonblocking: bool) -> EResult<()> {
         let _ = (nonblocking, addr);
+        Err(Errno::ENOTSUP)
+    }
+
+    fn disconnect(&self) -> EResult<()> {
         Err(Errno::ENOTSUP)
     }
 

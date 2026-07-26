@@ -2,7 +2,7 @@
 
 use crate::{
     device::net::{
-        ShutdownFlags, Socket, SocketOps,
+        ShutdownFlags, SockOptState, Socket, SocketOps,
         interface::{self, MAX_IPV4_PAYLOAD_LEN, ManagedInterface},
         l3::ipv4::{Ipv4Addr, Ipv4Endpoint, Ipv4Header, Ipv4Protocol},
     },
@@ -111,6 +111,7 @@ pub struct TcpSocket {
     rd_event: Event,
     wr_event: Event,
     accept_event: Event,
+    sockopts: SockOptState,
 }
 
 struct TcpSegment<'a> {
@@ -175,6 +176,10 @@ impl TcpSocket {
     }
 
     fn autobind(&self) -> EResult<()> {
+        self.autobind_addr(Ipv4Addr::ANY)
+    }
+
+    fn autobind_addr(&self, addr: Ipv4Addr) -> EResult<()> {
         if self.inner.lock().bound {
             return Ok(());
         }
@@ -183,13 +188,7 @@ impl TcpSocket {
         for _ in 0..range {
             let offset = NEXT_EPHEMERAL.fetch_add(1, Ordering::Relaxed) % range;
             let port = EPHEMERAL_START + offset;
-            if self
-                .bind_endpoint(Ipv4Endpoint {
-                    addr: Ipv4Addr::ANY,
-                    port,
-                })
-                .is_ok()
-            {
+            if self.bind_endpoint(Ipv4Endpoint { addr, port }).is_ok() {
                 return Ok(());
             }
         }
@@ -199,7 +198,7 @@ impl TcpSocket {
 
     fn bind_endpoint(&self, endpoint: Ipv4Endpoint) -> EResult<()> {
         if endpoint.port == 0 {
-            return self.autobind();
+            return self.autobind_addr(endpoint.addr);
         }
         if endpoint.addr != Ipv4Addr::ANY
             && interface::interface_for_source(endpoint.addr).is_none()
@@ -772,7 +771,7 @@ impl SocketOps for TcpSocket {
             SO_DOMAIN => AF_INET as i32,
             SO_PROTOCOL => IPPROTO_TCP as i32,
             SO_ACCEPTCONN => (self.inner.lock().state == TcpState::Listen) as i32,
-            _ => return Err(Errno::ENOPROTOOPT),
+            _ => self.sockopts.get(optname).ok_or(Errno::ENOPROTOOPT)?,
         };
         let bytes = val.to_ne_bytes();
         let len = min(bytes.len(), buf.len());
@@ -780,13 +779,13 @@ impl SocketOps for TcpSocket {
         Ok(size_of::<i32>())
     }
 
-    fn setsockopt(&self, level: i32, optname: i32, _buf: &[u8]) -> EResult<()> {
+    fn setsockopt(&self, level: i32, optname: i32, buf: &[u8]) -> EResult<()> {
         if level as u32 != SOL_SOCKET {
             return Err(Errno::ENOPROTOOPT);
         }
         match optname as u32 {
-            SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR | SO_KEEPALIVE => Ok(()),
-            _ => Err(Errno::ENOPROTOOPT),
+            SO_SNDBUF | SO_RCVBUF => Ok(()),
+            _ => self.sockopts.set(optname, buf).ok_or(Errno::ENOPROTOOPT),
         }
     }
 
@@ -995,6 +994,7 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
 
 fn make_socket(state: TcpState) -> EResult<Arc<TcpSocket>> {
     let socket = Arc::try_new(TcpSocket {
+        sockopts: SockOptState::default(),
         inner: SpinMutex::new(TcpInner {
             local: Ipv4Endpoint {
                 addr: Ipv4Addr::ANY,

@@ -2,9 +2,12 @@
 
 use crate::{
     device::net::{
-        ShutdownFlags, Socket, SocketOps,
+        ShutdownFlags, SockOptState, Socket, SocketOps,
         interface::{self, MAX_IPV4_PAYLOAD_LEN, ManagedInterface},
-        l3::ipv4::{Ipv4Addr, Ipv4Endpoint, Ipv4Header, Ipv4Protocol},
+        l3::{
+            icmp,
+            ipv4::{Ipv4Addr, Ipv4Endpoint, Ipv4Header, Ipv4Protocol},
+        },
     },
     memory::IovecIter,
     posix::errno::{EResult, Errno},
@@ -31,7 +34,7 @@ const EPHEMERAL_START: u16 = 49152;
 const EPHEMERAL_END: u16 = 65535;
 
 static NEXT_EPHEMERAL: AtomicU16 = AtomicU16::new(0);
-static UDP_PORTS: SpinMutex<BTreeMap<u16, Weak<UdpSocket>>> = SpinMutex::new(BTreeMap::new());
+static UDP_PORTS: SpinMutex<BTreeMap<u16, Vec<Weak<UdpSocket>>>> = SpinMutex::new(BTreeMap::new());
 
 struct UdpDatagram {
     source: Ipv4Endpoint,
@@ -45,6 +48,7 @@ struct UdpInner {
     bound_device: Option<Arc<ManagedInterface>>,
     recv_queue: VecDeque<UdpDatagram>,
     shutdown: ShutdownFlags,
+    error: Option<Errno>,
     self_ref: Weak<UdpSocket>,
 }
 
@@ -52,6 +56,7 @@ pub struct UdpSocket {
     inner: SpinMutex<UdpInner>,
     rd_event: Event,
     wr_event: Event,
+    sockopts: SockOptState,
 }
 
 impl UdpSocket {
@@ -64,6 +69,7 @@ impl UdpSocket {
         }
 
         let socket = Arc::try_new(Self {
+            sockopts: SockOptState::default(),
             inner: SpinMutex::new(UdpInner {
                 local: Ipv4Endpoint {
                     addr: Ipv4Addr::ANY,
@@ -74,6 +80,7 @@ impl UdpSocket {
                 bound_device: None,
                 recv_queue: VecDeque::new(),
                 shutdown: ShutdownFlags::empty(),
+                error: None,
                 self_ref: Weak::new(),
             }),
             rd_event: Event::new(),
@@ -112,15 +119,15 @@ impl UdpSocket {
         if self.inner.lock().bound {
             return Ok(());
         }
+        self.bind_ephemeral(Ipv4Addr::ANY)
+    }
 
+    fn bind_ephemeral(&self, addr: Ipv4Addr) -> EResult<()> {
         let range = EPHEMERAL_END - EPHEMERAL_START + 1;
         for _ in 0..range {
             let offset = NEXT_EPHEMERAL.fetch_add(1, Ordering::Relaxed) % range;
             let port = EPHEMERAL_START + offset;
-            let endpoint = Ipv4Endpoint {
-                addr: Ipv4Addr::ANY,
-                port,
-            };
+            let endpoint = Ipv4Endpoint { addr, port };
             if self.bind_endpoint(endpoint).is_ok() {
                 return Ok(());
             }
@@ -129,9 +136,26 @@ impl UdpSocket {
         Err(Errno::EADDRINUSE)
     }
 
+    fn addrs_overlap(a: Ipv4Addr, b: Ipv4Addr) -> bool {
+        a == b || a == Ipv4Addr::ANY || b == Ipv4Addr::ANY
+    }
+
+    fn take_error(&self) -> Option<Errno> {
+        self.inner.lock().error.take()
+    }
+
+    fn set_error(&self, error: Errno) {
+        self.inner.lock().error = Some(error);
+        self.rd_event.wake_all();
+        self.wr_event.wake_all();
+    }
+
     fn bind_endpoint(&self, endpoint: Ipv4Endpoint) -> EResult<()> {
+        if self.inner.lock().bound {
+            return Err(Errno::EINVAL);
+        }
         if endpoint.port == 0 {
-            return self.autobind();
+            return self.bind_ephemeral(endpoint.addr);
         }
         if endpoint.addr != Ipv4Addr::ANY
             && endpoint.addr != Ipv4Addr::BROADCAST
@@ -141,24 +165,29 @@ impl UdpSocket {
         }
 
         let mut ports = UDP_PORTS.lock();
-        if ports
-            .get(&endpoint.port)
-            .is_some_and(|weak| weak.upgrade().is_some())
-        {
-            return Err(Errno::EADDRINUSE);
+        let holders = ports.entry(endpoint.port).or_default();
+        holders.retain(|weak| weak.strong_count() > 0);
+
+        let reuse = self.sockopts.reuse_addr();
+        for weak in holders.iter() {
+            let Some(other) = weak.upgrade() else {
+                continue;
+            };
+            let other_addr = other.inner.lock().local.addr;
+            if Self::addrs_overlap(other_addr, endpoint.addr)
+                && !(reuse && other.sockopts.reuse_addr())
+            {
+                return Err(Errno::EADDRINUSE);
+            }
         }
-        ports.remove(&endpoint.port);
 
         let self_ref = {
             let mut inner = self.inner.lock();
-            if inner.bound {
-                return Err(Errno::EINVAL);
-            }
             inner.local = endpoint;
             inner.bound = true;
             inner.self_ref.clone()
         };
-        ports.insert(endpoint.port, self_ref);
+        holders.push(self_ref);
         Ok(())
     }
 
@@ -236,7 +265,23 @@ impl SocketOps for UdpSocket {
             return Err(Errno::EINVAL);
         }
         self.autobind()?;
+
+        let bound_addr = self.inner.lock().local.addr;
+        if bound_addr == Ipv4Addr::ANY || bound_addr == Ipv4Addr::BROADCAST {
+            let interface =
+                interface::interface_for_dest(endpoint.addr).ok_or(Errno::ENETUNREACH)?;
+            self.inner.lock().local.addr = interface.ip();
+        }
+
         self.inner.lock().peer = Some(endpoint);
+        Ok(())
+    }
+
+    fn disconnect(&self) -> EResult<()> {
+        self.inner.lock().peer = None;
+
+        self.rd_event.wake_all();
+        self.wr_event.wake_all();
         Ok(())
     }
 
@@ -258,6 +303,9 @@ impl SocketOps for UdpSocket {
         _nonblocking: bool,
     ) -> EResult<isize> {
         let _ = control;
+        if let Some(error) = self.take_error() {
+            return Err(error);
+        }
         if self.inner.lock().shutdown.contains(ShutdownFlags::Write) {
             return Err(Errno::EPIPE);
         }
@@ -289,6 +337,9 @@ impl SocketOps for UdpSocket {
             let rd_guard = self.rd_event.guard();
             {
                 let mut inner = self.inner.lock();
+                if let Some(error) = inner.error.take() {
+                    return Err(error);
+                }
                 if inner.shutdown.contains(ShutdownFlags::Read) {
                     return Ok((0, 0, 0, 0));
                 }
@@ -353,11 +404,12 @@ impl SocketOps for UdpSocket {
 
         let val = match optname as u32 {
             SO_TYPE => SOCK_DGRAM as i32,
-            SO_ERROR => 0,
+            SO_ERROR => self.take_error().map_or(0, |e| e as i32),
             SO_SNDBUF | SO_RCVBUF => MAX_UDP_PAYLOAD_LEN as i32,
             SO_DOMAIN => AF_INET as i32,
             SO_PROTOCOL => IPPROTO_UDP as i32,
-            _ => return Err(Errno::ENOPROTOOPT),
+            SO_ACCEPTCONN => 0,
+            _ => self.sockopts.get(optname).ok_or(Errno::ENOPROTOOPT)?,
         };
         let bytes = val.to_ne_bytes();
         let len = min(bytes.len(), buf.len());
@@ -383,8 +435,8 @@ impl SocketOps for UdpSocket {
                 };
                 Ok(())
             }
-            SO_SNDBUF | SO_RCVBUF | SO_REUSEADDR | SO_BROADCAST => Ok(()),
-            _ => Err(Errno::ENOPROTOOPT),
+            SO_SNDBUF | SO_RCVBUF => Ok(()),
+            _ => self.sockopts.set(optname, buf).ok_or(Errno::ENOPROTOOPT),
         }
     }
 
@@ -396,6 +448,9 @@ impl SocketOps for UdpSocket {
         }
         if !inner.shutdown.contains(ShutdownFlags::Write) {
             revents |= PollFlags::Out;
+        }
+        if inner.error.is_some() {
+            revents |= PollFlags::Err | PollFlags::In | PollFlags::Out;
         }
         Ok(revents & (mask | PollFlags::Err | PollFlags::Hup))
     }
@@ -425,9 +480,52 @@ impl Drop for UdpSocket {
             }
         };
         if let Some(port) = port {
-            UDP_PORTS.lock().remove(&port);
+            let mut ports = UDP_PORTS.lock();
+            if let Some(holders) = ports.get_mut(&port) {
+                holders.retain(|weak| weak.strong_count() > 0);
+                if holders.is_empty() {
+                    ports.remove(&port);
+                }
+            }
         }
     }
+}
+
+fn lookup_socket(
+    destination: Ipv4Endpoint,
+    interface: &ManagedInterface,
+) -> Option<Arc<UdpSocket>> {
+    let mut ports = UDP_PORTS.lock();
+    let holders = ports.get_mut(&destination.port)?;
+    holders.retain(|weak| weak.strong_count() > 0);
+    if holders.is_empty() {
+        ports.remove(&destination.port);
+        return None;
+    }
+
+    let mut wildcard = None;
+    for weak in holders.iter() {
+        let Some(socket) = weak.upgrade() else {
+            continue;
+        };
+        let (local, bound_device) = {
+            let inner = socket.inner.lock();
+            (inner.local.addr, inner.bound_device.clone())
+        };
+
+        if let Some(device) = &bound_device
+            && !core::ptr::eq(Arc::as_ptr(device), interface as *const ManagedInterface)
+        {
+            continue;
+        }
+        if local == destination.addr {
+            return Some(socket);
+        }
+        if local == Ipv4Addr::ANY && wildcard.is_none() {
+            wildcard = Some(socket);
+        }
+    }
+    wildcard
 }
 
 pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> EResult<bool> {
@@ -457,29 +555,12 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
     };
     let payload = &packet[UDP_HEADER_LEN..len];
 
-    let socket = {
-        let mut ports = UDP_PORTS.lock();
-        match ports.get(&destination.port).and_then(Weak::upgrade) {
-            Some(socket) => socket,
-            None => {
-                ports.remove(&destination.port);
-                return Ok(false);
-            }
-        }
+    let Some(socket) = lookup_socket(destination, interface) else {
+        icmp::send_port_unreachable(interface, ipv4);
+        return Ok(false);
     };
 
     let mut inner = socket.inner.lock();
-    if inner.local.addr != Ipv4Addr::ANY
-        && inner.local.addr != interface.ip()
-        && inner.local.addr != Ipv4Addr::BROADCAST
-    {
-        return Ok(false);
-    }
-    if let Some(device) = &inner.bound_device
-        && !core::ptr::eq(Arc::as_ptr(device), interface as *const ManagedInterface)
-    {
-        return Ok(false);
-    }
     if inner.peer.is_some_and(|peer| peer != source) {
         return Ok(false);
     }
@@ -493,6 +574,27 @@ pub fn process_packet(interface: &ManagedInterface, ipv4: &Ipv4Header<'_>) -> ER
     drop(inner);
     socket.rd_event.wake_all();
     Ok(true)
+}
+
+pub fn deliver_error(local: Ipv4Endpoint, remote: Ipv4Endpoint, error: Errno) {
+    let candidates: Vec<Arc<UdpSocket>> = {
+        let ports = UDP_PORTS.lock();
+        let Some(holders) = ports.get(&local.port) else {
+            return;
+        };
+        holders.iter().filter_map(Weak::upgrade).collect()
+    };
+
+    for socket in candidates {
+        let matches = {
+            let inner = socket.inner.lock();
+            let local_matches = inner.local.addr == local.addr || inner.local.addr == Ipv4Addr::ANY;
+            local_matches && inner.peer == Some(remote)
+        };
+        if matches {
+            socket.set_error(error.clone());
+        }
+    }
 }
 
 fn udp_checksum(source: Ipv4Addr, destination: Ipv4Addr, packet: &[u8]) -> u16 {

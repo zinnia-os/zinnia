@@ -1,6 +1,6 @@
 use crate::{
     device::net::{
-        ShutdownFlags, Socket, SocketOps,
+        ShutdownFlags, SockOptState, Socket, SocketOps,
         interface::{self, RX_FRAME_LEN},
         l2::eth::ETH_HEADER_LEN,
     },
@@ -40,6 +40,7 @@ pub struct PacketSocket {
     inner: SpinMutex<PacketInner>,
     rd_event: Event,
     wr_event: Event,
+    sockopts: SockOptState,
 }
 
 impl PacketSocket {
@@ -49,6 +50,7 @@ impl PacketSocket {
         }
 
         let socket = Arc::try_new(Self {
+            sockopts: SockOptState::default(),
             inner: SpinMutex::new(PacketInner {
                 ifindex: None,
                 protocol: u16::from_be(protocol as u16),
@@ -214,7 +216,7 @@ impl SocketOps for PacketSocket {
             SO_ERROR => 0,
             SO_DOMAIN => AF_PACKET as i32,
             SO_PROTOCOL => self.inner.lock().protocol as i32,
-            _ => return Err(Errno::ENOPROTOOPT),
+            _ => self.sockopts.get(optname).ok_or(Errno::ENOPROTOOPT)?,
         };
         let bytes = val.to_ne_bytes();
         let len = min(bytes.len(), buf.len());
@@ -222,11 +224,12 @@ impl SocketOps for PacketSocket {
         Ok(size_of::<i32>())
     }
 
-    fn setsockopt(&self, level: i32, optname: i32, _buf: &[u8]) -> EResult<()> {
+    fn setsockopt(&self, level: i32, optname: i32, buf: &[u8]) -> EResult<()> {
         match (level as u32, optname as u32) {
             (SOL_SOCKET, SO_ATTACH_FILTER | SO_DETACH_FILTER | SO_LOCK_FILTER) => Ok(()),
             (SOL_PACKET, PACKET_AUXDATA) => Ok(()),
-            (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF | SO_BROADCAST) => Ok(()),
+            (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF) => Ok(()),
+            (SOL_SOCKET, _) => self.sockopts.set(optname, buf).ok_or(Errno::ENOPROTOOPT),
             _ => Err(Errno::ENOPROTOOPT),
         }
     }
