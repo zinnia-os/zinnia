@@ -285,7 +285,7 @@ impl FileOps for TmpRegular {
 
         let copy_size = buffer.len().min(inode.len() - start as usize);
         let mut v = vec![0u8; copy_size];
-        let actual = (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, start as usize);
+        let actual = (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, start as usize)?;
         buffer.copy_from_slice(&v)?;
 
         Ok(actual as _)
@@ -298,7 +298,7 @@ impl FileOps for TmpRegular {
 
         let mut v = vec![0u8; buffer.len()];
         buffer.copy_to_slice(&mut v)?;
-        let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, start as usize);
+        let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, start as usize)?;
         *size_lock = (*size_lock).max(start as usize + actual);
 
         Ok(actual as _)

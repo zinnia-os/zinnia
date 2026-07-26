@@ -425,7 +425,7 @@ impl ElfFormat {
                             &mut partial_data,
                             (file_map_offset as u64) + full_file_map_size as u64,
                         )?;
-                        (partial_map.as_ref() as &dyn MemoryObject).write(&partial_data, 0);
+                        (partial_map.as_ref() as &dyn MemoryObject).write(&partial_data, 0)?;
 
                         info.space.map_object(
                             partial_map,
@@ -540,24 +540,24 @@ impl ExecFormat for ElfFormat {
         let mut argv_offsets = Vec::with_capacity(info.argv.len());
 
         stack_off -= 1;
-        stack.write(&[0u8], stack_off);
+        stack.write(&[0u8], stack_off)?;
         stack_off -= info.exec_path.len();
-        stack.write(&info.exec_path, stack_off);
+        stack.write(&info.exec_path, stack_off)?;
         let execfn_offset = stack_start + stack_off;
 
         for env in &info.envp {
             stack_off -= 1;
-            stack.write(&[0u8], stack_off);
+            stack.write(&[0u8], stack_off)?;
             stack_off -= env.len();
-            stack.write(env, stack_off);
+            stack.write(env, stack_off)?;
             envp_offsets.push(stack_start + stack_off);
         }
 
         for arg in &info.argv {
             stack_off -= 1;
-            stack.write(&[0u8], stack_off);
+            stack.write(&[0u8], stack_off)?;
             stack_off -= arg.len();
-            stack.write(arg, stack_off);
+            stack.write(arg, stack_off)?;
             argv_offsets.push(stack_start + stack_off);
         }
 
@@ -565,44 +565,45 @@ impl ExecFormat for ElfFormat {
         // Align the stack if argc + argv + envp does not add up to 16 byte alignment.
         if (1 + info.argv.len() + info.envp.len()) % 2 == 1 {
             stack_off -= size_of::<usize>();
-            stack.write(&0usize.to_ne_bytes(), stack_off);
+            stack.write(&0usize.to_ne_bytes(), stack_off)?;
         }
 
         // Write auxiliary values.
-        let mut write_auxv = |auxv: u32, value: usize| {
+        let mut write_auxv = |auxv: u32, value: usize| -> EResult<()> {
             stack_off -= size_of::<usize>();
-            stack.write(&value.to_ne_bytes(), stack_off);
+            stack.write(&value.to_ne_bytes(), stack_off)?;
             stack_off -= size_of::<usize>();
-            stack.write(&(auxv as usize).to_ne_bytes(), stack_off);
+            stack.write(&(auxv as usize).to_ne_bytes(), stack_off)?;
+            Ok(())
         };
 
-        write_auxv(AT_NULL, 0); // Terminator.
-        write_auxv(AT_SECURE, 0);
-        write_auxv(AT_PHDR, elf.at_phdr);
-        write_auxv(AT_PHNUM, elf.at_phnum);
-        write_auxv(AT_PHENT, elf.at_phent);
-        write_auxv(AT_ENTRY, elf.at_entry);
-        write_auxv(AT_PAGESZ, page_size);
-        write_auxv(AT_EXECFN, execfn_offset);
+        write_auxv(AT_NULL, 0)?; // Terminator.
+        write_auxv(AT_SECURE, 0)?;
+        write_auxv(AT_PHDR, elf.at_phdr)?;
+        write_auxv(AT_PHNUM, elf.at_phnum)?;
+        write_auxv(AT_PHENT, elf.at_phent)?;
+        write_auxv(AT_ENTRY, elf.at_entry)?;
+        write_auxv(AT_PAGESZ, page_size)?;
+        write_auxv(AT_EXECFN, execfn_offset)?;
 
         // envp pointers
         stack_off -= size_of::<usize>();
-        stack.write(&0usize.to_ne_bytes(), stack_off);
+        stack.write(&0usize.to_ne_bytes(), stack_off)?;
         for env in envp_offsets.iter().rev() {
             stack_off -= size_of::<usize>();
-            stack.write(&env.to_ne_bytes(), stack_off);
+            stack.write(&env.to_ne_bytes(), stack_off)?;
         }
 
         // argv pointers
         stack_off -= size_of::<usize>();
-        stack.write(&0usize.to_ne_bytes(), stack_off);
+        stack.write(&0usize.to_ne_bytes(), stack_off)?;
         for arg in argv_offsets.iter().rev() {
             stack_off -= size_of::<usize>();
-            stack.write(&arg.to_ne_bytes(), stack_off);
+            stack.write(&arg.to_ne_bytes(), stack_off)?;
         }
 
         stack_off -= size_of::<usize>();
-        stack.write(&info.argv.len().to_ne_bytes(), stack_off);
+        stack.write(&info.argv.len().to_ne_bytes(), stack_off)?;
 
         assert!(stack_off % 16 == 0);
 

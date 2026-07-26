@@ -87,20 +87,25 @@ pub fn handler(info: &PageFaultInfo) -> bool {
         }
     };
 
-    let Some(src_phys) = resolved.object.try_get_page(resolved.object_page) else {
+    let Ok(Some(src_phys)) = resolved.object.try_get_page(resolved.object_page) else {
         return signal_or_panic(info);
     };
 
     // For copy-on-write writes, materialise a private copy off the source page.
     let (cow_object, install_phys) = if resolved.cow_write {
         let new_obj: Arc<dyn MemoryObject> = Arc::new(PagedMemoryObject::new_phys());
-        new_obj.copy(
-            0,
-            resolved.object.as_ref(),
-            resolved.object_page * page_size,
-            page_size,
-        );
-        let Some(phys) = new_obj.try_get_page(0) else {
+        if new_obj
+            .copy(
+                0,
+                resolved.object.as_ref(),
+                resolved.object_page * page_size,
+                page_size,
+            )
+            .is_err()
+        {
+            return signal_or_panic(info);
+        }
+        let Ok(Some(phys)) = new_obj.try_get_page(0) else {
             return signal_or_panic(info);
         };
         (Some(new_obj), phys)

@@ -721,13 +721,13 @@ impl Drop for VirtioGpuBuffer {
 }
 
 impl zinnia::memory::MemoryObject for VirtioGpuBuffer {
-    fn try_get_page(&self, page_index: usize) -> Option<PhysAddr> {
+    fn try_get_page(&self, page_index: usize) -> EResult<Option<PhysAddr>> {
         const PAGE_SIZE: usize = 4096;
         let offset = page_index * PAGE_SIZE;
         if offset < self.size {
-            Some(PhysAddr::new(self.base_addr.value() + offset))
+            Ok(Some(PhysAddr::new(self.base_addr.value() + offset)))
         } else {
-            None
+            Ok(None)
         }
     }
 }

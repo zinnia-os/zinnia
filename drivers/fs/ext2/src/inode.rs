@@ -3,8 +3,9 @@ use zinnia::{
     alloc::{sync::Arc, vec, vec::Vec},
     arch,
     core::{fmt::Debug, num::NonZeroUsize},
+    device::block::{self, BlockDevice, BlockOp, BlockSegment},
     memory::{
-        AddressSpace, IovecIter, PagedMemoryObject, VirtAddr, VmFlags,
+        AddressSpace, IovecIter, PagedMemoryObject, PhysAddr, VirtAddr, VmFlags,
         cache::{MemoryObject, Pager, PagerError},
         pmm::{AllocFlags, KernelAlloc, PageAllocator},
     },
@@ -21,6 +22,23 @@ use zinnia::{
     },
 };
 
+fn read_extent(
+    device: &dyn BlockDevice,
+    start_lba: u64,
+    num_lbas: usize,
+    segments: &[BlockSegment],
+) -> Result<(), PagerError> {
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let read = block::submit_all(device, BlockOp::Read, start_lba, num_lbas, segments)
+        .map_err(|_| PagerError::IoError)?;
+    if read < num_lbas {
+        return Err(PagerError::IoError);
+    }
+    Ok(())
+}
+
 /// A pager that reads file data from an ext2 inode, resolving block pointers.
 #[derive(Debug)]
 pub struct Ext2FilePager {
@@ -32,11 +50,144 @@ impl Ext2FilePager {
     pub fn new(sb: Arc<Ext2Super>, ino: u32) -> Self {
         Self { sb, ino }
     }
+
+    fn fill_pages(
+        &self,
+        raw_inode: &Ext2Inode,
+        page_index: usize,
+        pages: &[PhysAddr],
+    ) -> Result<(), PagerError> {
+        let page_size = arch::virt::get_page_size();
+        let block_size = self.sb.block_size;
+        let device = self.sb.device.as_ref();
+        let lba_size = device.get_lba_size();
+
+        let blocks_per_page = (page_size / block_size).max(1);
+        let lbas_per_block = block_size / lba_size;
+        let total_blocks = pages.len() * blocks_per_page;
+        let first_logical = (page_index * page_size / block_size) as u64;
+
+        let mut have = false;
+        let mut ext_start_lba = 0u64;
+        let mut ext_next_disk = 0u64;
+        let mut ext_lbas = 0usize;
+        let mut ext_segs: Vec<BlockSegment> = Vec::new();
+
+        for b in 0..total_blocks {
+            let logical = first_logical + b as u64;
+            let disk = self
+                .sb
+                .resolve_block(raw_inode, logical)
+                .map_err(|_| PagerError::IoError)?;
+
+            if disk == 0 {
+                if have {
+                    read_extent(device, ext_start_lba, ext_lbas, &ext_segs)?;
+                    have = false;
+                    ext_segs = Vec::new();
+                }
+                continue;
+            }
+
+            let page = b / blocks_per_page;
+            let off = (b % blocks_per_page) * block_size;
+            let seg_phys = pages[page] + off;
+
+            if have && disk == ext_next_disk {
+                let last = *ext_segs.last().unwrap();
+                if last.phys() + last.len() == seg_phys {
+                    *ext_segs.last_mut().unwrap() =
+                        BlockSegment::new(last.phys(), last.len() + block_size);
+                } else {
+                    ext_segs.push(BlockSegment::new(seg_phys, block_size));
+                }
+                ext_next_disk += 1;
+                ext_lbas += lbas_per_block;
+            } else {
+                if have {
+                    read_extent(device, ext_start_lba, ext_lbas, &ext_segs)?;
+                    ext_segs = Vec::new();
+                }
+                ext_start_lba = disk * lbas_per_block as u64;
+                ext_next_disk = disk + 1;
+                ext_lbas = lbas_per_block;
+                ext_segs.push(BlockSegment::new(seg_phys, block_size));
+                have = true;
+            }
+        }
+
+        if have {
+            read_extent(device, ext_start_lba, ext_lbas, &ext_segs)?;
+        }
+        Ok(())
+    }
 }
 
 impl Pager for Ext2FilePager {
     fn has_page(&self, _page_index: usize) -> bool {
         true
+    }
+
+    fn readahead(&self) -> bool {
+        true
+    }
+
+    fn try_get_pages(&self, page_index: usize, count: usize) -> Result<Vec<PhysAddr>, PagerError> {
+        let page_size = arch::virt::get_page_size();
+        let raw_inode = self
+            .sb
+            .read_inode(self.ino)
+            .map_err(|_| PagerError::IoError)?;
+        let file_size = raw_inode.size() as usize;
+        let file_pages = file_size.div_ceil(page_size);
+        if page_index >= file_pages {
+            return Ok(Vec::new());
+        }
+        let count = count.min(file_pages - page_index);
+
+        let block_size = self.sb.block_size;
+        let lba_size = self.sb.device.get_lba_size();
+        let fast = lba_size != 0
+            && block_size != 0
+            && block_size.is_multiple_of(lba_size)
+            && page_size.is_multiple_of(block_size);
+
+        if !fast {
+            let mut pages = Vec::with_capacity(count);
+            for i in 0..count {
+                match self.try_get_page(page_index + i) {
+                    Ok(page) => pages.push(page),
+                    Err(e) => {
+                        for page in pages {
+                            unsafe { KernelAlloc::dealloc(page, 1) };
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            return Ok(pages);
+        }
+
+        let mut pages = Vec::with_capacity(count);
+        for _ in 0..count {
+            match KernelAlloc::alloc(1, AllocFlags::empty()) {
+                Ok(page) => pages.push(page),
+                Err(_) => {
+                    for page in pages {
+                        unsafe { KernelAlloc::dealloc(page, 1) };
+                    }
+                    return Err(PagerError::OutOfMemory);
+                }
+            }
+        }
+
+        if let Err(e) = self.fill_pages(&raw_inode, page_index, &pages) {
+            for page in pages {
+                unsafe { KernelAlloc::dealloc(page, 1) };
+            }
+            return Err(e);
+        }
+        Ok(pages)
     }
 
     fn try_get_page(&self, page_index: usize) -> Result<zinnia::memory::PhysAddr, PagerError> {
@@ -223,7 +374,7 @@ impl FileOps for Ext2Regular {
 
         let copy_size = buffer.len().min(file_size - offset as usize);
         let mut v = vec![0u8; copy_size];
-        let actual = (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, offset as usize);
+        let actual = (self.cache.as_ref() as &dyn MemoryObject).read(&mut v, offset as usize)?;
         buffer.copy_from_slice(&v[..actual])?;
 
         Ok(actual as _)
@@ -248,7 +399,7 @@ impl FileOps for Ext2Regular {
 
         let mut v = vec![0u8; buffer.len()];
         buffer.copy_to_slice(&mut v)?;
-        let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, offset as usize);
+        let actual = (self.cache.as_ref() as &dyn MemoryObject).write(&v, offset as usize)?;
 
         // Mark pages dirty.
         let page_size = arch::virt::get_page_size();

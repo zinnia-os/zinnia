@@ -323,13 +323,13 @@ impl BufferObject for PlainDumbBuffer {
 }
 
 impl MemoryObject for PlainDumbBuffer {
-    fn try_get_page(&self, page_index: usize) -> Option<PhysAddr> {
+    fn try_get_page(&self, page_index: usize) -> EResult<Option<PhysAddr>> {
         let page_size = arch::virt::get_page_size();
         let offset = page_index * page_size;
         if offset < self.size {
-            Some(self.addr + offset)
+            Ok(Some(self.addr + offset))
         } else {
-            None
+            Ok(None)
         }
     }
 }

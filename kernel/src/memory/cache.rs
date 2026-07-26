@@ -19,10 +19,12 @@ use alloc::{
 };
 use core::{fmt::Debug, num::NonZeroUsize, slice};
 
+const RA_MIN_PAGES: usize = 8;
+const RA_MAX_PAGES: usize = 64;
+
 pub trait MemoryObject: Sync + Send {
     /// Attempts to get the physical address of a page with a relative index into this object.
-    /// Returns [`None`] if the page is out of bounds for this object.
-    fn try_get_page(&self, page_index: usize) -> Option<PhysAddr>;
+    fn try_get_page(&self, page_index: usize) -> EResult<Option<PhysAddr>>;
 
     fn mark_dirty_page(&self, page_index: usize) {
         let _ = page_index;
@@ -39,9 +41,16 @@ pub trait MemoryObject: Sync + Send {
 }
 
 #[derive(Debug)]
+struct ReadAhead {
+    next_expected: usize,
+    window: usize,
+}
+
+#[derive(Debug)]
 pub struct PagedMemoryObject {
     pages: SpinMutex<BTreeMap<usize, PhysAddr>>,
     dirty: SpinMutex<BTreeSet<usize>>,
+    ra: SpinMutex<ReadAhead>,
     source: Arc<dyn Pager>,
 }
 
@@ -51,6 +60,10 @@ impl PagedMemoryObject {
         Self {
             pages: SpinMutex::new(BTreeMap::new()),
             dirty: SpinMutex::new(BTreeSet::new()),
+            ra: SpinMutex::new(ReadAhead {
+                next_expected: usize::MAX,
+                window: RA_MIN_PAGES,
+            }),
             source,
         }
     }
@@ -67,21 +80,85 @@ impl PagedMemoryObject {
 
     /// Writes all dirty pages back through the pager and clears the dirty set.
     pub fn sync(&self) -> EResult<()> {
-        let dirty_pages = self.dirty.lock().iter().copied().collect::<Vec<_>>();
+        let dirty_pages = core::mem::take(&mut *self.dirty.lock())
+            .into_iter()
+            .collect::<Vec<_>>();
 
-        for idx in dirty_pages {
+        self.writeback(dirty_pages)
+    }
+
+    pub fn sync_range(&self, start_page: usize, end_page: usize) -> EResult<()> {
+        let dirty = {
+            let mut set = self.dirty.lock();
+            let in_range = set.range(start_page..end_page).copied().collect::<Vec<_>>();
+            for idx in &in_range {
+                set.remove(idx);
+            }
+            in_range
+        };
+
+        self.writeback(dirty)
+    }
+
+    fn writeback(&self, pages: Vec<usize>) -> EResult<()> {
+        let mut result = Ok(());
+
+        for idx in pages {
             let addr = self.pages.lock().get(&idx).copied();
 
-            if let Some(addr) = addr {
-                self.source
-                    .try_put_page(addr, idx)
-                    .map_err(|_| Errno::EIO)?;
-            }
+            let Some(addr) = addr else {
+                continue;
+            };
 
-            self.dirty.lock().remove(&idx);
+            if self.source.try_put_page(addr, idx).is_err() {
+                self.dirty.lock().insert(idx);
+                result = Err(Errno::EIO);
+            }
         }
 
-        Ok(())
+        result
+    }
+
+    pub fn read_direct(&self, buf: &mut [u8], offset: usize) -> EResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let page_size = get_page_size();
+        let start_page = offset / page_size;
+        let end_page = (offset + buf.len()).div_ceil(page_size);
+        self.sync_range(start_page, end_page)?;
+
+        let mut progress = 0;
+        while progress < buf.len() {
+            let cur = offset + progress;
+            let page_index = cur / page_size;
+            let misalign = cur % page_size;
+            let remaining = buf.len() - progress;
+            let want = (misalign + remaining).div_ceil(page_size).min(RA_MAX_PAGES);
+
+            let frames = self.source.try_get_pages(page_index, want)?;
+            if frames.is_empty() {
+                break;
+            }
+
+            for (i, frame) in frames.iter().enumerate() {
+                if progress >= buf.len() {
+                    break;
+                }
+                let page_off = if i == 0 { misalign } else { 0 };
+                let copy = (page_size - page_off).min(buf.len() - progress);
+                let src: &[u8] = unsafe { slice::from_raw_parts(frame.as_hhdm(), page_size) };
+                buf[progress..][..copy].copy_from_slice(&src[page_off..][..copy]);
+                progress += copy;
+            }
+
+            for frame in &frames {
+                unsafe { KernelAlloc::dealloc(*frame, 1) };
+            }
+        }
+
+        Ok(progress)
     }
 
     pub fn truncate(&self, length: usize) {
@@ -128,7 +205,7 @@ impl PagedMemoryObject {
             self.as_ref() as &dyn MemoryObject,
             offset as _,
             length.get(),
-        );
+        )?;
 
         Ok(phys)
     }
@@ -136,8 +213,7 @@ impl PagedMemoryObject {
 
 impl dyn MemoryObject {
     /// Reads data from the object into a buffer.
-    /// Reading out of bounds will return 0.
-    pub fn read(&self, buffer: &mut [u8], offset: usize) -> usize {
+    pub fn read(&self, buffer: &mut [u8], offset: usize) -> EResult<usize> {
         let page_size = get_page_size();
         let mut progress = 0;
 
@@ -146,9 +222,8 @@ impl dyn MemoryObject {
             let page_index = (progress + offset) / page_size;
             let copy_size = (page_size - misalign).min(buffer.len() - progress);
 
-            let page_addr = match self.try_get_page(page_index) {
-                Some(x) => x,
-                None => break,
+            let Some(page_addr) = self.try_get_page(page_index)? else {
+                break;
             };
 
             let page_slice: &[u8] =
@@ -157,12 +232,11 @@ impl dyn MemoryObject {
             progress += copy_size;
         }
 
-        progress
+        Ok(progress)
     }
 
     /// Writes data from a buffer into the object.
-    /// Writing out of bounds will return 0.
-    pub fn write(&self, buffer: &[u8], offset: usize) -> usize {
+    pub fn write(&self, buffer: &[u8], offset: usize) -> EResult<usize> {
         let page_size = get_page_size();
         let mut progress = 0;
 
@@ -171,9 +245,8 @@ impl dyn MemoryObject {
             let page_index = (progress + offset) / page_size;
             let copy_size = (page_size - misalign).min(buffer.len() - progress);
 
-            let page_addr = match self.try_get_page(page_index) {
-                Some(x) => x,
-                None => break,
+            let Some(page_addr) = self.try_get_page(page_index)? else {
+                break;
             };
 
             let page_slice: &mut [u8] =
@@ -182,7 +255,7 @@ impl dyn MemoryObject {
             progress += copy_size;
         }
 
-        progress
+        Ok(progress)
     }
 
     /// Copies from another memory object directly into [`self`].
@@ -192,7 +265,7 @@ impl dyn MemoryObject {
         src: &dyn MemoryObject,
         src_offset: usize,
         len: usize,
-    ) -> usize {
+    ) -> EResult<usize> {
         let page_size = get_page_size();
         let mut progress = 0;
 
@@ -207,14 +280,12 @@ impl dyn MemoryObject {
                 .min(page_size - src_misalign)
                 .min(len - progress);
 
-            let target_page = match self.try_get_page(target_page_index) {
-                Some(x) => x,
-                None => break,
+            let Some(target_page) = self.try_get_page(target_page_index)? else {
+                break;
             };
 
-            let src_page = match src.try_get_page(src_page_index) {
-                Some(x) => x,
-                None => break,
+            let Some(src_page) = src.try_get_page(src_page_index)? else {
+                break;
             };
 
             let target_slice: &mut [u8] =
@@ -229,33 +300,71 @@ impl dyn MemoryObject {
             progress += copy_size;
         }
 
-        progress
+        Ok(progress)
     }
 }
 
 impl MemoryObject for PagedMemoryObject {
-    fn try_get_page(&self, page_index: usize) -> Option<PhysAddr> {
+    fn try_get_page(&self, page_index: usize) -> EResult<Option<PhysAddr>> {
         if let Some(page) = self.pages.lock().get(&page_index).copied() {
-            return Some(page);
+            return Ok(Some(page));
         }
 
-        let page = match self.source.try_get_page(page_index) {
-            Ok(x) => x,
-            Err(_) => return None,
+        let mut count = 1;
+        if self.source.readahead() {
+            let mut ra = self.ra.lock();
+            ra.window = if page_index == ra.next_expected {
+                (ra.window * 2).min(RA_MAX_PAGES)
+            } else {
+                RA_MIN_PAGES
+            };
+            count = ra.window;
+            ra.next_expected = page_index + count;
+        }
+
+        if count > 1 {
+            let pages = self.pages.lock();
+            for i in 1..count {
+                if pages.contains_key(&(page_index + i)) {
+                    count = i;
+                    break;
+                }
+            }
+        }
+
+        let batch = match self.source.try_get_pages(page_index, count) {
+            Ok(batch) if !batch.is_empty() => batch,
+            Ok(_) | Err(PagerError::IndexOutOfBounds) => return Ok(None),
+            Err(PagerError::OutOfMemory) if count > 1 => {
+                match self.source.try_get_pages(page_index, 1) {
+                    Ok(batch) if !batch.is_empty() => batch,
+                    Ok(_) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) => return Err(e.into()),
         };
 
         let mut pages = self.pages.lock();
-        match pages.get(&page_index).copied() {
-            Some(existing) => {
-                drop(pages);
-                unsafe { KernelAlloc::dealloc(page, 1) };
-                Some(existing)
-            }
-            None => {
-                pages.insert(page_index, page);
-                Some(page)
+        let mut result = None;
+        for (i, page) in batch.into_iter().enumerate() {
+            let idx = page_index + i;
+            match pages.get(&idx).copied() {
+                Some(existing) => {
+                    unsafe { KernelAlloc::dealloc(page, 1) };
+                    if i == 0 {
+                        result = Some(existing);
+                    }
+                }
+                None => {
+                    pages.insert(idx, page);
+                    if i == 0 {
+                        result = Some(page);
+                    }
+                }
             }
         }
+        Ok(result)
     }
 
     fn mark_dirty_page(&self, page_index: usize) {
@@ -269,6 +378,10 @@ impl MemoryObject for PagedMemoryObject {
 
 impl Drop for PagedMemoryObject {
     fn drop(&mut self) {
+        if let Err(e) = self.sync() {
+            warn!("Dropping page cache object with unflushed dirty pages: {e:?}");
+        }
+
         let p = self.pages.lock();
         for (_, &addr) in p.iter() {
             unsafe { KernelAlloc::dealloc(addr, 1) };
@@ -277,7 +390,6 @@ impl Drop for PagedMemoryObject {
 }
 
 /// Used to get new data for a memory object.
-// TODO: Vectorized IO.
 pub trait Pager: Sync + Send + Debug {
     /// Checks to see if the pager has data at the given offset.
     fn has_page(&self, page_index: usize) -> bool;
@@ -285,6 +397,27 @@ pub trait Pager: Sync + Send + Debug {
     fn try_get_page(&self, page_index: usize) -> Result<PhysAddr, PagerError>;
     /// Attempts to write a page at an index back to the device.
     fn try_put_page(&self, address: PhysAddr, page_index: usize) -> Result<(), PagerError>;
+
+    fn readahead(&self) -> bool {
+        false
+    }
+
+    fn try_get_pages(&self, page_index: usize, count: usize) -> Result<Vec<PhysAddr>, PagerError> {
+        let mut pages = Vec::with_capacity(count);
+        for i in 0..count {
+            match self.try_get_page(page_index + i) {
+                Ok(page) => pages.push(page),
+                Err(PagerError::IndexOutOfBounds) => break,
+                Err(e) => {
+                    for page in pages {
+                        unsafe { KernelAlloc::dealloc(page, 1) };
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(pages)
+    }
 }
 
 /// Errors that can occur when reading or writing a page.
@@ -295,6 +428,16 @@ pub enum PagerError {
     OutOfMemory,
     /// An I/O error occurred while reading/writing the page.
     IoError,
+}
+
+impl From<PagerError> for Errno {
+    fn from(value: PagerError) -> Self {
+        match value {
+            PagerError::IndexOutOfBounds => Errno::EINVAL,
+            PagerError::OutOfMemory => Errno::ENOMEM,
+            PagerError::IoError => Errno::EIO,
+        }
+    }
 }
 
 /// A pager which uses kernel memory to get physical pages.
@@ -346,6 +489,60 @@ impl BlockPager {
 impl Pager for BlockPager {
     fn has_page(&self, _page_index: usize) -> bool {
         true
+    }
+
+    fn readahead(&self) -> bool {
+        true
+    }
+
+    fn try_get_pages(&self, page_index: usize, count: usize) -> Result<Vec<PhysAddr>, PagerError> {
+        let page_size = get_page_size();
+        let lba_size = self.device.get_lba_size();
+        if lba_size == 0 || !page_size.is_multiple_of(lba_size) {
+            return Err(PagerError::IoError);
+        }
+        let lbas_per_page = page_size / lba_size;
+
+        let mut pages = Vec::with_capacity(count);
+        let mut segments = Vec::with_capacity(count);
+        for _ in 0..count {
+            match KernelAlloc::alloc(1, AllocFlags::empty()) {
+                Ok(page) => {
+                    segments.push(BlockSegment::new(page, page_size));
+                    pages.push(page);
+                }
+                Err(_) => {
+                    for page in pages {
+                        unsafe { KernelAlloc::dealloc(page, 1) };
+                    }
+                    return Err(PagerError::OutOfMemory);
+                }
+            }
+        }
+
+        let offset = self.byte_offset + (page_index * page_size) as u64;
+        let start_lba = offset / lba_size as u64;
+        let read = match device::block::submit_all(
+            self.device.as_ref(),
+            BlockOp::Read,
+            start_lba,
+            count * lbas_per_page,
+            &segments,
+        ) {
+            Ok(read) => read,
+            Err(_) => {
+                for page in pages {
+                    unsafe { KernelAlloc::dealloc(page, 1) };
+                }
+                return Err(PagerError::IoError);
+            }
+        };
+
+        let full_pages = read / lbas_per_page;
+        for page in pages.drain(full_pages..) {
+            unsafe { KernelAlloc::dealloc(page, 1) };
+        }
+        Ok(pages)
     }
 
     fn try_get_page(&self, page_index: usize) -> Result<PhysAddr, PagerError> {
