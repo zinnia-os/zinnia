@@ -2,9 +2,9 @@ use super::{Device as UsbDevice, Driver, Endpoint, Interface, Status, spec};
 use crate::{
     device::{
         Device,
-        block::{BlockCompletion, BlockDevice, BlockIo, BlockOp, register_block_device},
+        block::{BioRequest, BlockDevice, BlockLimits, BlockOp, register_block_device},
     },
-    memory::PhysAddr,
+    memory::{AllocFlags, OwnedPhysPages, PhysAddr},
     percpu::CpuData,
     posix::errno::{EResult, Errno},
     process::task::Task,
@@ -46,9 +46,10 @@ const SCSI_READ_CAPACITY_10: u8 = 0x25;
 const SCSI_READ_10: u8 = 0x28;
 const SCSI_WRITE_10: u8 = 0x2a;
 
-/// A single bulk TRB carries at most 64 KiB, so cap each BOT data phase to that.
-const MAX_BOT_BYTES: usize = 64 * 1024;
+const MAX_BOT_BYTES: usize = 256 * 1024;
 const MSC_MAJOR: u32 = 188;
+
+const CSW_OFFSET: usize = 64;
 
 static TAG: AtomicU32 = AtomicU32::new(1);
 static MINOR: AtomicU32 = AtomicU32::new(0);
@@ -114,6 +115,14 @@ fn attach(device: Arc<UsbDevice>, interface: &Interface) -> EResult<()> {
             return;
         };
 
+        let ctl = match OwnedPhysPages::new(1, AllocFlags::empty()) {
+            Ok(pages) => pages,
+            Err(_) => {
+                warn!("USB mass storage: failed to allocate control buffer");
+                return;
+            }
+        };
+
         let minor = MINOR.fetch_add(1, Ordering::Relaxed);
         let dev = Arc::new(MassStorage {
             device,
@@ -122,6 +131,7 @@ fn attach(device: Arc<UsbDevice>, interface: &Interface) -> EResult<()> {
             lba_size,
             lba_count,
             bot: Mutex::new(()),
+            ctl,
             minor,
         });
 
@@ -169,7 +179,6 @@ enum Data<'a> {
     Phys(PhysAddr, usize, bool),
 }
 
-/// Runs one Bulk-Only Transport command
 async fn bot_transfer(
     device: &UsbDevice,
     bulk_in: &Endpoint,
@@ -177,6 +186,7 @@ async fn bot_transfer(
     tag: u32,
     cdb: &[u8],
     data: Data<'_>,
+    ctl: Option<(PhysAddr, PhysAddr)>,
 ) -> EResult<()> {
     if cdb.len() > 16 {
         return Err(Errno::EINVAL);
@@ -204,10 +214,22 @@ async fn bot_transfer(
     cbw_bytes.copy_from_slice(unsafe {
         core::slice::from_raw_parts(&cbw as *const _ as *const u8, len)
     });
-    device
-        .bulk_transfer(bulk_out, &mut cbw_bytes, false)
-        .await
-        .map_err(|_| Errno::EIO)?;
+    match ctl {
+        Some((cbw_phys, _)) => {
+            let dst = unsafe { core::slice::from_raw_parts_mut(cbw_phys.as_hhdm::<u8>(), len) };
+            dst.copy_from_slice(&cbw_bytes);
+            device
+                .bulk_transfer_phys(bulk_out, cbw_phys, len, false)
+                .await
+                .map_err(|_| Errno::EIO)?;
+        }
+        None => {
+            device
+                .bulk_transfer(bulk_out, &mut cbw_bytes, false)
+                .await
+                .map_err(|_| Errno::EIO)?;
+        }
+    }
 
     let data_ep = if to_host { bulk_in } else { bulk_out };
     let data_result = match data {
@@ -228,10 +250,24 @@ async fn bot_transfer(
 
     // Read the CSW.
     let mut csw_bytes = [0u8; size_of::<CommandStatusWrapper>()];
+    let csw_len = csw_bytes.len();
     let mut got_csw = false;
     for attempt in 0..2 {
-        match device.bulk_transfer(bulk_in, &mut csw_bytes, true).await {
+        let result = match ctl {
+            Some((_, csw_phys)) => {
+                device
+                    .bulk_transfer_phys(bulk_in, csw_phys, csw_len, true)
+                    .await
+            }
+            None => device.bulk_transfer(bulk_in, &mut csw_bytes, true).await,
+        };
+        match result {
             Ok(_) => {
+                if let Some((_, csw_phys)) = ctl {
+                    let src =
+                        unsafe { core::slice::from_raw_parts(csw_phys.as_hhdm::<u8>(), csw_len) };
+                    csw_bytes.copy_from_slice(src);
+                }
                 got_csw = true;
                 break;
             }
@@ -339,6 +375,7 @@ async fn probe_geometry(
         next_tag(),
         &cdb,
         Data::Buf(&mut inquiry, true),
+        None,
     )
     .await
     {
@@ -359,6 +396,7 @@ async fn probe_geometry(
             next_tag(),
             &scsi_test_unit_ready(),
             Data::None,
+            None,
         )
         .await
         .is_ok()
@@ -375,6 +413,7 @@ async fn probe_geometry(
             next_tag(),
             &cdb,
             Data::Buf(&mut sense, true),
+            None,
         )
         .await;
     }
@@ -390,6 +429,7 @@ async fn probe_geometry(
         next_tag(),
         &scsi_read_capacity10(),
         Data::Buf(&mut cap, true),
+        None,
     )
     .await
     .is_err()
@@ -421,7 +461,18 @@ struct MassStorage {
     lba_size: usize,
     lba_count: u64,
     bot: Mutex<()>,
+    ctl: OwnedPhysPages,
     minor: u32,
+}
+
+impl MassStorage {
+    fn cbw_phys(&self) -> PhysAddr {
+        self.ctl.phys()
+    }
+
+    fn csw_phys(&self) -> PhysAddr {
+        self.ctl.phys() + CSW_OFFSET
+    }
 }
 
 impl BlockDevice for MassStorage {
@@ -433,43 +484,59 @@ impl BlockDevice for MassStorage {
         self.lba_count
     }
 
-    fn submit_io(&self, io: &mut BlockIo) -> EResult<BlockCompletion> {
-        let Some(end_lba) = io.lba().checked_add(io.num_lbas() as u64) else {
-            return Err(Errno::EOVERFLOW);
+    fn limits(&self) -> BlockLimits {
+        BlockLimits {
+            max_lbas: (MAX_BOT_BYTES / self.lba_size).max(1),
+            max_segments: 1,
+        }
+    }
+
+    fn submit_bio(&self, bio: &Arc<BioRequest>) -> EResult<()> {
+        let Some(end_lba) = bio.lba().checked_add(bio.num_lbas() as u64) else {
+            bio.complete(Err(Errno::EOVERFLOW));
+            return Ok(());
         };
         if end_lba > self.lba_count {
-            return match io.op() {
-                BlockOp::Read => Ok(BlockCompletion { lbas: 0 }),
+            bio.complete(match bio.op() {
+                BlockOp::Read => Ok(0),
                 BlockOp::Write => Err(Errno::ENOSPC),
-            };
+            });
+            return Ok(());
         }
-        if io.lba() > u32::MAX as u64 {
-            return Err(Errno::EIO);
+        if end_lba > u32::MAX as u64 + 1 {
+            bio.complete(Err(Errno::EIO));
+            return Ok(());
         }
 
-        let seg = io.first_segment();
-
-        let to_boundary = 0x1_0000 - (seg.phys().value() & 0xffff);
-        let max_lbas = (MAX_BOT_BYTES.min(to_boundary) / self.lba_size).max(1);
-        let transfer_lbas = io.num_lbas().min(max_lbas);
-        let bytes = transfer_lbas * self.lba_size;
-
-        let is_read = io.op() == BlockOp::Read;
-        let cdb = scsi_rw10(is_read, io.lba() as u32, transfer_lbas as u16);
-
+        let is_read = bio.op() == BlockOp::Read;
         let _guard = self.bot.lock();
-        CpuData::get().scheduler.block_on(bot_transfer(
-            &self.device,
-            &self.bulk_in,
-            &self.bulk_out,
-            next_tag(),
-            &cdb,
-            Data::Phys(seg.phys(), bytes, is_read),
-        ))?;
 
-        Ok(BlockCompletion {
-            lbas: transfer_lbas,
-        })
+        let ctl = Some((self.cbw_phys(), self.csw_phys()));
+        let mut lba = bio.lba();
+        for seg in bio.segments() {
+            let chunk_lbas = seg.len() / self.lba_size;
+            let cdb = scsi_rw10(is_read, lba as u32, chunk_lbas as u16);
+            if CpuData::get()
+                .scheduler
+                .block_on(bot_transfer(
+                    &self.device,
+                    &self.bulk_in,
+                    &self.bulk_out,
+                    next_tag(),
+                    &cdb,
+                    Data::Phys(seg.phys(), seg.len(), is_read),
+                    ctl,
+                ))
+                .is_err()
+            {
+                bio.complete(Err(Errno::EIO));
+                return Ok(());
+            }
+            lba += chunk_lbas as u64;
+        }
+
+        bio.complete(Ok(bio.num_lbas()));
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-use super::{BlockCompletion, BlockDevice, BlockIo, BlockOp};
+use super::{BioRequest, BlockDevice, BlockLimits, BlockOp};
 use crate::{
     device::Device,
     memory::VirtAddr,
@@ -37,46 +37,27 @@ impl BlockDevice for PartitionDevice {
         self.lba_count
     }
 
-    fn submit_io(&self, io: &mut BlockIo) -> EResult<BlockCompletion> {
-        if io.lba() >= self.lba_count {
-            return match io.op() {
-                BlockOp::Read => Ok(BlockCompletion { lbas: 0 }),
+    fn limits(&self) -> BlockLimits {
+        self.parent.limits()
+    }
+
+    fn submit_bio(&self, bio: &Arc<BioRequest>) -> EResult<()> {
+        if bio.lba() >= self.lba_count {
+            bio.complete(match bio.op() {
+                BlockOp::Read => Ok(0),
                 BlockOp::Write => Err(Errno::ENOSPC),
-            };
+            });
+            return Ok(());
         }
 
-        let remaining = self.lba_count - io.lba();
-        let num_lbas = io.num_lbas() as u64;
-        let forwarded_lba = self
-            .start_lba
-            .checked_add(io.lba())
-            .ok_or(Errno::EOVERFLOW)?;
-        let forwarded_lbas = match io.op() {
-            BlockOp::Read => num_lbas.min(remaining) as usize,
-            BlockOp::Write if num_lbas > remaining => return Err(Errno::ENOSPC),
-            BlockOp::Write => io.num_lbas(),
-        };
+        let remaining = self.lba_count - bio.lba();
+        if bio.op() == BlockOp::Write && bio.num_lbas() as u64 > remaining {
+            bio.complete(Err(Errno::ENOSPC));
+            return Ok(());
+        }
 
-        let segment = io.first_segment();
-        let lba_size = self.get_lba_size();
-        let mut forwarded = match io.op() {
-            BlockOp::Read => BlockIo::read_phys(
-                segment.phys(),
-                segment.len(),
-                forwarded_lba,
-                forwarded_lbas,
-                lba_size,
-            )?,
-            BlockOp::Write => BlockIo::write_phys(
-                segment.phys(),
-                segment.len(),
-                forwarded_lba,
-                forwarded_lbas,
-                lba_size,
-            )?,
-        };
-
-        self.parent.submit_io(&mut forwarded)
+        bio.remap_lba(self.start_lba);
+        self.parent.submit_bio(bio)
     }
 
     fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {

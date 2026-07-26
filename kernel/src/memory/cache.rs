@@ -2,7 +2,7 @@ use crate::{
     arch::virt::get_page_size,
     device::{
         self,
-        block::{BlockBuffer, BlockDevice, BlockIo},
+        block::{BlockBuffer, BlockDevice, BlockOp, BlockSegment},
     },
     memory::{
         PhysAddr,
@@ -379,26 +379,20 @@ impl Pager for BlockPager {
         }
 
         let offset = self.byte_offset + (page_index * page_size) as u64;
+        let start_lba = offset / lba_size as u64;
         let num_lbas = page_size / lba_size;
-        let mut done = 0;
+        let seg = [BlockSegment::new(address, page_size)];
 
-        while done < num_lbas {
-            let mut io = BlockIo::write_phys(
-                address + done * lba_size,
-                (num_lbas - done) * lba_size,
-                offset / lba_size as u64 + done as u64,
-                num_lbas - done,
-                lba_size,
-            )
-            .map_err(|_| PagerError::IoError)?;
-            let written = self
-                .device
-                .submit_io(&mut io)
-                .map_err(|_| PagerError::IoError)?;
-            if written.lbas == 0 {
-                return Err(PagerError::IoError);
-            }
-            done += written.lbas;
+        let written = device::block::submit_all(
+            self.device.as_ref(),
+            BlockOp::Write,
+            start_lba,
+            num_lbas,
+            &seg,
+        )
+        .map_err(|_| PagerError::IoError)?;
+        if written < num_lbas {
+            return Err(PagerError::IoError);
         }
 
         Ok(())

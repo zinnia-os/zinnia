@@ -1,24 +1,36 @@
-use crate::{command::ReadWriteCommand, controller::Controller};
+use crate::{command::ReadWriteCommand, controller::Controller, prp::build_prps};
+use core::{hint::spin_loop, time::Duration};
 use zinnia::{
     alloc::sync::Arc,
+    clock,
     device::{
         Device,
-        block::{BlockCompletion, BlockDevice, BlockIo, BlockOp},
+        block::{BioRequest, BlockDevice, BlockLimits, BlockOp},
     },
+    irq::lock::IrqLock,
     log,
     posix::errno::{EResult, Errno},
     vfs::file::{FileOps, OpenFlags},
 };
+
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Namespace {
     controller: Arc<Controller>,
     nsid: u32,
     lba_shift: u8,
     lba_count: u64,
+    max_transfer_bytes: usize,
 }
 
 impl Namespace {
-    pub fn new(controller: Arc<Controller>, nsid: u32, lba_shift: u8, lba_count: u64) -> Self {
+    pub fn new(
+        controller: Arc<Controller>,
+        nsid: u32,
+        lba_shift: u8,
+        lba_count: u64,
+        max_transfer_bytes: usize,
+    ) -> Self {
         log!(
             "New namespace: ID {nsid}, LBA size {} bytes, {} MBs total",
             1 << lba_shift,
@@ -29,6 +41,7 @@ impl Namespace {
             nsid,
             lba_shift,
             lba_count,
+            max_transfer_bytes,
         }
     }
 
@@ -46,52 +59,79 @@ impl BlockDevice for Namespace {
         self.lba_count
     }
 
-    fn submit_io(&self, io: &mut BlockIo) -> EResult<BlockCompletion> {
-        let Some(end_lba) = io.lba().checked_add(io.num_lbas() as u64) else {
-            return Err(Errno::EOVERFLOW);
+    fn limits(&self) -> BlockLimits {
+        BlockLimits {
+            max_lbas: (self.max_transfer_bytes >> self.lba_shift).max(1),
+            max_segments: 512,
+        }
+    }
+
+    fn submit_bio(&self, bio: &Arc<BioRequest>) -> EResult<()> {
+        let Some(end_lba) = bio.lba().checked_add(bio.num_lbas() as u64) else {
+            bio.complete(Err(Errno::EOVERFLOW));
+            return Ok(());
+        };
+        if end_lba > self.lba_count {
+            bio.complete(match bio.op() {
+                BlockOp::Read => Ok(0),
+                BlockOp::Write => Err(Errno::ENOSPC),
+            });
+            return Ok(());
+        }
+
+        let (prp1, prp2, prps) = match build_prps(bio.segments()) {
+            Ok(x) => x,
+            Err(_) => {
+                bio.complete(Err(Errno::EIO));
+                return Ok(());
+            }
         };
 
-        if end_lba > self.lba_count {
-            return match io.op() {
-                BlockOp::Read => Ok(BlockCompletion { lbas: 0 }),
-                BlockOp::Write => Err(Errno::ENOSPC),
-            };
+        let queue = {
+            let _irq = IrqLock::lock();
+            self.controller.io_queue.lock().clone()
+        };
+        let Some(queue) = queue else {
+            bio.complete(Err(Errno::EIO));
+            return Ok(());
+        };
+
+        queue.submit(
+            bio,
+            prps,
+            ReadWriteCommand {
+                prp1,
+                prp2,
+                cid: 0,
+                do_write: bio.op() == BlockOp::Write,
+                start_lba: bio.lba(),
+                num_lbas: bio.num_lbas(),
+                bytes: bio.bytes(),
+                control: 0,
+                ds_mgmt: 0,
+                ref_tag: 0,
+                app_tag: 0,
+                app_mask: 0,
+                nsid: self.nsid,
+            },
+        );
+
+        if queue.is_polling() {
+            let deadline = clock::get_elapsed().saturating_add(COMPLETION_TIMEOUT);
+            while !bio.is_done() {
+                queue.drain();
+                if bio.is_done() {
+                    break;
+                }
+                if clock::get_elapsed() >= deadline {
+                    bio.complete(Err(Errno::EIO));
+                    break;
+                }
+                spin_loop();
+            }
         }
 
-        let lbas_per_page = zinnia::arch::virt::get_page_size() >> self.lba_shift;
-        let transfer_lbas = match *self.controller.mdts.lock() {
-            Some(mdts) => io.num_lbas().min((mdts >> self.lba_shift).max(1)),
-            None => io.num_lbas(),
-        }
-        .min(lbas_per_page.max(1));
-
-        let mut ioq_guard = self.controller.io_queue.lock();
-        let ioq = ioq_guard.as_mut().ok_or(Errno::EIO)?;
-        let segment = io.first_segment();
-
-        ioq.submit_cmd(ReadWriteCommand {
-            buffer: segment.phys(),
-            do_write: io.op() == BlockOp::Write,
-            start_lba: io.lba(),
-            num_lbas: transfer_lbas,
-            bytes: transfer_lbas << self.lba_shift,
-            control: 0,
-            ds_mgmt: 0,
-            ref_tag: 0,
-            app_tag: 0,
-            app_mask: 0,
-            nsid: self.nsid,
-        })
-        .map_err(|_| Errno::ENXIO)?;
-
-        let comp = ioq.next_completion().unwrap();
-        if !comp.status.is_success() {
-            return Err(Errno::EFAULT);
-        }
-
-        Ok(BlockCompletion {
-            lbas: transfer_lbas,
-        })
+        Ok(())
     }
 }
 

@@ -1,3 +1,4 @@
+pub mod bio;
 pub mod gpt;
 pub mod io;
 pub mod partition;
@@ -5,14 +6,18 @@ pub mod ram;
 
 use crate::device::Device;
 use crate::{
+    arch::virt::get_page_size,
     memory::{IovecIter, VirtAddr},
     posix::errno::{EResult, Errno},
     process::Identity,
     vfs::{self, File, file::FileOps, fs::devtmpfs, inode::Mode},
 };
-use alloc::{format, sync::Arc};
+use alloc::{format, sync::Arc, vec::Vec};
 
-pub use io::{BlockBuffer, BlockCompletion, BlockIo, BlockIter, BlockOp, BlockSegment};
+pub use bio::{BioRequest, BlockLimits};
+pub use io::{BlockBuffer, BlockOp, BlockSegment};
+
+const MAX_RAW_CHUNK: usize = 256 * 1024;
 
 pub trait BlockDevice: Device {
     /// Gets the size of a sector in bytes.
@@ -21,13 +26,133 @@ pub trait BlockDevice: Device {
     /// Returns the total number of LBAs on this device.
     fn lba_count(&self) -> u64;
 
-    /// Submits a synchronous block I/O request.
-    fn submit_io(&self, io: &mut BlockIo) -> EResult<BlockCompletion>;
+    fn limits(&self) -> BlockLimits;
+
+    fn submit_bio(&self, bio: &Arc<BioRequest>) -> EResult<()>;
 
     fn handle_ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
         let _ = (file, request, arg);
         Err(Errno::ENOTTY)
     }
+}
+
+pub fn submit_all(
+    dev: &dyn BlockDevice,
+    op: BlockOp,
+    lba: u64,
+    num_lbas: usize,
+    segments: &[BlockSegment],
+) -> EResult<usize> {
+    if num_lbas == 0 {
+        return Ok(0);
+    }
+
+    let lba_size = dev.get_lba_size();
+    if lba_size == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let dev_lbas = dev.lba_count();
+    let num_lbas = if op == BlockOp::Read {
+        if lba >= dev_lbas {
+            return Ok(0);
+        }
+        num_lbas.min((dev_lbas - lba) as usize)
+    } else {
+        num_lbas
+    };
+    let total_bytes = num_lbas * lba_size;
+
+    let limits = dev.limits();
+    let page_size = get_page_size();
+    let lbas_per_page = (page_size / lba_size).max(1);
+    let mut max_lbas = limits.max_lbas.max(1);
+    if max_lbas > lbas_per_page {
+        max_lbas -= max_lbas % lbas_per_page;
+    }
+    let max_segments = limits.max_segments.max(1);
+
+    let mut children: Vec<Arc<BioRequest>> = Vec::new();
+    let mut cur: Vec<BlockSegment> = Vec::new();
+    let mut cur_lbas = 0usize;
+    let mut cur_lba = lba;
+    let mut next_lba = lba;
+    let mut consumed = 0usize;
+
+    let mut submit = |segs: Vec<BlockSegment>, start: u64, lbas: usize| -> EResult<()> {
+        let child = BioRequest::new(op, start, lbas, lba_size, segs)?;
+        if let Err(e) = dev.submit_bio(&child) {
+            child.complete(Err(e));
+        }
+        children.push(child);
+        Ok(())
+    };
+
+    'outer: for seg in segments {
+        let mut phys = seg.phys();
+        let mut remaining = seg.len();
+        while remaining > 0 {
+            if consumed >= total_bytes {
+                break 'outer;
+            }
+            if cur_lbas >= max_lbas || cur.len() >= max_segments {
+                submit(core::mem::take(&mut cur), cur_lba, cur_lbas)?;
+                cur_lba = next_lba;
+                cur_lbas = 0;
+            }
+            let room_bytes = (max_lbas - cur_lbas) * lba_size;
+            let take = remaining.min(room_bytes).min(total_bytes - consumed);
+            cur.push(BlockSegment::new(phys, take));
+            let take_lbas = take / lba_size;
+            cur_lbas += take_lbas;
+            next_lba += take_lbas as u64;
+            consumed += take;
+            phys = phys + take;
+            remaining -= take;
+        }
+    }
+    if !cur.is_empty() {
+        submit(core::mem::take(&mut cur), cur_lba, cur_lbas)?;
+    }
+
+    let mut total = 0usize;
+    let mut stop = false;
+    let mut first_err = None;
+    for child in &children {
+        let expected = child.num_lbas();
+        let result = child.wait();
+        if stop {
+            continue;
+        }
+        match result {
+            Ok(n) => {
+                total += n;
+                if n < expected {
+                    stop = true;
+                }
+            }
+            Err(e) => {
+                first_err = Some(e);
+                stop = true;
+            }
+        }
+    }
+
+    if total == 0 {
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+    }
+
+    Ok(total)
+}
+
+fn one_segment(buffer: &BlockBuffer, offset: usize, bytes: usize) -> EResult<[BlockSegment; 1]> {
+    let end = offset.checked_add(bytes).ok_or(Errno::EOVERFLOW)?;
+    if end > buffer.len() {
+        return Err(Errno::EINVAL);
+    }
+    Ok([BlockSegment::new(buffer.phys() + offset, bytes)])
 }
 
 pub fn read_into(
@@ -36,8 +161,7 @@ pub fn read_into(
     num_lba: usize,
     lba: u64,
 ) -> EResult<usize> {
-    let mut io = BlockIo::read(buffer, lba, num_lba, dev.get_lba_size())?;
-    dev.submit_io(&mut io).map(|completion| completion.lbas)
+    read_into_at(dev, buffer, 0, num_lba, lba)
 }
 
 pub fn read_into_at(
@@ -47,8 +171,8 @@ pub fn read_into_at(
     num_lba: usize,
     lba: u64,
 ) -> EResult<usize> {
-    let mut io = BlockIo::read_at(buffer, offset, lba, num_lba, dev.get_lba_size())?;
-    dev.submit_io(&mut io).map(|completion| completion.lbas)
+    let seg = one_segment(buffer, offset, num_lba * dev.get_lba_size())?;
+    submit_all(dev, BlockOp::Read, lba, num_lba, &seg)
 }
 
 pub fn read_exact_into_at(
@@ -58,23 +182,9 @@ pub fn read_exact_into_at(
     num_lba: usize,
     lba: u64,
 ) -> EResult<()> {
-    let lba_size = dev.get_lba_size();
-    let mut done = 0;
-
-    while done < num_lba {
-        let read = read_into_at(
-            dev,
-            buffer,
-            offset + done * lba_size,
-            num_lba - done,
-            lba + done as u64,
-        )?;
-        if read == 0 {
-            return Err(Errno::EIO);
-        }
-        done += read;
+    if read_into_at(dev, buffer, offset, num_lba, lba)? < num_lba {
+        return Err(Errno::EIO);
     }
-
     Ok(())
 }
 
@@ -93,8 +203,7 @@ pub fn write_from(
     num_lba: usize,
     lba: u64,
 ) -> EResult<usize> {
-    let mut io = BlockIo::write(buffer, lba, num_lba, dev.get_lba_size())?;
-    dev.submit_io(&mut io).map(|completion| completion.lbas)
+    write_from_at(dev, buffer, 0, num_lba, lba)
 }
 
 pub fn write_from_at(
@@ -104,8 +213,8 @@ pub fn write_from_at(
     num_lba: usize,
     lba: u64,
 ) -> EResult<usize> {
-    let mut io = BlockIo::write_at(buffer, offset, lba, num_lba, dev.get_lba_size())?;
-    dev.submit_io(&mut io).map(|completion| completion.lbas)
+    let seg = one_segment(buffer, offset, num_lba * dev.get_lba_size())?;
+    submit_all(dev, BlockOp::Write, lba, num_lba, &seg)
 }
 
 pub fn write_all_from_at(
@@ -115,23 +224,9 @@ pub fn write_all_from_at(
     num_lba: usize,
     lba: u64,
 ) -> EResult<()> {
-    let lba_size = dev.get_lba_size();
-    let mut done = 0;
-
-    while done < num_lba {
-        let written = write_from_at(
-            dev,
-            buffer,
-            offset + done * lba_size,
-            num_lba - done,
-            lba + done as u64,
-        )?;
-        if written == 0 {
-            return Err(Errno::EIO);
-        }
-        done += written;
+    if write_from_at(dev, buffer, offset, num_lba, lba)? < num_lba {
+        return Err(Errno::EIO);
     }
-
     Ok(())
 }
 
@@ -241,47 +336,41 @@ impl<T: BlockDevice> FileOps for T {
         if lba_size == 0 {
             return Err(Errno::EINVAL);
         }
-
         let lba_size_u64 = lba_size as u64;
-        let mut max_lbas_per_iter = (buffer.len() as u64).div_ceil(lba_size_u64).max(1);
-        max_lbas_per_iter = max_lbas_per_iter.saturating_add(1);
+        let want = buffer.len() as u64;
 
-        let tmp_bytes_u64 = max_lbas_per_iter
-            .checked_mul(lba_size_u64)
-            .ok_or(Errno::ENOMEM)?;
-        let tmp_bytes = usize::try_from(tmp_bytes_u64).map_err(|_| Errno::ENOMEM)?;
+        let cap_bytes = (want + lba_size_u64)
+            .min(MAX_RAW_CHUNK as u64 + lba_size_u64)
+            .div_ceil(lba_size_u64)
+            * lba_size_u64;
+        let mut tmp = BlockBuffer::new(cap_bytes as usize)?;
+        let mut progress = 0u64;
 
-        let mut tmp = BlockBuffer::new(tmp_bytes)?;
-        let mut progress = 0;
-
-        let result = 'a: loop {
-            if progress >= buffer.len() as u64 {
+        'a: loop {
+            if progress >= want {
                 break 'a Ok(progress as isize);
             }
 
-            let misalign = (progress + offset) % lba_size_u64;
-            let page_index = (progress + offset) / lba_size_u64;
-            let remaining = buffer.len() as u64 - progress;
-            let mut chunk_lbas = (misalign + remaining).div_ceil(lba_size_u64).max(1);
-            chunk_lbas = chunk_lbas.min(max_lbas_per_iter);
+            let abs = progress + offset;
+            let misalign = abs % lba_size_u64;
+            let start_lba = abs / lba_size_u64;
+            let remaining = want - progress;
+            let chunk_bytes = (misalign + remaining).min(cap_bytes);
+            let chunk_lbas = chunk_bytes.div_ceil(lba_size_u64).max(1);
 
-            let read_lbas = match read_into(self, &mut tmp, chunk_lbas as usize, page_index) {
+            let read_lbas = match read_into(self, &mut tmp, chunk_lbas as usize, start_lba) {
                 Ok(0) => break 'a Ok(progress as isize),
                 Ok(n) => n as u64,
                 Err(e) if progress == 0 => break 'a Err(e),
                 Err(_) => break 'a Ok(progress as isize),
             };
 
-            let chunk_bytes = read_lbas * lba_size_u64;
-            let chunk_slice = &tmp.as_slice()[..chunk_bytes as usize];
-
+            let chunk_slice = &tmp.as_slice()[..(read_lbas * lba_size_u64) as usize];
             let start = misalign as usize;
             if start >= chunk_slice.len() {
                 break 'a Ok(progress as isize);
             }
-
-            let mut copy_len = chunk_slice.len() - start;
-            copy_len = copy_len.min(remaining as usize);
+            let copy_len = (chunk_slice.len() - start).min(remaining as usize);
             if copy_len == 0 {
                 break 'a Ok(progress as isize);
             }
@@ -291,9 +380,7 @@ impl<T: BlockDevice> FileOps for T {
                 break 'a Err(err);
             }
             progress += copy_len as u64;
-        };
-
-        result
+        }
     }
 
     fn write(&self, _: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
@@ -301,54 +388,62 @@ impl<T: BlockDevice> FileOps for T {
             return Ok(0);
         }
 
-        let sector_size = self.get_lba_size() as u64;
-        if sector_size == 0 {
+        let lba_size = self.get_lba_size();
+        if lba_size == 0 {
             return Err(Errno::EINVAL);
         }
+        let lba_size_u64 = lba_size as u64;
+        let want = buffer.len() as u64;
 
-        let mut tmp = BlockBuffer::new(sector_size as _)?;
-        let mut progress = 0;
+        let cap_bytes = want.min(MAX_RAW_CHUNK as u64).div_ceil(lba_size_u64).max(1) * lba_size_u64;
+        let mut tmp = BlockBuffer::new(cap_bytes as usize)?;
+        let mut progress = 0u64;
 
-        let result = 'a: loop {
-            if progress >= buffer.len() as u64 {
+        'a: loop {
+            if progress >= want {
                 break 'a Ok(progress as isize);
             }
-            let misalign = (progress + offset) % sector_size;
-            let page_index = (progress + offset) / sector_size;
-            let copy_size = (sector_size - misalign).min(buffer.len() as u64 - progress);
 
-            // Read the current LBA data.
-            if let Err(e) = read_into(self, &mut tmp, 1, page_index) {
-                if progress == 0 {
-                    break 'a Err(e);
-                } else {
-                    break 'a Ok(progress as isize);
+            let abs = progress + offset;
+            let misalign = abs % lba_size_u64;
+            let start_lba = abs / lba_size_u64;
+            let remaining = want - progress;
+
+            if misalign != 0 || remaining < lba_size_u64 {
+                let copy = (lba_size_u64 - misalign).min(remaining);
+                if read_into(self, &mut tmp, 1, start_lba).is_err() && progress == 0 {
+                    break 'a Err(Errno::EIO);
                 }
-            }
-
-            {
-                let page_slice = tmp.as_mut_slice();
                 buffer.set_offset(progress as _);
-                if let Err(err) =
-                    buffer.copy_to_slice(&mut page_slice[misalign as usize..][..copy_size as usize])
+                if let Err(err) = buffer
+                    .copy_to_slice(&mut tmp.as_mut_slice()[misalign as usize..][..copy as usize])
                 {
                     break 'a Err(err);
                 }
-            }
-
-            // Write the new LBA data.
-            if let Err(e) = write_from(self, &tmp, 1, page_index) {
-                if progress == 0 {
-                    break 'a Err(e);
-                } else {
-                    break 'a Ok(progress as isize);
+                match write_from(self, &tmp, 1, start_lba) {
+                    Ok(0) | Err(_) if progress == 0 => break 'a Err(Errno::EIO),
+                    Ok(0) | Err(_) => break 'a Ok(progress as isize),
+                    Ok(_) => {}
                 }
+                progress += copy;
+                continue;
             }
 
-            progress += copy_size;
-        };
-
-        result
+            let chunk_lbas = (remaining / lba_size_u64).min(cap_bytes / lba_size_u64);
+            let chunk_bytes = chunk_lbas * lba_size_u64;
+            buffer.set_offset(progress as _);
+            if let Err(err) = buffer.copy_to_slice(&mut tmp.as_mut_slice()[..chunk_bytes as usize])
+            {
+                break 'a Err(err);
+            }
+            match write_from(self, &tmp, chunk_lbas as usize, start_lba) {
+                Ok(0) if progress == 0 => break 'a Err(Errno::EIO),
+                Ok(0) => break 'a Ok(progress as isize),
+                Ok(n) => progress += n as u64 * lba_size_u64,
+                Err(e) if progress == 0 => break 'a Err(e),
+                Err(_) => break 'a Ok(progress as isize),
+            }
+        }
     }
 
     fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {

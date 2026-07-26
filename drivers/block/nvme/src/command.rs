@@ -1,6 +1,5 @@
 use crate::{
     error::NvmeError,
-    queue::Queue,
     spec::{self},
 };
 use zinnia::memory::{BitValue, PhysAddr, UnsafeMemoryView};
@@ -12,7 +11,9 @@ pub trait Command {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ReadWriteCommand {
-    pub buffer: PhysAddr,
+    pub prp1: u64,
+    pub prp2: u64,
+    pub cid: u16,
     pub do_write: bool,
     pub start_lba: u64,
     pub num_lbas: usize,
@@ -37,6 +38,7 @@ impl Command for ReadWriteCommand {
                         spec::cmd::READ
                     },
                 )
+                .write_field(spec::sq_entry::CID, self.cid)
                 .write_field(spec::sq_entry::PSDT, 0); // We always want to use PRP for this.
 
             let cdw10 =
@@ -52,8 +54,8 @@ impl Command for ReadWriteCommand {
             let cdw15 = BitValue::new(0);
 
             view.write_reg(spec::sq_entry::NSID, self.nsid);
-            // TODO: For large transfers, we need to setup the PRP in a special way.
-            view.write_reg(spec::sq_entry::DPTR0, self.buffer.into());
+            view.write_reg(spec::sq_entry::DPTR0, self.prp1);
+            view.write_reg(spec::sq_entry::DPTR1, self.prp2);
             view.write_reg(spec::sq_entry::CDW0, cdw0.value());
             view.write_reg(spec::sq_entry::CDW10, cdw10.value());
             view.write_reg(spec::sq_entry::CDW11, cdw11.value());
@@ -67,13 +69,15 @@ impl Command for ReadWriteCommand {
     }
 }
 
-pub struct CreateCQCommand<'a> {
-    pub queue: &'a Queue,
+pub struct CreateCQCommand {
+    pub cq_addr: PhysAddr,
+    pub depth: usize,
+    pub qid: usize,
     pub irqs_enabled: bool,
     pub irq_vector: u16,
 }
 
-impl Command for CreateCQCommand<'_> {
+impl Command for CreateCQCommand {
     unsafe fn write_command(&self, view: &impl UnsafeMemoryView) -> Result<(), NvmeError> {
         unsafe {
             let cdw0 = BitValue::new(0)
@@ -81,11 +85,8 @@ impl Command for CreateCQCommand<'_> {
                 .write_field(spec::sq_entry::PSDT, 0); // We always want to use PRP for this.
 
             let cdw10 = BitValue::new(0)
-                .write_field(
-                    spec::sq_entry::create_cq::QSIZE,
-                    (self.queue.get_depth() - 1) as u16,
-                )
-                .write_field(spec::sq_entry::create_cq::QID, self.queue.get_id() as u16);
+                .write_field(spec::sq_entry::create_cq::QSIZE, (self.depth - 1) as u16)
+                .write_field(spec::sq_entry::create_cq::QID, self.qid as u16);
 
             let cdw11 = BitValue::new(0)
                 .write_field(spec::sq_entry::create_cq::IV, self.irq_vector)
@@ -95,7 +96,7 @@ impl Command for CreateCQCommand<'_> {
                 )
                 .write_field(spec::sq_entry::create_cq::PC, 1); // Our buffer is physically contiguous.
 
-            view.write_reg(spec::sq_entry::DPTR0, self.queue.get_cq_addr().into());
+            view.write_reg(spec::sq_entry::DPTR0, self.cq_addr.into());
             view.write_reg(spec::sq_entry::CDW0, cdw0.value());
             view.write_reg(spec::sq_entry::CDW10, cdw10.value());
             view.write_reg(spec::sq_entry::CDW11, cdw11.value());
@@ -105,11 +106,14 @@ impl Command for CreateCQCommand<'_> {
     }
 }
 
-pub struct CreateSQCommand<'a> {
-    pub queue: &'a Queue,
+pub struct CreateSQCommand {
+    pub sq_addr: PhysAddr,
+    pub depth: usize,
+    pub qid: usize,
+    pub cqid: usize,
 }
 
-impl Command for CreateSQCommand<'_> {
+impl Command for CreateSQCommand {
     unsafe fn write_command(&self, view: &impl UnsafeMemoryView) -> Result<(), NvmeError> {
         unsafe {
             let cdw0 = BitValue::new(0)
@@ -117,18 +121,15 @@ impl Command for CreateSQCommand<'_> {
                 .write_field(spec::sq_entry::PSDT, 0); // We always want to use PRP for this.
 
             let cdw10 = BitValue::new(0)
-                .write_field(
-                    spec::sq_entry::create_sq::QSIZE,
-                    (self.queue.get_depth() - 1) as u16,
-                )
-                .write_field(spec::sq_entry::create_sq::QID, self.queue.get_id() as u16);
+                .write_field(spec::sq_entry::create_sq::QSIZE, (self.depth - 1) as u16)
+                .write_field(spec::sq_entry::create_sq::QID, self.qid as u16);
 
             let cdw11 = BitValue::new(0)
-                .write_field(spec::sq_entry::create_sq::CQID, self.queue.get_id() as u16)
+                .write_field(spec::sq_entry::create_sq::CQID, self.cqid as u16)
                 .write_field(spec::sq_entry::create_sq::QPRIO, 0) // Priority is the highest.
                 .write_field(spec::sq_entry::create_sq::PC, 1); // Our buffer is physically contiguous.
 
-            view.write_reg(spec::sq_entry::DPTR0, self.queue.get_sq_addr().into());
+            view.write_reg(spec::sq_entry::DPTR0, self.sq_addr.into());
             view.write_reg(spec::sq_entry::CDW0, cdw0.value());
             view.write_reg(spec::sq_entry::CDW10, cdw10.value());
             view.write_reg(spec::sq_entry::CDW11, cdw11.value());

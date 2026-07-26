@@ -1,8 +1,8 @@
 use crate::{
-    command::IdentifyCommand,
+    command::{CreateCQCommand, CreateSQCommand, IdentifyCommand},
     error::NvmeError,
     namespace::Namespace,
-    queue::Queue,
+    queue::{IoQueue, Queue},
     spec::{self},
 };
 use core::{cmp::min, hint::spin_loop, slice, sync::atomic::AtomicU32};
@@ -40,11 +40,21 @@ pub struct Controller {
     /// Queue to submit admin commands to.
     pub admin_queue: SpinMutex<Option<Queue>>,
     /// Queue to submit IO commands to.
-    pub io_queue: SpinMutex<Option<Queue>>,
+    pub io_queue: SpinMutex<Option<Arc<IoQueue>>>,
     /// Amount of namespaces.
     ns_count: AtomicU32,
     /// Maximum data transfer size.
     pub mdts: SpinMutex<Option<usize>>,
+}
+
+impl Controller {
+    pub fn max_transfer_bytes(&self) -> usize {
+        let cap = 512 * zinnia::arch::virt::get_page_size();
+        match *self.mdts.lock() {
+            Some(mdts) if mdts != 0 => mdts.min(cap),
+            _ => cap,
+        }
+    }
 }
 
 impl Controller {
@@ -132,12 +142,33 @@ impl Controller {
         // Re-enable the controller.
         self.set_status(true)?;
 
-        // Create an IO queue.
-        let io_queue = Queue::new(self.regs.clone(), self.doorbell_stride, 1, queue_depth)?;
-        io_queue.setup_io(&mut admin_queue, io_irq_vector)?;
+        let io_queue = IoQueue::new(
+            self.regs.clone(),
+            self.doorbell_stride,
+            1,
+            queue_depth,
+            io_irq_vector.is_none(),
+        )?;
+
+        admin_queue.submit_cmd(CreateCQCommand {
+            cq_addr: io_queue.get_cq_addr(),
+            depth: io_queue.get_depth(),
+            qid: io_queue.get_id(),
+            irqs_enabled: io_irq_vector.is_some(),
+            irq_vector: io_irq_vector.unwrap_or(0),
+        })?;
+        assert!(admin_queue.next_completion()?.status.is_success());
+
+        admin_queue.submit_cmd(CreateSQCommand {
+            sq_addr: io_queue.get_sq_addr(),
+            depth: io_queue.get_depth(),
+            qid: io_queue.get_id(),
+            cqid: io_queue.get_id(),
+        })?;
+        assert!(admin_queue.next_completion()?.status.is_success());
 
         *self.admin_queue.lock() = Some(admin_queue);
-        *self.io_queue.lock() = Some(io_queue);
+        *self.io_queue.lock() = Some(Arc::new(io_queue));
 
         Ok(())
     }
@@ -280,7 +311,13 @@ impl Controller {
                     lba_shift = 9;
                 }
 
-                let ns = Namespace::new(self.clone(), *id, lba_shift, lba_count.value());
+                let ns = Namespace::new(
+                    self.clone(),
+                    *id,
+                    lba_shift,
+                    lba_count.value(),
+                    self.max_transfer_bytes(),
+                );
                 namespaces.push(Arc::new(ns));
             }
 

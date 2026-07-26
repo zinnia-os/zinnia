@@ -3,7 +3,7 @@
 use crate::controller::Controller;
 use core::sync::atomic::AtomicUsize;
 use zinnia::{
-    alloc::{boxed::Box, format},
+    alloc::{boxed::Box, format, sync::Arc},
     core::sync::atomic::Ordering,
     device::{
         block::register_block_device,
@@ -20,15 +20,22 @@ mod command;
 mod controller;
 mod error;
 mod namespace;
+mod prp;
 mod queue;
 mod spec;
 
 static NVME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-struct NvmeIrqHandler;
+struct NvmeIrqHandler {
+    controller: Arc<Controller>,
+}
 
 impl IrqHandler for NvmeIrqHandler {
     fn raise(&mut self) -> Status {
+        let queue = self.controller.io_queue.lock().clone();
+        if let Some(queue) = queue {
+            queue.drain();
+        }
         Status::Handled
     }
 }
@@ -73,7 +80,9 @@ fn probe(_: &PciVariant, mut view: DeviceView<'static>) -> EResult<()> {
     };
 
     if let Some(irq_line) = &irq_line {
-        irq_line.attach(Box::new(NvmeIrqHandler));
+        irq_line.attach(Box::new(NvmeIrqHandler {
+            controller: controller.clone(),
+        }));
         irq_line.unmask();
     }
 

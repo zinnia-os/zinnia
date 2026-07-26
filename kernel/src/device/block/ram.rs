@@ -1,6 +1,6 @@
 //! A block device backed entirely by a region of physical memory.
 
-use super::{BlockCompletion, BlockDevice, BlockIo, BlockOp};
+use super::{BioRequest, BlockDevice, BlockLimits, BlockOp};
 use crate::{
     device::Device,
     memory::PhysAddr,
@@ -42,35 +42,42 @@ impl BlockDevice for RamDisk {
         self.lba_count
     }
 
-    fn submit_io(&self, io: &mut BlockIo) -> EResult<BlockCompletion> {
-        let Some(end_lba) = io.lba().checked_add(io.num_lbas() as u64) else {
-            return Err(Errno::EOVERFLOW);
+    fn limits(&self) -> BlockLimits {
+        BlockLimits {
+            max_lbas: usize::MAX,
+            max_segments: usize::MAX,
+        }
+    }
+
+    fn submit_bio(&self, bio: &Arc<BioRequest>) -> EResult<()> {
+        let Some(end_lba) = bio.lba().checked_add(bio.num_lbas() as u64) else {
+            bio.complete(Err(Errno::EOVERFLOW));
+            return Ok(());
         };
-
         if end_lba > self.lba_count {
-            return match io.op() {
-                BlockOp::Read => Ok(BlockCompletion { lbas: 0 }),
+            bio.complete(match bio.op() {
+                BlockOp::Read => Ok(0),
                 BlockOp::Write => Err(Errno::ENOSPC),
-            };
+            });
+            return Ok(());
         }
 
-        let bytes = io.num_lbas() * LBA_SIZE;
-        let segment = io.first_segment();
-
-        let store = (self.base + io.lba() as usize * LBA_SIZE).as_hhdm::<u8>();
-        let buffer = segment.phys().as_hhdm::<u8>();
-
-        // The backing store and the I/O buffer never overlap.
-        unsafe {
-            match io.op() {
-                BlockOp::Read => core::ptr::copy_nonoverlapping(store, buffer, bytes),
-                BlockOp::Write => core::ptr::copy_nonoverlapping(buffer, store, bytes),
+        let mut lba = bio.lba() as usize;
+        for seg in bio.segments() {
+            let store = (self.base + lba * LBA_SIZE).as_hhdm::<u8>();
+            let buffer = seg.phys().as_hhdm::<u8>();
+            // The backing store and the I/O buffer never overlap.
+            unsafe {
+                match bio.op() {
+                    BlockOp::Read => core::ptr::copy_nonoverlapping(store, buffer, seg.len()),
+                    BlockOp::Write => core::ptr::copy_nonoverlapping(buffer, store, seg.len()),
+                }
             }
+            lba += seg.len() / LBA_SIZE;
         }
 
-        Ok(BlockCompletion {
-            lbas: io.num_lbas(),
-        })
+        bio.complete(Ok(bio.num_lbas()));
+        Ok(())
     }
 }
 
