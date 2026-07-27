@@ -104,6 +104,8 @@ pub const CR4_PKE: usize = 1 << 22;
 pub const CR4_CET: usize = 1 << 23;
 /// Enable protection keys for supervisor-mode pages
 pub const CR4_PKS: usize = 1 << 24;
+/// Enable Flexible Return and Event Delivery (FRED)
+pub const CR4_FRED: usize = 1 << 32;
 
 // Model specific registers
 pub const MSR_EFER: u32 = 0xC0000080;
@@ -130,6 +132,13 @@ pub const MSR_SFMASK: u32 = 0xC0000084;
 pub const MSR_FS_BASE: u32 = 0xC0000100;
 pub const MSR_GS_BASE: u32 = 0xC0000101;
 pub const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
+/// Flexible Return and Event Delivery (FRED)
+pub const MSR_FRED_CONFIG: u32 = 0x000001D4;
+pub const MSR_FRED_RSP0: u32 = 0x000001CC;
+pub const MSR_FRED_RSP1: u32 = 0x000001CD;
+pub const MSR_FRED_RSP2: u32 = 0x000001CE;
+pub const MSR_FRED_RSP3: u32 = 0x000001CF;
+pub const MSR_FRED_STKLVLS: u32 = 0x000001D0;
 
 pub const CPL_USER: u8 = 0b11;
 pub const CPL_KERNEL: u8 = 0b00;

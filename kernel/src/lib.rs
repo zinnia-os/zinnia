@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(fn_align)]
 #![feature(negative_impls)]
 #![feature(allocator_api)]
 #![feature(str_from_raw_parts)]
