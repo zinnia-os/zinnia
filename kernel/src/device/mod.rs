@@ -19,6 +19,7 @@ pub mod kmsg;
 pub mod memfiles;
 pub mod net;
 pub mod pci;
+pub mod serial;
 pub mod tty;
 pub mod usb;
 pub mod vt;

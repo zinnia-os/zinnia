@@ -2,7 +2,10 @@ pub mod driver;
 
 use crate::{
     boot::BootInfo,
-    memory::view::{MemoryView, Register},
+    memory::{
+        PhysAddr,
+        view::{MemoryView, Register},
+    },
     util::once::Once,
 };
 use alloc::{slice, string::String, vec::Vec};
@@ -134,6 +137,43 @@ impl<'a, 'b> Node<'a, 'b> {
             offset: self.start,
         }
     }
+
+    /// Reads the first cell of a `u32` property, or `default` if it is absent.
+    pub fn first_cell(&'b self, name: &[u8], default: u32) -> u32 {
+        self.properties()
+            .find(|p| p.name() == name)
+            .and_then(|p| Some(u32::from_be(*p.as_u32()?.first()?)))
+            .unwrap_or(default)
+    }
+
+    /// Reads the `index`-th (address, size) pair from this node's `reg` property.
+    pub fn reg(&'b self, index: usize) -> Option<(u64, u64)> {
+        let root = self.tree.root();
+        let addr_cells = root.first_cell(b"#address-cells", 2);
+        let size_cells = root.first_cell(b"#size-cells", 2);
+
+        let prop = self.properties().find(|p| p.name() == b"reg")?;
+        let cells = prop.as_u32()?;
+        let mut idx = index * (addr_cells + size_cells) as usize;
+        let addr = read_cells(cells, &mut idx, addr_cells)?;
+        let size = read_cells(cells, &mut idx, size_cells)?;
+        Some((addr, size))
+    }
+
+    /// Like [`Node::reg`], but with the address as a [`PhysAddr`].
+    pub fn reg_pair(&'b self, index: usize) -> Option<(PhysAddr, u64)> {
+        let (addr, size) = self.reg(index)?;
+        Some((PhysAddr::from(addr as usize), size))
+    }
+}
+
+fn read_cells(cells: &[u32], idx: &mut usize, count: u32) -> Option<u64> {
+    let mut value = 0u64;
+    for _ in 0..count {
+        value = (value << 32) | u32::from_be(*cells.get(*idx)?) as u64;
+        *idx += 1;
+    }
+    Some(value)
 }
 
 impl fmt::Display for DeviceTree<'_> {
