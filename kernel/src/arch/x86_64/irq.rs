@@ -231,7 +231,7 @@ per_cpu! {
 }
 
 /// Invoked by an interrupt stub.
-unsafe extern "C" fn idt_handler(context: *mut Context) {
+pub unsafe extern "C" fn idt_handler(context: *mut Context) {
     let context = unsafe { context.as_mut().unwrap() };
     let isr = context.isr as u8;
     let from_user = context.cs & CPL_USER as u64 == CPL_USER as u64;

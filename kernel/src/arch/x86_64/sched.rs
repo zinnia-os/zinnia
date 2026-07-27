@@ -3,7 +3,7 @@ use super::{
     asm::{rdmsr, wrmsr},
     consts::{self},
     cpu::get_per_cpu,
-    system::{apic, gdt::Gdt},
+    system::{apic, fred, gdt::Gdt},
     system::{apic::LAPIC, gdt::TSS},
 };
 use crate::{
@@ -177,7 +177,11 @@ pub(in crate::arch) unsafe fn switch(from: *const Task, to: *const Task) -> *mut
         let to_context = &mut *to.executor.get();
 
         let cpu = ARCH_DATA.get();
-        TSS.get().lock().rsp0 = to.kernel_stack.top().into();
+        if fred::enabled() {
+            fred::set_rsp0(to.kernel_stack.top().into());
+        } else {
+            TSS.get().lock().rsp0 = to.kernel_stack.top().into();
+        }
 
         if from.is_user() {
             cpu.fpu_save.get()(from_context.fpu_region.as_mut_ptr());
@@ -405,13 +409,20 @@ pub(in crate::arch) unsafe fn jump_to_user(ip: VirtAddr, sp: VirtAddr) -> ! {
 
 pub(in crate::arch) unsafe fn jump_to_context(context: *mut Context) -> ! {
     unsafe {
+        if fred::enabled() {
+            asm!(
+                "mov rsp, {context}",
+                 "jmp {interrupt_return}",
+                 context = in(reg) context,
+                 interrupt_return = sym crate::arch::x86_64::system::fred::interrupt_return
+            );
+        }
         asm!(
             "mov rsp, {context}",
             "jmp {interrupt_return}",
             context = in(reg) context,
             interrupt_return = sym crate::arch::x86_64::irq::interrupt_return
         );
-
         unreachable!();
     }
 }

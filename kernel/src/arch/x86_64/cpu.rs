@@ -6,7 +6,7 @@ use crate::{
         irq,
         system::{
             apic::{self, LAPIC, LocalApic},
-            gdt, idt,
+            fred, gdt, idt,
         },
     },
     clock,
@@ -60,8 +60,6 @@ pub(in crate::arch) fn get_per_cpu() -> *mut CpuData {
 
 pub fn setup_bsp() {
     apic::disable_legacy_pic();
-    idt::init();
-    idt::set_idt();
 
     unsafe {
         let efer = super::asm::rdmsr(consts::MSR_EFER);
@@ -71,13 +69,16 @@ pub fn setup_bsp() {
         super::asm::wrmsr(consts::MSR_GS_BASE, &raw const LD_PERCPU_START as u64);
         super::asm::wrmsr(consts::MSR_FS_BASE, 0);
     }
+
+    // Check if fred is supported and if not setup the IDT.
+    if !fred::check() {
+        idt::init();
+        idt::set_idt();
+    }
 }
 
 pub(super) fn setup_core(context: &'static CpuData) {
     context.present.store(true, Ordering::Release);
-
-    let mut cr0: usize;
-    let mut cr4: usize;
 
     unsafe {
         // Set FSGSBASE contents.
@@ -96,9 +97,11 @@ pub(super) fn setup_core(context: &'static CpuData) {
     // Load a GDT and TSS.
     gdt::init();
 
-    // Load the IDT.
-    // Note: The IDT itself is global, but still needs to be loaded for each CPU.
-    idt::set_idt();
+    // if fred was not marked as enabled by fred::check() setup the IDT
+    if !fred::check() {
+        // Note: The IDT itself is global, but still needs to be loaded for each CPU.
+        idt::set_idt();
+    }
 
     // Enable the `syscall` extension.
     unsafe {
@@ -119,7 +122,17 @@ pub(super) fn setup_core(context: &'static CpuData) {
             consts::MSR_SFMASK,
             consts::RFLAGS_AC | consts::RFLAGS_DF | consts::RFLAGS_IF,
         );
+    }
 
+    // If fred was marked as enabled by fred::check() setup fred.
+    if fred::enabled() {
+        fred::init();
+    }
+
+    let mut cr0: usize;
+    let mut cr4: usize;
+
+    unsafe {
         asm!("mov {cr0}, cr0", cr0 = out(reg) cr0, options(nostack));
         asm!("mov {cr4}, cr4", cr4 = out(reg) cr4, options(nostack));
     }
