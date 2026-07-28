@@ -77,6 +77,14 @@ impl LineDiscipline {
         self.termios.c_iflag & ICRNL != 0
     }
 
+    fn is_igncr(&self) -> bool {
+        self.termios.c_iflag & IGNCR != 0
+    }
+
+    fn is_inlcr(&self) -> bool {
+        self.termios.c_iflag & INLCR != 0
+    }
+
     fn cc(&self, idx: u32) -> u8 {
         self.termios.c_cc[idx as usize]
     }
@@ -98,8 +106,17 @@ impl LineDiscipline {
 
     pub fn input_char(&mut self, mut byte: u8, tty: &Tty) -> Vec<u8> {
         let mut output = Vec::new();
-        if self.is_icrnl() && byte == b'\r' {
-            byte = b'\n';
+
+        // CR/NL input translation.
+        if byte == b'\r' {
+            if self.is_igncr() {
+                return output;
+            }
+            if self.is_icrnl() {
+                byte = b'\n';
+            }
+        } else if byte == b'\n' && self.is_inlcr() {
+            byte = b'\r';
         }
 
         // Signal generation.
