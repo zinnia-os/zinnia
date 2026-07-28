@@ -118,10 +118,8 @@ pub(super) fn setup_core(context: &'static CpuData) {
             consts::MSR_LSTAR,
             irq::amd64_syscall_stub as *const () as u64,
         );
-        super::asm::wrmsr(
-            consts::MSR_SFMASK,
-            consts::RFLAGS_AC | consts::RFLAGS_DF | consts::RFLAGS_IF,
-        );
+        // Mask all RFLAGS except for BRKI which is reserved.
+        super::asm::wrmsr(consts::MSR_SFMASK, !consts::RFLAGS_BRKI);
     }
 
     // If fred was marked as enabled by fred::check() setup fred.

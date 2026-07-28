@@ -2,6 +2,8 @@
 
 /// Carry floating
 pub const RFLAGS_CF: u64 = 1 << 0;
+/// I/O Trap
+pub const RFLAGS_BRKI: u64 = 1 << 1;
 /// Parity Flag
 pub const RFLAGS_PF: u64 = 1 << 2;
 /// Auxiliary Carry Flag
