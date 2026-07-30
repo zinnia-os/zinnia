@@ -14,7 +14,7 @@ pub static START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 
 #[used]
 #[unsafe(link_section = ".boot")]
-pub static BASE_REVISION: BaseRevision = BaseRevision::new();
+pub static BASE_REVISION: BaseRevision = BaseRevision::with_revision(6);
 
 #[used]
 #[unsafe(link_section = ".boot.fini")]
@@ -52,6 +52,10 @@ pub static DTB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
 
 static mut MEMMAP_BUF: [PhysMemory; 128] = [PhysMemory::empty(); _];
 static mut FILE_BUF: [BootFile; 32] = [BootFile::new(); _];
+
+const STRING_BUF_LEN: usize = 2048;
+static mut CMDLINE_BUF: [u8; STRING_BUF_LEN] = [0; _];
+static mut FILE_NAME_BUF: [u8; STRING_BUF_LEN] = [0; _];
 
 pub fn entry() -> ! {
     crate::arch::cpu::setup_bsp();
@@ -124,13 +128,17 @@ pub fn entry() -> ! {
     }
 
     // Convert the command line from bytes to UTF-8 if there is any.
-    info.command_line = {
-        let line_buf = COMMAND_LINE_REQUEST.get_response().unwrap().cmdline();
-        CmdLine::new(line_buf.to_str().unwrap_or_default())
+    info.command_line = unsafe {
+        let line = COMMAND_LINE_REQUEST.get_response().unwrap().cmdline();
+        let len = line.count_bytes().min(STRING_BUF_LEN);
+        let buf = &raw mut CMDLINE_BUF as *mut u8;
+        core::ptr::copy_nonoverlapping(line.as_ptr().cast(), buf, len);
+        CmdLine::new(str::from_utf8(core::slice::from_raw_parts(buf, len)).unwrap_or_default())
     };
 
-    // The RSDP is a physical address.
-    info.rsdp_addr = RSDP_REQUEST.get_response().map(|x| x.address().into());
+    info.rsdp_addr = RSDP_REQUEST
+        .get_response()
+        .map(|x| (x.address() - info.hhdm_address.unwrap().value()).into());
 
     // The FDT is a virtual address.
     info.fdt_addr = DTB_REQUEST.get_response().map(|x| {
@@ -143,16 +151,23 @@ pub fn entry() -> ! {
 
     // Get all modules.
     if let Some(response) = MODULE_REQUEST.get_response() {
+        let mut name_offset = 0;
         for (i, entry) in response.modules().iter().enumerate() {
             unsafe {
+                // Split off any parts of the path that come before the actual file name.
+                let name = entry.path().to_str().unwrap().rsplit_once('/').unwrap().1;
+                assert!(name_offset + name.len() <= STRING_BUF_LEN);
+                let copied = (&raw mut FILE_NAME_BUF as *mut u8).add(name_offset);
+                core::ptr::copy_nonoverlapping(name.as_ptr(), copied, name.len());
+                name_offset += name.len();
+
                 FILE_BUF[i] = BootFile {
                     // We need files to be in physical form.
                     data: (entry.addr() as usize)
                         .wrapping_sub(info.hhdm_address.unwrap().value())
                         .into(),
                     length: entry.size() as usize,
-                    // Split off any parts of the path that come before the actual file name.
-                    name: entry.path().to_str().unwrap().rsplit_once('/').unwrap().1,
+                    name: str::from_utf8_unchecked(core::slice::from_raw_parts(copied, name.len())),
                 }
             };
         }
