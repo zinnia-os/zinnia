@@ -542,7 +542,7 @@ pub fn getdents(fd: i32, addr: VirtAddr, len: usize) -> EResult<usize> {
 
     let dir = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
     let flags = *dir.flags.lock();
-    if !flags.contains(OpenFlags::Read | OpenFlags::Directory) {
+    if !flags.contains(OpenFlags::Read) {
         return Err(Errno::EBADF);
     };
 

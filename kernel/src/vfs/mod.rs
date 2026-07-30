@@ -231,6 +231,12 @@ pub fn get_dir_entries(
     let mut num_read = 0;
     let start_offset = *offset;
 
+    let parent_ino = path
+        .lookup_parent()
+        .ok()
+        .and_then(|p| p.entry.get_inode())
+        .map_or(inode.id, |parent| parent.id);
+
     // Read `.` and `..` entries.
     if *offset == 0 {
         buffer[num_read] = dirent {
@@ -246,7 +252,7 @@ pub fn get_dir_entries(
 
     if (*offset == 1 || num_read == 1) && num_read < buffer.len() {
         buffer[num_read] = dirent {
-            d_ino: inode.id,
+            d_ino: parent_ino,
             d_off: 1,
             d_reclen: size_of::<dirent>() as _,
             d_type: DT_DIR,
