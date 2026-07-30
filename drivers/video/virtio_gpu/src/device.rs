@@ -1,502 +1,558 @@
-use crate::spec::*;
+use crate::{
+    command::{
+        CapsetInfo, CreateResource2d, CreateResource3d, FlushResource, GetCapset, GetCapsetInfo,
+        GetDisplayInfo, Rect, ScanoutMode, SetScanout, Submit3d, TransferHost3d, TransferToHost2d,
+        UpdateCursor, decode_capset_info, decode_display_info,
+    },
+    context::RenderContext,
+    dma::DmaRegion,
+    error::GpuError,
+    queue::{ControlQueue, CursorQueue, Fencing},
+    resource::{GpuBuffer, Resource},
+    spec,
+};
 use core::any::Any;
-use virtio::{VirtQueue, VirtioDevice};
 use zinnia::{
     alloc::{sync::Arc, vec, vec::Vec},
     arch,
-    core::sync::atomic::{AtomicU32, Ordering},
     device::drm::{
         Device, DeviceState, DrmFile, IdAllocator,
         modes::{DMT_MODES, synthesize_preferred_mode},
-        object::{AtomicState, BufferObject, Connector, Crtc, Encoder, Framebuffer, Plane},
+        object::{
+            AtomicState, BufferObject, Connector, Crtc, Encoder, Framebuffer, ModeObject, Plane,
+        },
     },
     error, log,
-    memory::{AllocFlags, KernelAlloc, PageAllocator, PhysAddr},
+    memory::{UserPtr, VirtAddr},
     posix::errno::{EResult, Errno},
     uapi::drm::{
-        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, drm_mode_connector_state,
+        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, DRM_PLANE_TYPE_PRIMARY,
+        drm_mode_connector_state, drm_mode_connector_type, virtgpu,
     },
     util::mutex::spin::SpinMutex,
 };
-use zinnia::{memory::OwnedPhysPages, uapi::drm::drm_mode_connector_type};
 
-pub struct VirtioGpuDevice {
-    state: DeviceState,
-    virtio: Arc<SpinMutex<VirtioDevice>>,
-    ctrl_queue: Arc<SpinMutex<VirtQueue>>,
-    cursor_queue: Arc<SpinMutex<VirtQueue>>,
-    resource_id_counter: AtomicU32,
-    scanouts: SpinMutex<Vec<ScanoutInfo>>,
-    active_resource: AtomicU32, // Track which resource is active
-    obj_counter: IdAllocator,
-    cursor_resource: AtomicU32, // Resource ID of current cursor image (0 = none)
-    cursor_x: AtomicU32,
-    cursor_y: AtomicU32,
-    cursor_hot_x: AtomicU32,
-    cursor_hot_y: AtomicU32,
-}
+const MAX_EXECBUFFER_SIZE: usize = 1 << 20;
+const DUMB_BITS_PER_PIXEL: u32 = 32;
 
-struct ScanoutInfo {
+struct Scanout {
     id: u32,
     width: u32,
     height: u32,
-    current_resource: Option<u32>,
+    resource_id: Option<u32>,
+}
+
+#[derive(Default)]
+struct CursorState {
+    resource: Option<Arc<Resource>>,
+    scanout_id: u32,
+    x: i32,
+    y: i32,
+    hot_x: u32,
+    hot_y: u32,
+}
+
+pub struct GpuFile {
+    context: SpinMutex<Option<Arc<RenderContext>>>,
+}
+
+impl GpuFile {
+    fn new() -> Self {
+        Self {
+            context: SpinMutex::new(None),
+        }
+    }
+}
+
+pub struct VirtioGpuDevice {
+    state: DeviceState,
+    ctrl: Arc<ControlQueue>,
+    cursor: Arc<CursorQueue>,
+    scanouts: SpinMutex<Vec<Scanout>>,
+    cursor_state: SpinMutex<CursorState>,
+    capsets: Vec<CapsetInfo>,
+    accelerated: bool,
+    resource_ids: IdAllocator,
+    context_ids: IdAllocator,
+    obj_counter: IdAllocator,
 }
 
 impl VirtioGpuDevice {
     pub fn new(
-        virtio: VirtioDevice,
-        ctrl_queue: SpinMutex<VirtQueue>,
-        cursor_queue: SpinMutex<VirtQueue>,
-    ) -> EResult<Self> {
-        let device = Self {
-            state: DeviceState::new(),
-            virtio: Arc::new(SpinMutex::new(virtio)),
-            ctrl_queue: Arc::new(ctrl_queue),
-            cursor_queue: Arc::new(cursor_queue),
-            resource_id_counter: AtomicU32::new(1),
-            scanouts: SpinMutex::new(Vec::new()),
-            active_resource: AtomicU32::new(0),
-            obj_counter: IdAllocator::new(),
-            cursor_resource: AtomicU32::new(0),
-            cursor_x: AtomicU32::new(0),
-            cursor_y: AtomicU32::new(0),
-            cursor_hot_x: AtomicU32::new(0),
-            cursor_hot_y: AtomicU32::new(0),
+        ctrl: Arc<ControlQueue>,
+        cursor: Arc<CursorQueue>,
+        accelerated: bool,
+        num_capsets: u32,
+    ) -> Result<Self, GpuError> {
+        let modes = Self::query_display_info(&ctrl)?;
+        let capsets = Self::query_capsets(&ctrl, num_capsets);
+
+        let scanouts: Vec<_> = modes
+            .into_iter()
+            .map(|mode| Scanout {
+                id: mode.id,
+                width: mode.width,
+                height: mode.height,
+                resource_id: None,
+            })
+            .collect();
+
+        let obj_counter = IdAllocator::new();
+        let state = DeviceState::new();
+
+        // Init DRM objects.
+        {
+            let mut crtcs = Vec::new();
+            let mut planes = Vec::new();
+            let mut encoders = Vec::new();
+            let mut connectors = Vec::new();
+
+            for scanout in scanouts.iter() {
+                let crtc = Arc::new(Crtc::new(obj_counter.alloc()));
+
+                planes.push(Arc::new(Plane::new(
+                    obj_counter.alloc(),
+                    vec![crtc.clone()],
+                    DRM_PLANE_TYPE_PRIMARY,
+                    vec![DRM_FORMAT_XRGB8888],
+                )));
+                planes.push(Arc::new(Plane::new(
+                    obj_counter.alloc(),
+                    vec![crtc.clone()],
+                    DRM_PLANE_TYPE_CURSOR,
+                    vec![DRM_FORMAT_ARGB8888],
+                )));
+
+                let encoder = Arc::new(Encoder::new(
+                    obj_counter.alloc(),
+                    vec![crtc.clone()],
+                    crtc.clone(),
+                ));
+                encoders.push(encoder.clone());
+
+                let preferred = synthesize_preferred_mode(scanout.width, scanout.height);
+                let mut modes = vec![preferred];
+                modes.extend(
+                    DMT_MODES
+                        .iter()
+                        .filter(|mode| {
+                            mode.hdisplay != preferred.hdisplay
+                                || mode.vdisplay != preferred.vdisplay
+                        })
+                        .cloned(),
+                );
+
+                connectors.push(Arc::new(Connector::new(
+                    obj_counter.alloc(),
+                    drm_mode_connector_state::Connected,
+                    modes,
+                    vec![encoder],
+                    drm_mode_connector_type::Virtual,
+                    state.next_connector_type_id(drm_mode_connector_type::Virtual),
+                )));
+
+                crtcs.push(crtc);
+            }
+
+            state.crtcs.lock().extend(crtcs);
+            state.encoders.lock().extend(encoders);
+            state.connectors.lock().extend(connectors);
+            state.planes.lock().extend(planes);
+        }
+
+        Ok(Self {
+            state,
+            ctrl,
+            cursor,
+            scanouts: SpinMutex::new(scanouts),
+            cursor_state: SpinMutex::new(CursorState::default()),
+            capsets,
+            accelerated,
+            resource_ids: IdAllocator::new(),
+            context_ids: IdAllocator::new(),
+            obj_counter,
+        })
+    }
+
+    fn query_display_info(ctrl: &ControlQueue) -> Result<Vec<ScanoutMode>, GpuError> {
+        let mut response = vec![0u8; spec::resp_display_info::SIZE];
+        ctrl.execute(0, &GetDisplayInfo, Fencing::Unfenced, &mut response)?;
+        decode_display_info(&response)
+    }
+
+    fn query_capsets(ctrl: &ControlQueue, num_capsets: u32) -> Vec<CapsetInfo> {
+        let mut capsets = Vec::new();
+
+        for index in 0..num_capsets {
+            let mut response = vec![0u8; spec::resp_capset_info::SIZE];
+            let command = GetCapsetInfo { index };
+            if ctrl
+                .execute(0, &command, Fencing::Unfenced, &mut response)
+                .is_err()
+            {
+                continue;
+            }
+
+            match decode_capset_info(&response) {
+                Ok(info) => {
+                    log!(
+                        "Capset {} version {} ({} bytes)",
+                        info.id,
+                        info.max_version,
+                        info.max_size
+                    );
+                    capsets.push(info);
+                }
+                Err(error) => error!("Failed to decode capset {index}: {error}"),
+            }
+        }
+
+        capsets
+    }
+
+    fn scanout_for_crtc(&self, crtc_id: u32) -> Option<u32> {
+        let index = self
+            .state
+            .crtcs
+            .lock()
+            .iter()
+            .position(|crtc| crtc.id() == crtc_id)?;
+        self.scanouts.lock().get(index).map(|scanout| scanout.id)
+    }
+
+    fn buffer_of(framebuffer: &Framebuffer) -> Result<&GpuBuffer, GpuError> {
+        (framebuffer.buffer.as_ref() as &dyn Any)
+            .downcast_ref::<GpuBuffer>()
+            .ok_or(GpuError::UnknownResource)
+    }
+
+    fn gpu_buffer(buffer: &Arc<dyn BufferObject>) -> Result<&GpuBuffer, GpuError> {
+        (buffer.as_ref() as &dyn Any)
+            .downcast_ref::<GpuBuffer>()
+            .ok_or(GpuError::UnknownResource)
+    }
+
+    fn present(&self, crtc_id: u32, framebuffer: &Framebuffer) -> Result<(), GpuError> {
+        let scanout_id = self
+            .scanout_for_crtc(crtc_id)
+            .ok_or(GpuError::InvalidScanoutId)?;
+        let buffer = Self::buffer_of(framebuffer)?;
+        let resource_id = buffer.resource().id();
+        let area = Rect::sized(framebuffer.width, framebuffer.height);
+
+        if buffer.is_dumb() {
+            self.ctrl.execute_checked(
+                0,
+                &TransferToHost2d {
+                    resource_id,
+                    rect: area,
+                    offset: 0,
+                },
+                Fencing::Unfenced,
+            )?;
+        }
+
+        let rebind = {
+            let scanouts = self.scanouts.lock();
+            scanouts
+                .iter()
+                .find(|scanout| scanout.id == scanout_id)
+                .is_none_or(|scanout| {
+                    scanout.resource_id != Some(resource_id)
+                        || scanout.width != framebuffer.width
+                        || scanout.height != framebuffer.height
+                })
         };
 
-        // Get display info
-        device.get_display_info()?;
+        if rebind {
+            self.ctrl.execute_checked(
+                0,
+                &SetScanout {
+                    scanout_id,
+                    resource_id,
+                    rect: area,
+                },
+                Fencing::Unfenced,
+            )?;
 
-        Ok(device)
+            let mut scanouts = self.scanouts.lock();
+            if let Some(scanout) = scanouts.iter_mut().find(|scanout| scanout.id == scanout_id) {
+                scanout.resource_id = Some(resource_id);
+                scanout.width = framebuffer.width;
+                scanout.height = framebuffer.height;
+            }
+        }
+
+        self.ctrl.execute_checked(
+            0,
+            &FlushResource {
+                resource_id,
+                rect: area,
+            },
+            Fencing::Unfenced,
+        )?;
+
+        Ok(())
     }
 
-    fn alloc_resource_id(&self) -> u32 {
-        self.resource_id_counter.fetch_add(1, Ordering::SeqCst)
+    fn file_state<'a>(&self, file: &'a DrmFile) -> EResult<&'a GpuFile> {
+        file.driver_private::<GpuFile>().ok_or(Errno::ENOTTY)
     }
 
-    fn send_ctrl_command<T: Copy, R: Copy>(
-        virtio: &SpinMutex<VirtioDevice>,
-        ctrl_queue: &SpinMutex<VirtQueue>,
-        cmd: &T,
-    ) -> EResult<R> {
+    fn render_context(&self, file: &DrmFile) -> Result<Arc<RenderContext>, GpuError> {
+        let gpu_file = self
+            .file_state(file)
+            .map_err(|_| GpuError::NoRenderContext)?;
+
+        if let Some(context) = gpu_file.context.lock().clone() {
+            return Ok(context);
+        }
+
+        if !self.accelerated {
+            return Err(GpuError::NotAccelerated);
+        }
+
+        let context = Arc::new(RenderContext::create(
+            self.ctrl.clone(),
+            self.context_ids.alloc(),
+            "zinnia",
+        )?);
+
+        Ok(gpu_file.context.lock().get_or_insert(context).clone())
+    }
+
+    fn capset(&self, id: u32, version: u32) -> Result<CapsetInfo, GpuError> {
+        self.capsets
+            .iter()
+            .find(|info| info.id == id && info.max_version >= version)
+            .copied()
+            .ok_or(GpuError::InvalidParameter)
+    }
+
+    fn resource_by_handle(&self, file: &DrmFile, handle: u32) -> EResult<Arc<Resource>> {
+        let buffer = file.get_buffer(handle)?;
+        Ok(Self::gpu_buffer(&buffer)?.resource().clone())
+    }
+
+    fn ioctl_getparam(&self, arg: VirtAddr) -> EResult<()> {
+        let ptr = UserPtr::<virtgpu::drm_virtgpu_getparam>::new(arg);
+        let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let value: u32 = match val.param {
+            virtgpu::VIRTGPU_PARAM_3D_FEATURES => self.accelerated as u32,
+            virtgpu::VIRTGPU_PARAM_CAPSET_QUERY_FIX => 1,
+            _ => 0,
+        };
+
+        UserPtr::<u32>::new(VirtAddr::new(val.value as usize))
+            .write(value)
+            .ok_or(Errno::EFAULT)
+    }
+
+    fn ioctl_get_caps(&self, arg: VirtAddr) -> EResult<()> {
+        let ptr = UserPtr::<virtgpu::drm_virtgpu_get_caps>::new(arg);
+        let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let info = self.capset(val.cap_set_id, val.cap_set_ver)?;
+        let command = GetCapset {
+            capset_id: val.cap_set_id,
+            version: val.cap_set_ver,
+            max_size: info.max_size as usize,
+        };
+
+        let mut response = vec![0u8; spec::resp_capset::DATA + info.max_size as usize];
+        self.ctrl
+            .execute(0, &command, Fencing::Unfenced, &mut response)?;
+
+        let wanted = (val.size as usize).min(info.max_size as usize);
+        let payload = response
+            .get(spec::resp_capset::DATA..spec::resp_capset::DATA + wanted)
+            .ok_or(Errno::EIO)?;
+
+        UserPtr::<u8>::new(VirtAddr::new(val.addr as usize))
+            .write_slice(payload)
+            .ok_or(Errno::EFAULT)
+    }
+
+    fn ioctl_resource_create(&self, file: &DrmFile, arg: VirtAddr) -> EResult<()> {
+        let mut ptr = UserPtr::<virtgpu::drm_virtgpu_resource_create>::new(arg);
+        let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let context = self.render_context(file)?;
         let page_size = arch::virt::get_page_size();
-        let cmd_size = core::mem::size_of::<T>();
-        let cmd_pages = cmd_size.div_ceil(page_size);
-        let cmd_buffer = OwnedPhysPages::new(cmd_pages, AllocFlags::empty())?;
-        let cmd_ptr = cmd_buffer.as_hhdm::<T>();
-        unsafe {
-            core::ptr::write_volatile(cmd_ptr, *cmd);
-        }
+        let size = (val.size as usize)
+            .max(page_size)
+            .next_multiple_of(page_size);
+        let backing = Some(DmaRegion::new(size)?);
 
-        // Allocate response buffer
-        let resp = OwnedPhysPages::new(1, AllocFlags::empty())?;
-        let resp_ptr = resp.as_hhdm::<R>();
-
-        let buffers = vec![
-            (cmd_buffer.phys(), cmd_size, false),
-            (resp.phys(), core::mem::size_of::<R>(), true),
-        ];
-
-        {
-            let mut queue = ctrl_queue.lock();
-            queue.add_buffer(&buffers)?;
-            virtio.lock().notify_queue(&queue);
-        }
-
-        // Wait for response
-        loop {
-            let mut queue = ctrl_queue.lock();
-            if let Some((desc_id, _)) = queue.get_used() {
-                queue.release_used_chain(desc_id);
-                break;
-            }
-            drop(queue);
-
-            core::hint::spin_loop();
-        }
-
-        let response = unsafe { core::ptr::read_volatile(resp_ptr) };
-        Ok(response)
-    }
-
-    fn send_command<T: Copy, R: Copy>(&self, cmd: &T) -> EResult<R> {
-        Self::send_ctrl_command(&self.virtio, &self.ctrl_queue, cmd)
-    }
-
-    fn get_display_info(&self) -> EResult<()> {
-        let cmd = VirtioGpuGetDisplayInfo {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_DISPLAY_INFO),
-        };
-
-        let resp: VirtioGpuRespDisplayInfo = self.send_command(&cmd)?;
-
-        if resp.hdr.type_ != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
-            error!("Failed to get display info: {:?}", resp.hdr);
-            return Err(Errno::EIO);
-        }
-
-        let mut scanouts = self.scanouts.lock();
-        for (i, pmode) in resp.pmodes.iter().enumerate() {
-            if pmode.enabled != 0 {
-                // Use the device's native resolution
-                let width = pmode.r.width;
-                let height = pmode.r.height;
-                scanouts.push(ScanoutInfo {
-                    id: i as u32,
-                    width,
-                    height,
-                    current_resource: None,
-                });
-            }
-        }
-
-        if scanouts.is_empty() {
-            error!("No enabled scanouts found");
-            return Err(Errno::ENODEV);
-        }
-
-        Ok(())
-    }
-
-    pub fn create_resource_2d(
-        &self,
-        resource_id: u32,
-        width: u32,
-        height: u32,
-        format: u32,
-    ) -> EResult<()> {
-        let cmd = VirtioGpuResourceCreate2d {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D),
-            resource_id,
-            format,
-            width,
-            height,
-        };
-
-        let resp: VirtioGpuCtrlHdr = self.send_command(&cmd)?;
-
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            error!(
-                "Failed to create 2D resource (response type=0x{:x})",
-                resp.type_
-            );
-            return Err(Errno::EIO);
-        }
-        Ok(())
-    }
-
-    fn detach_backing_raw(
-        virtio: &SpinMutex<VirtioDevice>,
-        ctrl_queue: &SpinMutex<VirtQueue>,
-        resource_id: u32,
-    ) -> EResult<()> {
-        let cmd = VirtioGpuResourceDetachBacking {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING),
-            resource_id,
-            padding: 0,
-        };
-
-        let resp: VirtioGpuCtrlHdr = Self::send_ctrl_command(virtio, ctrl_queue, &cmd)?;
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            return Err(Errno::EIO);
-        }
-        Ok(())
-    }
-
-    fn unref_resource_raw(
-        virtio: &SpinMutex<VirtioDevice>,
-        ctrl_queue: &SpinMutex<VirtQueue>,
-        resource_id: u32,
-    ) -> EResult<()> {
-        let cmd = VirtioGpuResourceUnref {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_UNREF),
-            resource_id,
-            padding: 0,
-        };
-
-        let resp: VirtioGpuCtrlHdr = Self::send_ctrl_command(virtio, ctrl_queue, &cmd)?;
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            return Err(Errno::EIO);
-        }
-        Ok(())
-    }
-
-    fn destroy_resource_raw(
-        virtio: &SpinMutex<VirtioDevice>,
-        ctrl_queue: &SpinMutex<VirtQueue>,
-        resource_id: u32,
-        has_backing: bool,
-    ) {
-        if has_backing {
-            Self::detach_backing_raw(virtio, ctrl_queue, resource_id).ok();
-        }
-        Self::unref_resource_raw(virtio, ctrl_queue, resource_id).ok();
-    }
-
-    pub fn attach_backing(&self, resource_id: u32, pages: &[PhysAddr]) -> EResult<()> {
-        let page_size = arch::virt::get_page_size();
-        // Allocate command buffer for header + memory entries
-        let cmd_size = core::mem::size_of::<VirtioGpuResourceAttachBacking>()
-            + pages.len() * core::mem::size_of::<VirtioGpuMemEntry>();
-        let cmd_pages = cmd_size.div_ceil(page_size);
-        let cmd = OwnedPhysPages::new(cmd_pages, AllocFlags::empty())?;
-        let cmd_ptr = cmd.as_hhdm::<u8>();
-
-        unsafe {
-            let hdr = cmd_ptr as *mut VirtioGpuResourceAttachBacking;
-            (*hdr).hdr = VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
-            (*hdr).resource_id = resource_id;
-            (*hdr).nr_entries = pages.len() as u32;
-
-            let entries_ptr = cmd_ptr.add(core::mem::size_of::<VirtioGpuResourceAttachBacking>())
-                as *mut VirtioGpuMemEntry;
-            for (i, &page_addr) in pages.iter().enumerate() {
-                let entry = &mut *entries_ptr.add(i);
-                entry.addr = page_addr.value() as u64;
-                entry.length = page_size as u32;
-                entry.padding = 0;
-            }
-        }
-
-        // Allocate response buffer
-        let resp = OwnedPhysPages::new(1, AllocFlags::empty())?;
-        let resp_ptr = resp.as_hhdm::<VirtioGpuCtrlHdr>();
-
-        let buffers = vec![
-            (cmd.phys(), cmd_size, false),
-            (resp.phys(), core::mem::size_of::<VirtioGpuCtrlHdr>(), true),
-        ];
-
-        {
-            let mut queue = self.ctrl_queue.lock();
-            queue.add_buffer(&buffers)?;
-
-            self.virtio.lock().notify_queue(&queue);
-        }
-
-        // Wait for response
-        loop {
-            let mut queue = self.ctrl_queue.lock();
-            if let Some((desc_id, _)) = queue.get_used() {
-                queue.release_used_chain(desc_id);
-                break;
-            }
-            drop(queue);
-            core::hint::spin_loop();
-        }
-
-        let resp = unsafe { core::ptr::read_volatile(resp_ptr) };
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            error!("Failed to attach backing");
-            return Err(Errno::EIO);
-        }
-
-        Ok(())
-    }
-
-    pub fn set_scanout(
-        &self,
-        scanout_id: u32,
-        resource_id: u32,
-        width: u32,
-        height: u32,
-    ) -> EResult<()> {
-        let cmd = VirtioGpuSetScanout {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_SET_SCANOUT),
-            r: VirtioGpuRect {
-                x: 0,
-                y: 0,
-                width,
-                height,
+        let resource_id = self.resource_ids.alloc();
+        self.ctrl.execute_checked(
+            context.id(),
+            &CreateResource3d {
+                resource_id,
+                target: val.target,
+                format: val.format,
+                bind: val.bind,
+                width: val.width,
+                height: val.height,
+                depth: val.depth,
+                array_size: val.array_size,
+                last_level: val.last_level,
+                nr_samples: val.nr_samples,
+                flags: val.flags,
             },
-            scanout_id,
-            resource_id,
-        };
+            Fencing::Unfenced,
+        )?;
 
-        let resp: VirtioGpuCtrlHdr = self.send_command(&cmd)?;
+        let resource = Resource::adopt(self.ctrl.clone(), resource_id, backing)?;
+        context.attach(resource_id)?;
 
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            error!("Failed to set scanout");
-            return Err(Errno::EIO);
-        }
+        let handle = self.obj_counter.alloc();
+        let buffer: Arc<dyn BufferObject> = Arc::new(GpuBuffer::new(
+            handle, resource, val.width, val.height, false,
+        ));
+        file.insert_buffer(buffer)?;
 
-        // Update scanout state.
-        let mut scanouts = self.scanouts.lock();
-        if let Some(scanout) = scanouts.iter_mut().find(|s| s.id == scanout_id) {
-            scanout.current_resource = Some(resource_id);
-            scanout.width = width;
-            scanout.height = height;
-        }
-
-        Ok(())
+        val.bo_handle = handle;
+        val.res_handle = resource_id;
+        ptr.write(val).ok_or(Errno::EFAULT)
     }
 
-    pub fn transfer_to_host_2d(
-        &self,
-        resource_id: u32,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    ) -> EResult<()> {
-        let cmd = VirtioGpuTransferToHost2d {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D),
-            r: VirtioGpuRect {
-                x,
-                y,
-                width,
-                height,
+    fn ioctl_resource_info(&self, file: &DrmFile, arg: VirtAddr) -> EResult<()> {
+        let mut ptr = UserPtr::<virtgpu::drm_virtgpu_resource_info>::new(arg);
+        let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let resource = self.resource_by_handle(file, val.bo_handle)?;
+        val.res_handle = resource.id();
+        val.size = resource.size() as u32;
+        val.blob_mem = 0;
+
+        ptr.write(val).ok_or(Errno::EFAULT)
+    }
+
+    fn ioctl_map(&self, file: &DrmFile, arg: VirtAddr) -> EResult<()> {
+        let mut ptr = UserPtr::<virtgpu::drm_virtgpu_map>::new(arg);
+        let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let buffer = file.get_buffer(val.handle)?;
+        val.offset = (buffer.id() as u64) << 32;
+
+        ptr.write(val).ok_or(Errno::EFAULT)
+    }
+
+    fn ioctl_transfer(&self, file: &DrmFile, arg: VirtAddr, to_host: bool) -> EResult<()> {
+        let ptr = UserPtr::<virtgpu::drm_virtgpu_3d_transfer_to_host>::new(arg);
+        let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let resource = self.resource_by_handle(file, val.bo_handle)?;
+        let context = self.render_context(file)?;
+
+        let fence = self.ctrl.execute_checked(
+            context.id(),
+            &TransferHost3d {
+                to_host,
+                resource_id: resource.id(),
+                area: crate::command::Box3d {
+                    x: val.r#box.x,
+                    y: val.r#box.y,
+                    z: val.r#box.z,
+                    w: val.r#box.w,
+                    h: val.r#box.h,
+                    d: val.r#box.d,
+                },
+                offset: val.offset as u64,
+                level: val.level,
+                stride: val.stride,
+                layer_stride: val.layer_stride,
             },
-            offset: 0,
-            resource_id,
-            padding: 0,
-        };
+            Fencing::Fenced,
+        )?;
 
-        let resp: VirtioGpuCtrlHdr = self.send_command(&cmd)?;
-
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            error!("Failed to transfer to host");
-            return Err(Errno::EIO);
+        resource.record_fence(fence);
+        if !to_host {
+            self.ctrl.wait_fence(fence)?;
         }
 
         Ok(())
     }
 
-    pub fn flush_resource(&self, resource_id: u32, width: u32, height: u32) -> EResult<()> {
-        let cmd = VirtioGpuResourceFlush {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
-            r: VirtioGpuRect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            },
-            resource_id,
-            padding: 0,
-        };
+    fn ioctl_execbuffer(&self, file: &DrmFile, arg: VirtAddr) -> EResult<()> {
+        let mut ptr = UserPtr::<virtgpu::drm_virtgpu_execbuffer>::new(arg);
+        let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-        let resp: VirtioGpuCtrlHdr = self.send_command(&cmd)?;
-
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            error!("Failed to flush resource");
-            return Err(Errno::EIO);
+        let unsupported = virtgpu::VIRTGPU_EXECBUF_FENCE_FD_IN
+            | virtgpu::VIRTGPU_EXECBUF_FENCE_FD_OUT
+            | virtgpu::VIRTGPU_EXECBUF_RING_IDX;
+        if val.flags & unsupported != 0 || val.num_in_syncobjs > 0 || val.num_out_syncobjs > 0 {
+            return Err(Errno::EINVAL);
+        }
+        if val.size == 0 || val.size as usize > MAX_EXECBUFFER_SIZE {
+            return Err(Errno::EINVAL);
         }
 
-        Ok(())
-    }
+        let mut stream = DmaRegion::new(val.size as usize)?;
+        UserPtr::<u8>::new(VirtAddr::new(val.command as usize))
+            .read_slice(stream.as_mut_slice())
+            .ok_or(Errno::EFAULT)?;
 
-    pub fn initialize_drm_objects(&self) -> EResult<()> {
-        let scanouts = self.scanouts.lock();
+        let mut resources = Vec::with_capacity(val.num_bo_handles as usize);
+        if val.num_bo_handles > 0 {
+            let mut handles = vec![0u32; val.num_bo_handles as usize];
+            UserPtr::<u32>::new(VirtAddr::new(val.bo_handles as usize))
+                .read_slice(&mut handles)
+                .ok_or(Errno::EFAULT)?;
 
-        // Create one CRTC per scanout
-        let mut crtcs = Vec::new();
-        for _ in scanouts.iter() {
-            let crtc_id = self.obj_counter.alloc();
-            let crtc = Arc::new(Crtc::new(crtc_id));
-            crtcs.push(crtc);
-        }
-
-        // Create one primary plane per CRTC for atomic modesetting
-        let mut all_planes = Vec::new();
-        for crtc in crtcs.iter() {
-            let plane_id = self.obj_counter.alloc();
-            let plane = Arc::new(Plane::new(
-                plane_id,
-                vec![crtc.clone()],
-                1, // DRM_PLANE_TYPE_PRIMARY
-                vec![DRM_FORMAT_XRGB8888],
-            ));
-            all_planes.push(plane);
-
-            // Create a cursor plane per CRTC
-            let cursor_plane_id = self.obj_counter.alloc();
-            let cursor_plane = Arc::new(Plane::new(
-                cursor_plane_id,
-                vec![crtc.clone()],
-                DRM_PLANE_TYPE_CURSOR,
-                vec![DRM_FORMAT_ARGB8888],
-            ));
-            all_planes.push(cursor_plane);
-        }
-
-        // Create connectors and encoders
-        let mut all_encoders = Vec::new();
-        let mut all_connectors = Vec::new();
-
-        for (idx, scanout) in scanouts.iter().enumerate() {
-            let crtc = crtcs[idx].clone();
-
-            // Create encoder for this scanout
-            let encoder_id = self.obj_counter.alloc();
-            let encoder = Arc::new(Encoder::new(encoder_id, vec![crtc.clone()], crtc.clone()));
-            all_encoders.push(encoder.clone());
-
-            let preferred = synthesize_preferred_mode(scanout.width, scanout.height);
-            let mut modes = vec![preferred];
-            modes.extend(
-                DMT_MODES
-                    .iter()
-                    .filter(|m| {
-                        m.hdisplay != preferred.hdisplay || m.vdisplay != preferred.vdisplay
-                    })
-                    .cloned(),
-            );
-
-            // Create connector
-            let connector_id = self.obj_counter.alloc();
-            let connector = Arc::new(Connector::new(
-                connector_id,
-                drm_mode_connector_state::Connected,
-                modes,
-                vec![encoder.clone()],
-                drm_mode_connector_type::Virtual,
-                self.state
-                    .next_connector_type_id(drm_mode_connector_type::Virtual),
-            ));
-            all_connectors.push(connector);
-        }
-
-        // Store objects in device
-        self.state.crtcs.lock().extend(crtcs);
-        self.state.encoders.lock().extend(all_encoders);
-        self.state.connectors.lock().extend(all_connectors);
-        self.state.planes.lock().extend(all_planes);
-
-        Ok(())
-    }
-
-    fn send_cursor_command(&self, cmd: &VirtioGpuUpdateCursor) -> EResult<()> {
-        let cmd_buffer = OwnedPhysPages::new(1, AllocFlags::empty())?;
-        let cmd_ptr = cmd_buffer.as_hhdm::<VirtioGpuUpdateCursor>();
-        unsafe {
-            core::ptr::write_volatile(cmd_ptr, *cmd);
-        }
-
-        let buffers = vec![(
-            cmd_buffer.phys(),
-            core::mem::size_of::<VirtioGpuUpdateCursor>(),
-            false,
-        )];
-
-        {
-            let mut queue = self.cursor_queue.lock();
-            queue.add_buffer(&buffers)?;
-            self.virtio.lock().notify_queue(&queue);
-        }
-
-        // Wait for completion
-        loop {
-            let mut queue = self.cursor_queue.lock();
-            if let Some((desc_id, _)) = queue.get_used() {
-                queue.release_used_chain(desc_id);
-                break;
+            for handle in handles {
+                resources.push(self.resource_by_handle(file, handle)?);
             }
-            drop(queue);
-            core::hint::spin_loop();
         }
 
+        let context = self.render_context(file)?;
+        let fence =
+            self.ctrl
+                .execute_checked(context.id(), &Submit3d::new(stream), Fencing::Fenced)?;
+
+        for resource in resources {
+            resource.record_fence(fence);
+        }
+
+        val.fence_fd = -1;
+        ptr.write(val).ok_or(Errno::EFAULT)
+    }
+
+    fn ioctl_wait(&self, file: &DrmFile, arg: VirtAddr) -> EResult<()> {
+        let ptr = UserPtr::<virtgpu::drm_virtgpu_3d_wait>::new(arg);
+        let val = ptr.read().ok_or(Errno::EFAULT)?;
+
+        let resource = self.resource_by_handle(file, val.handle)?;
+
+        if val.flags & virtgpu::VIRTGPU_WAIT_NOWAIT != 0 {
+            self.ctrl.drain();
+            return if resource.is_busy() {
+                Err(Errno::EBUSY)
+            } else {
+                Ok(())
+            };
+        }
+
+        resource.wait_idle()?;
         Ok(())
+    }
+
+    fn send_cursor(&self, move_only: bool) -> Result<(), GpuError> {
+        let state = self.cursor_state.lock();
+        let command = UpdateCursor {
+            move_only,
+            scanout_id: state.scanout_id,
+            resource_id: state.resource.as_ref().map_or(0, |x| x.id()),
+            x: state.x,
+            y: state.y,
+            hot_x: state.hot_x,
+            hot_y: state.hot_y,
+        };
+        drop(state);
+
+        self.cursor.submit(&command)
     }
 }
 
@@ -506,11 +562,40 @@ impl Device for VirtioGpuDevice {
     }
 
     fn driver_version(&self) -> (i32, i32, i32) {
-        (1, 0, 0)
+        (0, 0, 0)
     }
 
     fn driver_info(&self) -> (&str, &str, &str) {
-        ("virtio-gpu", "VirtIO GPU Driver", "2026")
+        ("virtio_gpu", "virtio GPU", "0")
+    }
+
+    fn open_file(&self) -> EResult<Option<Arc<dyn Any + Send + Sync>>> {
+        Ok(Some(Arc::new(GpuFile::new())))
+    }
+
+    fn import_buffer(&self, file: &DrmFile, buffer: &Arc<dyn BufferObject>) -> EResult<()> {
+        if !self.accelerated {
+            return Ok(());
+        }
+
+        let Ok(gpu_buffer) = Self::gpu_buffer(buffer) else {
+            return Ok(());
+        };
+        if gpu_buffer.is_dumb() {
+            return Ok(());
+        }
+
+        let Ok(gpu_file) = self.file_state(file) else {
+            return Ok(());
+        };
+
+        let context = gpu_file.context.lock().clone();
+        let Some(context) = context else {
+            return Ok(());
+        };
+
+        context.attach(gpu_buffer.resource().id())?;
+        Ok(())
     }
 
     fn create_dumb(
@@ -520,60 +605,34 @@ impl Device for VirtioGpuDevice {
         height: u32,
         bpp: u32,
     ) -> EResult<(Arc<dyn BufferObject>, u32)> {
-        log!("Creating dumb buffer {}x{} @ {}bpp", width, height, bpp);
-        let page_size = arch::virt::get_page_size();
-        let bytes_per_pixel = bpp.div_ceil(8);
-        let pitch = width * bytes_per_pixel;
-        let size = (pitch * height) as usize;
-
-        let format = match bpp {
-            32 => VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
-            _ => return Err(Errno::EINVAL),
-        };
-
-        let num_pages = size.div_ceil(page_size);
-        log!("Allocating {} pages for buffer (size={})", num_pages, size);
-        let allocation = OwnedPhysPages::new(num_pages, AllocFlags::empty())?;
-        let base_addr = allocation.phys();
-
-        let resource_id = self.alloc_resource_id();
-        log!("Using format {} for resource", format);
-
-        self.create_resource_2d(resource_id, width, height, format)?;
-
-        // Attach backing storage
-        let page_addrs: Vec<PhysAddr> = (0..num_pages)
-            .map(|i| base_addr + (i * page_size))
-            .collect();
-        if let Err(e) = self.attach_backing(resource_id, &page_addrs) {
-            Self::destroy_resource_raw(&self.virtio, &self.ctrl_queue, resource_id, false);
-            return Err(e);
+        if bpp != DUMB_BITS_PER_PIXEL {
+            return Err(Errno::EINVAL);
         }
 
-        // Store this as the active resource
-        self.active_resource.store(resource_id, Ordering::SeqCst);
-        log!("Set active resource to {}", resource_id);
+        let pitch = width * (bpp / 8);
+        let page_size = arch::virt::get_page_size();
+        let size = (pitch as usize * height as usize).next_multiple_of(page_size);
+        let backing = DmaRegion::new(size)?;
 
-        let base_addr = allocation.into_phys();
+        let resource_id = self.resource_ids.alloc();
+        self.ctrl.execute_checked(
+            0,
+            &CreateResource2d {
+                resource_id,
+                format: spec::format::B8G8R8X8_UNORM,
+                width,
+                height,
+            },
+            Fencing::Unfenced,
+        )?;
 
-        let buffer_id = self.obj_counter.alloc();
-        let buffer = Arc::new(VirtioGpuBuffer {
-            id: buffer_id,
-            resource_id,
-            base_addr,
-            size,
-            width,
-            height,
-            virtio: self.virtio.clone(),
-            ctrl_queue: self.ctrl_queue.clone(),
-        });
+        let resource = Resource::adopt(self.ctrl.clone(), resource_id, Some(backing))?;
+        let handle = self.obj_counter.alloc();
 
-        log!(
-            "Created dumb buffer {} with resource {}",
-            buffer_id,
-            resource_id
-        );
-        Ok((buffer, pitch))
+        Ok((
+            Arc::new(GpuBuffer::new(handle, resource, width, height, true)),
+            pitch,
+        ))
     }
 
     fn create_fb(
@@ -597,155 +656,90 @@ impl Device for VirtioGpuDevice {
     }
 
     fn commit(&self, state: &AtomicState) {
-        // Get the framebuffer from the first CRTC state (we only support one CRTC for now)
-        let crtc_state = state.crtc_states.values().next();
-        let framebuffer = match crtc_state {
-            Some(state) => match &state.framebuffer {
-                Some(fb) => fb.clone(),
-                None => {
-                    log!("No framebuffer set on CRTC");
-                    return;
-                }
-            },
-            None => {
-                log!("No CRTC state in atomic commit");
-                return;
+        for (crtc_id, crtc_state) in state.crtc_states.iter() {
+            let Some(framebuffer) = crtc_state.framebuffer.as_ref() else {
+                continue;
+            };
+
+            if let Err(error) = self.present(*crtc_id, framebuffer) {
+                error!("Failed to present on CRTC {crtc_id}: {error}");
             }
-        };
-
-        // Get the buffer object from the framebuffer and downcast to VirtioGpuBuffer
-        let buffer = framebuffer.buffer.clone();
-        let virtio_buffer = match (buffer.as_ref() as &dyn Any).downcast_ref::<VirtioGpuBuffer>() {
-            Some(buf) => buf,
-            None => {
-                error!("Framebuffer buffer is not a VirtioGpuBuffer!");
-                return;
-            }
-        };
-
-        let resource_id = virtio_buffer.resource_id;
-
-        let (scanout_id, needs_set_scanout) = {
-            let scanouts = self.scanouts.lock();
-            if let Some(scanout) = scanouts.first() {
-                let needs = scanout.current_resource != Some(resource_id)
-                    || scanout.width != framebuffer.width
-                    || scanout.height != framebuffer.height;
-                (scanout.id, needs)
-            } else {
-                error!("No scanouts available!");
-                return;
-            }
-        };
-
-        let transfer_width = framebuffer.width;
-        let transfer_height = framebuffer.height;
-
-        // Upload the new framebuffer contents before rebinding the scanout.
-        // Otherwise the host can briefly display stale pixels from this resource.
-        if let Ok(()) = self.transfer_to_host_2d(resource_id, 0, 0, transfer_width, transfer_height)
-        {
-            if needs_set_scanout
-                && let Err(e) =
-                    self.set_scanout(scanout_id, resource_id, transfer_width, transfer_height)
-            {
-                error!("Failed to set scanout: {:?}", e);
-                return;
-            }
-
-            // Flush after the upload/bind sequence so the visible scanout only ever sees
-            // the freshly transferred contents.
-            if let Err(e) = self.flush_resource(resource_id, transfer_width, transfer_height) {
-                error!("Failed to flush resource {}: {:?}", resource_id, e);
-            }
-        } else {
-            error!("Failed to transfer resource {} to host", resource_id);
         }
     }
 
-    fn move_cursor(&self, _crtc_id: u32, x: i32, y: i32) -> EResult<()> {
-        let scanout_id = {
-            let scanouts = self.scanouts.lock();
-            scanouts.first().map(|s| s.id).unwrap_or(0)
+    fn set_cursor(
+        &self,
+        crtc_id: u32,
+        buffer: Option<Arc<dyn BufferObject>>,
+        width: u32,
+        height: u32,
+        hot_x: i32,
+        hot_y: i32,
+    ) -> EResult<()> {
+        let scanout_id = self.scanout_for_crtc(crtc_id);
+
+        let Some(buffer) = buffer else {
+            let previous = self.cursor_state.lock().resource.take();
+            drop(previous);
+            self.send_cursor(false)?;
+            return Ok(());
         };
 
-        self.cursor_x.store(x as u32, Ordering::SeqCst);
-        self.cursor_y.store(y as u32, Ordering::SeqCst);
+        let resource = Self::gpu_buffer(&buffer)?.resource().clone();
 
-        let resource_id = self.cursor_resource.load(Ordering::SeqCst);
-
-        let cmd = VirtioGpuUpdateCursor {
-            hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_MOVE_CURSOR),
-            pos: VirtioGpuCursorPos {
-                scanout_id,
-                x: x as u32,
-                y: y as u32,
-                padding: 0,
+        self.ctrl.execute_checked(
+            0,
+            &TransferToHost2d {
+                resource_id: resource.id(),
+                rect: Rect::sized(width, height),
+                offset: 0,
             },
-            resource_id,
-            hot_x: self.cursor_hot_x.load(Ordering::SeqCst),
-            hot_y: self.cursor_hot_y.load(Ordering::SeqCst),
-            padding: 0,
+            Fencing::Unfenced,
+        )?;
+
+        let previous = {
+            let mut state = self.cursor_state.lock();
+            state.scanout_id = scanout_id.unwrap_or(state.scanout_id);
+            state.hot_x = hot_x.max(0) as u32;
+            state.hot_y = hot_y.max(0) as u32;
+            state.resource.replace(resource)
         };
-        self.send_cursor_command(&cmd)?;
+        drop(previous);
+
+        self.send_cursor(false)?;
         Ok(())
     }
-}
 
-pub struct VirtioGpuBuffer {
-    id: u32,
-    resource_id: u32,
-    base_addr: PhysAddr,
-    size: usize,
-    width: u32,
-    height: u32,
-    virtio: Arc<SpinMutex<VirtioDevice>>,
-    ctrl_queue: Arc<SpinMutex<VirtQueue>>,
-}
+    fn move_cursor(&self, crtc_id: u32, x: i32, y: i32) -> EResult<()> {
+        let scanout_id = self.scanout_for_crtc(crtc_id);
 
-impl Drop for VirtioGpuBuffer {
-    fn drop(&mut self) {
-        VirtioGpuDevice::destroy_resource_raw(
-            &self.virtio,
-            &self.ctrl_queue,
-            self.resource_id,
-            true,
-        );
-
-        let page_size = arch::virt::get_page_size();
-        let pages = self.size.div_ceil(page_size);
-        unsafe {
-            KernelAlloc::dealloc(self.base_addr, pages);
+        {
+            let mut state = self.cursor_state.lock();
+            state.scanout_id = scanout_id.unwrap_or(state.scanout_id);
+            state.x = x;
+            state.y = y;
         }
-    }
-}
 
-impl zinnia::memory::MemoryObject for VirtioGpuBuffer {
-    fn try_get_page(&self, page_index: usize) -> EResult<Option<PhysAddr>> {
-        const PAGE_SIZE: usize = 4096;
-        let offset = page_index * PAGE_SIZE;
-        if offset < self.size {
-            Ok(Some(PhysAddr::new(self.base_addr.value() + offset)))
-        } else {
-            Ok(None)
+        self.send_cursor(true)?;
+        Ok(())
+    }
+
+    fn driver_ioctl(&self, file: &DrmFile, request: u32, arg: VirtAddr) -> EResult<usize> {
+        match request {
+            virtgpu::DRM_IOCTL_VIRTGPU_GETPARAM => self.ioctl_getparam(arg)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_GET_CAPS => self.ioctl_get_caps(arg)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE => self.ioctl_resource_create(file, arg)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_RESOURCE_INFO => self.ioctl_resource_info(file, arg)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_MAP => self.ioctl_map(file, arg)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST => self.ioctl_transfer(file, arg, true)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST => {
+                self.ioctl_transfer(file, arg, false)?
+            }
+            virtgpu::DRM_IOCTL_VIRTGPU_EXECBUFFER => self.ioctl_execbuffer(file, arg)?,
+            virtgpu::DRM_IOCTL_VIRTGPU_WAIT => self.ioctl_wait(file, arg)?,
+            _ => return Err(Errno::ENOTTY),
         }
-    }
-}
 
-impl BufferObject for VirtioGpuBuffer {
-    fn id(&self) -> u32 {
-        self.id
-    }
-
-    fn size(&self) -> usize {
-        self.size
-    }
-
-    fn width(&self) -> u32 {
-        self.width
-    }
-
-    fn height(&self) -> u32 {
-        self.height
+        Ok(0)
     }
 }

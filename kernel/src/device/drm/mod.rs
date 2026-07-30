@@ -21,8 +21,13 @@ use crate::{
         inode::Mode,
     },
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
+    any::Any,
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
@@ -54,6 +59,8 @@ pub struct DeviceState {
     pub connectors: SpinMutex<Vec<Arc<Connector>>>,
     pub planes: SpinMutex<Vec<Arc<Plane>>>,
     pub framebuffers: SpinMutex<Vec<Arc<Framebuffer>>>,
+    names: SpinMutex<BTreeMap<u32, Weak<dyn BufferObject>>>,
+    name_counter: IdAllocator,
     connector_type_ids: [AtomicU32; core::mem::variant_count::<drm_mode_connector_type>()],
 }
 
@@ -65,12 +72,34 @@ impl DeviceState {
             connectors: SpinMutex::new(Vec::new()),
             planes: SpinMutex::new(Vec::new()),
             framebuffers: SpinMutex::new(Vec::new()),
+            names: SpinMutex::new(BTreeMap::new()),
+            name_counter: IdAllocator::new(),
             connector_type_ids: [const { AtomicU32::new(0) }; _],
         }
     }
 
     pub fn next_connector_type_id(&self, connector_type: drm_mode_connector_type) -> u32 {
         self.connector_type_ids[connector_type as usize].fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn name_buffer(&self, buffer: &Arc<dyn BufferObject>) -> u32 {
+        let mut names = self.names.lock();
+        names.retain(|_, weak| weak.strong_count() > 0);
+
+        if let Some((name, _)) = names
+            .iter()
+            .find(|(_, weak)| weak.upgrade().is_some_and(|x| Arc::ptr_eq(&x, buffer)))
+        {
+            return *name;
+        }
+
+        let name = self.name_counter.alloc();
+        names.insert(name, Arc::downgrade(buffer));
+        name
+    }
+
+    fn buffer_by_name(&self, name: u32) -> Option<Arc<dyn BufferObject>> {
+        self.names.lock().get(&name).and_then(|weak| weak.upgrade())
     }
 }
 
@@ -139,12 +168,31 @@ pub trait Device: Send + Sync {
         let _ = (crtc_id, x, y);
         Err(Errno::ENOTTY)
     }
+
+    /// Called when a file is opened.
+    /// Drivers can use this to return a per-file state.
+    fn open_file(&self) -> EResult<Option<Arc<dyn Any + Send + Sync>>> {
+        Ok(None)
+    }
+
+    /// Handle an ioctl in the driver range.
+    fn driver_ioctl(&self, file: &DrmFile, request: u32, arg: VirtAddr) -> EResult<usize> {
+        let _ = (file, request, arg);
+        Err(Errno::ENOTTY)
+    }
+
+    /// Called whenever a buffer becomes reachable through `file`.
+    fn import_buffer(&self, file: &DrmFile, buffer: &Arc<dyn BufferObject>) -> EResult<()> {
+        let _ = (file, buffer);
+        Ok(())
+    }
 }
 
 /// Represents a user-facing DRM card in form of a per-open file.
 pub struct DrmFile {
     device: Arc<dyn Device>,
-    buffers: SpinMutex<Vec<Arc<dyn BufferObject>>>,
+    render: bool,
+    buffers: SpinMutex<BTreeMap<u32, Arc<dyn BufferObject>>>,
     framebuffers: SpinMutex<Vec<Arc<Framebuffer>>>,
     active_fb: SpinMutex<Option<(u32, Arc<Framebuffer>)>>,
     events: SpinMutex<Vec<PageFlipEvent>>,
@@ -152,6 +200,7 @@ pub struct DrmFile {
     flip_sequence: AtomicU32,
     atomic_cap: AtomicBool,
     universal_planes_cap: AtomicBool,
+    driver_private: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 #[repr(C)]
@@ -166,10 +215,13 @@ struct PageFlipEvent {
 }
 
 impl DrmFile {
-    pub fn new(device: Arc<dyn Device>) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(device: Arc<dyn Device>, render: bool) -> EResult<Arc<Self>> {
+        let driver_private = device.open_file()?;
+
+        Ok(Arc::new(Self {
             device,
-            buffers: SpinMutex::new(Vec::new()),
+            render,
+            buffers: SpinMutex::new(BTreeMap::new()),
             framebuffers: SpinMutex::new(Vec::new()),
             active_fb: SpinMutex::new(None),
             events: SpinMutex::new(Vec::new()),
@@ -177,11 +229,42 @@ impl DrmFile {
             flip_sequence: AtomicU32::new(0),
             atomic_cap: AtomicBool::new(false),
             universal_planes_cap: AtomicBool::new(false),
-        })
+            driver_private,
+        }))
     }
 
     pub fn device(&self) -> &Arc<dyn Device> {
         &self.device
+    }
+
+    /// Returns true if this [`DrmFile`] is a render node.
+    pub fn is_render(&self) -> bool {
+        self.render
+    }
+
+    /// Private driver data.
+    pub fn driver_private<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.driver_private.as_ref()?.downcast_ref::<T>()
+    }
+
+    /// Gets a [`BufferObject`] by a handle.
+    pub fn get_buffer(&self, handle: u32) -> EResult<Arc<dyn BufferObject>> {
+        self.buffers
+            .lock()
+            .get(&handle)
+            .cloned()
+            .ok_or(Errno::EINVAL)
+    }
+
+    pub fn insert_buffer(&self, buffer: Arc<dyn BufferObject>) -> EResult<()> {
+        self.device.import_buffer(self, &buffer)?;
+
+        _ = self.buffers.lock().insert(buffer.id(), buffer);
+        Ok(())
+    }
+
+    fn remove_buffer(&self, handle: u32) -> Option<Arc<dyn BufferObject>> {
+        self.buffers.lock().remove(&handle)
     }
 
     fn auto_flush(&self) {
@@ -329,8 +412,12 @@ impl Drop for DrmFile {
     fn drop(&mut self) {
         self.device.set_cursor(0, None, 0, 0, 0, 0).ok();
         self.events.lock().clear();
-        self.active_fb.lock().take();
-        self.buffers.lock().clear();
+
+        let active = self.active_fb.lock().take();
+        drop(active);
+
+        let buffers = core::mem::take(&mut *self.buffers.lock());
+        drop(buffers);
 
         let owned_ids = {
             let mut framebuffers = self.framebuffers.lock();
@@ -350,11 +437,12 @@ impl Drop for DrmFile {
 struct DrmDeviceNode {
     device: Arc<dyn Device>,
     minor: u32,
+    render: bool,
 }
 
 impl crate::device::Device for DrmDeviceNode {
     fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
-        Ok(DrmFile::new(self.device.clone()))
+        Ok(DrmFile::new(self.device.clone(), self.render)?)
     }
 
     fn major(&self) -> u32 {
@@ -443,14 +531,34 @@ impl FileOps for DrmFile {
     }
 
     fn ioctl(&self, _file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
-        match request as u32 {
+        let request = request as u32;
+
+        let is_render_ioctl = matches!(
+            request,
+            drm::DRM_IOCTL_VERSION
+                | drm::DRM_IOCTL_GET_CAP
+                | drm::DRM_IOCTL_GEM_CLOSE
+                | drm::DRM_IOCTL_PRIME_HANDLE_TO_FD
+                | drm::DRM_IOCTL_PRIME_FD_TO_HANDLE
+        );
+
+        let is_private_ioctl = uapi::ioctls::ioc_type(request) == drm::BASE
+            && (drm::DRM_COMMAND_BASE..drm::DRM_COMMAND_END)
+                .contains(&uapi::ioctls::ioc_nr(request));
+
+        // Only accept these ioctls on render nodes.
+        if self.is_render() && !(is_render_ioctl || is_private_ioctl) {
+            return Err(Errno::EACCES);
+        }
+
+        match request {
             drm::DRM_IOCTL_VERSION => {
                 let mut ptr = UserPtr::<drm::drm_version>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
                 (val.version_major, val.version_minor, val.version_patchlevel) =
                     self.device.driver_version();
-                let (name, date, desc) = self.device.driver_info();
+                let (name, desc, date) = self.device.driver_info();
 
                 if !val.name.is_null() && val.name_len > 0 {
                     let len = name.len().min(val.name_len);
@@ -495,13 +603,7 @@ impl FileOps for DrmFile {
                 let mut ptr = UserPtr::<drm::drm_prime_handle>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                let buffer = self
-                    .buffers
-                    .lock()
-                    .iter()
-                    .find(|b| b.id() == val.handle)
-                    .ok_or(Errno::EINVAL)?
-                    .clone();
+                let buffer = self.get_buffer(val.handle)?;
 
                 let proc = Scheduler::get_current().get_process();
                 let identity = proc.identity.lock().clone();
@@ -540,18 +642,39 @@ impl FileOps for DrmFile {
                 val.handle = buffer.id();
 
                 // Reattach so ADDFB/ADDFB2 can resolve the handle.
-                let mut buffers = self.buffers.lock();
-                if !buffers.iter().any(|b| b.id() == val.handle) {
-                    buffers.push(buffer);
-                }
-                drop(buffers);
+                self.insert_buffer(buffer)?;
+
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_GEM_FLINK => {
+                let mut ptr = UserPtr::<drm::drm_gem_flink>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                let buffer = self.get_buffer(val.handle)?;
+                val.name = self.device.state().name_buffer(&buffer);
+
+                ptr.write(val).ok_or(Errno::EFAULT)?;
+            }
+            drm::DRM_IOCTL_GEM_OPEN => {
+                let mut ptr = UserPtr::<drm::drm_gem_open>::new(arg);
+                let mut val = ptr.read().ok_or(Errno::EFAULT)?;
+
+                let buffer = self
+                    .device
+                    .state()
+                    .buffer_by_name(val.name)
+                    .ok_or(Errno::ENOENT)?;
+
+                val.handle = buffer.id();
+                val.size = buffer.size() as u64;
+                self.insert_buffer(buffer)?;
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
             drm::DRM_IOCTL_GEM_CLOSE => {
                 let ptr = UserPtr::<drm::drm_gem_close>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
-                self.buffers.lock().retain(|b| b.id() != val.handle);
+                drop(self.remove_buffer(val.handle));
             }
             drm::DRM_IOCTL_MODE_CLOSEFB => {
                 let ptr = UserPtr::<drm::drm_mode_closefb>::new(arg);
@@ -827,8 +950,6 @@ impl FileOps for DrmFile {
                 let mut ptr = UserPtr::<drm::drm_mode_create_dumb>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                let mut buffers = self.buffers.lock();
-
                 let (buffer, pitch) = self
                     .device
                     .create_dumb(self, val.width, val.height, val.bpp)?;
@@ -838,18 +959,13 @@ impl FileOps for DrmFile {
                 val.size = buffer.size() as u64;
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
-                buffers.push(buffer);
+                self.insert_buffer(buffer)?;
             }
             drm::DRM_IOCTL_MODE_MAP_DUMB => {
                 let mut ptr = UserPtr::<drm::drm_mode_map_dumb>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                let buffers = self.buffers.lock();
-                let buffer = buffers
-                    .iter()
-                    .find(|x| x.id() == val.handle)
-                    .ok_or(Errno::EINVAL)?;
-
+                let buffer = self.get_buffer(val.handle)?;
                 val.offset = (buffer.id() as u64) << 32;
 
                 ptr.write(val).ok_or(Errno::EFAULT)?;
@@ -858,26 +974,13 @@ impl FileOps for DrmFile {
                 let ptr = UserPtr::<drm::drm_mode_destroy_dumb>::new(arg);
                 let val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                let mut buffers = self.buffers.lock();
-                let index = buffers
-                    .iter()
-                    .position(|x| x.id() == val.handle)
-                    .ok_or(Errno::EINVAL)?;
-
-                buffers.remove(index);
+                self.remove_buffer(val.handle).ok_or(Errno::EINVAL)?;
             }
             drm::DRM_IOCTL_MODE_ADDFB => {
                 let mut ptr = UserPtr::<drm::drm_mode_fb_cmd>::new(arg);
                 let mut val = ptr.read().ok_or(Errno::EFAULT)?;
 
-                // Find the buffer object
-                let buffers = self.buffers.lock();
-                let buffer = buffers
-                    .iter()
-                    .find(|b| b.id() == val.handle)
-                    .ok_or(Errno::EINVAL)?
-                    .clone();
-                drop(buffers);
+                let buffer = self.get_buffer(val.handle)?;
 
                 // Convert bpp/depth to a fourcc format
                 // For now, assume XRGB8888 for 32bpp
@@ -913,13 +1016,7 @@ impl FileOps for DrmFile {
                     return Err(Errno::EINVAL);
                 }
 
-                let buffers = self.buffers.lock();
-                let buffer = buffers
-                    .iter()
-                    .find(|b| b.id() == val.handles[0])
-                    .ok_or(Errno::EINVAL)?
-                    .clone();
-                drop(buffers);
+                let buffer = self.get_buffer(val.handles[0])?;
 
                 let framebuffer = self.device.create_fb(
                     self,
@@ -1268,9 +1365,17 @@ impl FileOps for DrmFile {
                     .map_err(|_| Errno::ENOENT)?;
 
                 // Find which CRTC is displaying this FB and flush it
-                if let Some((crtc_id, _)) = self.active_fb.lock().as_ref() {
+                let target = {
+                    let active = self.active_fb.lock();
+                    match active.as_ref() {
+                        Some((crtc_id, active_fb)) if active_fb.id == fb.id => Some(*crtc_id),
+                        _ => None,
+                    }
+                };
+
+                if let Some(crtc_id) = target {
                     let mut commit = AtomicState::new(self.device.clone());
-                    commit.set_crtc_framebuffer(*crtc_id, fb);
+                    commit.set_crtc_framebuffer(crtc_id, fb);
                     self.device.commit(&commit);
                 }
             }
@@ -1317,14 +1422,7 @@ impl FileOps for DrmFile {
                         self.device.set_cursor(val.crtc_id, None, 0, 0, 0, 0)?;
                     } else {
                         // Set cursor image
-                        let buffer = {
-                            let buffers = self.buffers.lock();
-                            buffers
-                                .iter()
-                                .find(|b| b.id() == val.handle)
-                                .ok_or(Errno::EINVAL)?
-                                .clone()
-                        };
+                        let buffer = self.get_buffer(val.handle)?;
                         self.device.set_cursor(
                             val.crtc_id,
                             Some(buffer),
@@ -1349,14 +1447,7 @@ impl FileOps for DrmFile {
                         self.device.set_cursor(val.crtc_id, None, 0, 0, 0, 0)?;
                     } else {
                         // Set cursor image with hotspot
-                        let buffer = {
-                            let buffers = self.buffers.lock();
-                            buffers
-                                .iter()
-                                .find(|b| b.id() == val.handle)
-                                .ok_or(Errno::EINVAL)?
-                                .clone()
-                        };
+                        let buffer = self.get_buffer(val.handle)?;
                         self.device.set_cursor(
                             val.crtc_id,
                             Some(buffer),
@@ -1390,6 +1481,12 @@ impl FileOps for DrmFile {
                 val.count_lessees = 0;
                 ptr.write(val).ok_or(Errno::EFAULT)?;
             }
+            x if uapi::ioctls::ioc_type(x) == drm::BASE
+                && (drm::DRM_COMMAND_BASE..drm::DRM_COMMAND_END)
+                    .contains(&uapi::ioctls::ioc_nr(x)) =>
+            {
+                return self.device.driver_ioctl(self, x, arg);
+            }
             x => {
                 error!("Unknown ioctl {x:x}");
                 return Err(Errno::ENOTTY);
@@ -1413,25 +1510,17 @@ impl FileOps for DrmFile {
         }
 
         let buffer_id = ((offset as usize) >> 32) as u32;
-        let buffers = self.buffers.lock();
-        let buffer = buffers
-            .iter()
-            .find(|x| x.id() == buffer_id)
-            .ok_or(Errno::EINVAL)?;
+        let buffer = self.get_buffer(buffer_id)?;
 
-        space.map_object(
-            buffer.clone(),
-            addr,
-            len,
-            prot,
-            offset as u32 as uapi::off_t,
-        )?;
+        space.map_object(buffer, addr, len, prot, offset as u32 as uapi::off_t)?;
 
         Ok(addr)
     }
 }
 
 static CARD_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+const RENDER_MINOR_BASE: u32 = 128;
 
 pub fn register(device: Arc<dyn Device>) -> EResult<()> {
     let minor = CARD_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1443,8 +1532,22 @@ pub fn register(device: Arc<dyn Device>) -> EResult<()> {
 
     crate::device::register_char_node(
         format!("drm/card{}", minor).as_bytes(),
-        Arc::new(DrmDeviceNode { device, minor }),
+        Arc::new(DrmDeviceNode {
+            device: device.clone(),
+            minor,
+            render: false,
+        }),
         Mode::from_bits_truncate(0o660),
+    )?;
+
+    crate::device::register_char_node(
+        format!("drm/render{}", minor).as_bytes(),
+        Arc::new(DrmDeviceNode {
+            device,
+            minor: RENDER_MINOR_BASE + minor,
+            render: true,
+        }),
+        Mode::from_bits_truncate(0o666),
     )
 }
 

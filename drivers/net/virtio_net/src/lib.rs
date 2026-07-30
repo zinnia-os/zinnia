@@ -1,6 +1,6 @@
 #![no_std]
 
-use virtio::{VirtQueue, VirtioDevice};
+use virtio::{DescChain, VirtQueue, VirtioDevice};
 use zinnia::{
     alloc::{boxed::Box, sync::Arc, vec::Vec},
     arch,
@@ -40,17 +40,17 @@ struct Controller {
 }
 
 struct TxBuffer {
-    desc_id: u32,
+    chain: DescChain,
     _buffer: OwnedPhysPages,
 }
 
 impl Controller {
     fn reap_tx(&self, queue: &mut VirtQueue) {
-        while let Some((desc_id, _)) = queue.get_used() {
-            queue.release_used_chain(desc_id);
+        while let Some(used) = queue.get_used() {
+            queue.release_used_chain(used.chain);
 
             let mut buffers = self.tx_buffers.lock();
-            if let Some(pos) = buffers.iter().position(|buf| buf.desc_id == desc_id) {
+            if let Some(pos) = buffers.iter().position(|buf| buf.chain == used.chain) {
                 buffers.swap_remove(pos);
             }
         }
@@ -66,7 +66,7 @@ impl NicDevice for Controller {
         // Block on rx_event until the IRQ wakes us with a used entry to claim.
         // The guard()-then-check pattern avoids missing an already-completed
         // descriptor before we put the task to sleep.
-        let (desc_id, len) = loop {
+        let used = loop {
             let guard = self.rx_event.guard();
             {
                 let mut queue = self.recv_queue.lock();
@@ -77,12 +77,12 @@ impl NicDevice for Controller {
             guard.wait();
         };
 
-        debug_assert!((desc_id as usize) < self.rx_buffers.len());
-        let slot = desc_id as usize;
-        let buf = &self.rx_buffers[slot];
+        let slot = used.chain.head() as usize;
+        debug_assert!(slot < self.rx_buffers.len());
+        let buf = self.rx_buffers.get(slot).ok_or(Errno::EIO)?;
 
         // The first VIRTIO_NET_HDR_LEN bytes are the virtio-net header; skip them.
-        let total = (len as usize).min(self.page_size);
+        let total = (used.len as usize).min(self.page_size);
         let payload_len = total.saturating_sub(VIRTIO_NET_HDR_LEN);
         let n = payload_len.min(frame.len());
 
@@ -94,9 +94,9 @@ impl NicDevice for Controller {
 
         // Re-add the same physical buffer so the queue stays full.
         let mut queue = self.recv_queue.lock();
-        queue.release_used_chain(desc_id);
+        queue.release_used_chain(used.chain);
         queue.add_buffer(&[(buf.phys(), self.page_size, true)])?;
-        self.virtio.lock().notify_queue(&queue);
+        self.virtio.lock().notify_queue(&queue)?;
 
         Ok(n)
     }
@@ -125,12 +125,12 @@ impl NicDevice for Controller {
         {
             let mut queue = self.send_queue.lock();
             self.reap_tx(&mut queue);
-            let desc_id = queue.add_buffer(&[(buf.phys(), total_len, false)])?;
+            let chain = queue.add_buffer(&[(buf.phys(), total_len, false)])?;
             self.tx_buffers.lock().push(TxBuffer {
-                desc_id: desc_id as u32,
+                chain,
                 _buffer: buf,
             });
-            self.virtio.lock().notify_queue(&queue);
+            self.virtio.lock().notify_queue(&queue)?;
         }
 
         Ok(())
@@ -168,8 +168,8 @@ fn probe(_variant: &PciVariant, mut access: DeviceView<'static>) -> EResult<()> 
 
     let mut dev = VirtioDevice::new_pci(access)?;
 
-    let dev_features_lo = dev.get_device_features(0);
-    let dev_features_hi = dev.get_device_features(1);
+    let dev_features_lo = dev.get_device_features(0)?;
+    let dev_features_hi = dev.get_device_features(1)?;
 
     let supported_lo = (spec::FeatureFlags::Mac
         | spec::FeatureFlags::MrgRxbuf
@@ -178,8 +178,8 @@ fn probe(_variant: &PciVariant, mut access: DeviceView<'static>) -> EResult<()> 
     let driver_lo = dev_features_lo & supported_lo;
     let driver_hi = dev_features_hi & VIRTIO_F_VERSION_1_LO;
 
-    dev.set_driver_features(0, driver_lo);
-    dev.set_driver_features(1, driver_hi);
+    dev.set_driver_features(0, driver_lo)?;
+    dev.set_driver_features(1, driver_hi)?;
 
     log!(
         "Negotiated features lo=0x{:08x}, hi=0x{:08x}",
@@ -205,9 +205,9 @@ fn probe(_variant: &PciVariant, mut access: DeviceView<'static>) -> EResult<()> 
 
     // Wire both queues to MSI-X vector 0 (the one we configured above) and
     // disable config-change interrupts.
-    let ack_rx = dev.set_queue_msix_vector(0, 0);
-    let ack_tx = dev.set_queue_msix_vector(1, 0);
-    let _ = dev.set_config_msix_vector(0xFFFF);
+    let ack_rx = dev.set_queue_msix_vector(0, 0)?;
+    let ack_tx = dev.set_queue_msix_vector(1, 0)?;
+    let _ = dev.set_config_msix_vector(0xFFFF)?;
     if ack_rx != 0 || ack_tx != 0 {
         error!(
             "Device refused MSI-X vector assignment (rx={:#x}, tx={:#x})",
@@ -231,9 +231,9 @@ fn probe(_variant: &PciVariant, mut access: DeviceView<'static>) -> EResult<()> 
         rx_buffers.push(buf);
     }
 
-    dev.set_driver_ok();
+    dev.set_driver_ok()?;
 
-    dev.notify_queue(&recv_queue);
+    dev.notify_queue(&recv_queue)?;
 
     let controller = Arc::new(Controller {
         virtio: SpinMutex::new(dev),

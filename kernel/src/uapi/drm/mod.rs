@@ -1,7 +1,12 @@
+pub mod virtgpu;
+
 use super::ioctls::*;
 use crate::memory::UserPtr;
 
-const BASE: u8 = b'd';
+pub const BASE: u8 = b'd';
+
+pub const DRM_COMMAND_BASE: u8 = 0x40;
+pub const DRM_COMMAND_END: u8 = 0xA0;
 
 const fn drm_io(num: u8) -> u32 {
     io(BASE, num)
@@ -15,8 +20,13 @@ const fn drm_iow<T>(num: u8) -> u32 {
     iow::<T>(BASE, num)
 }
 
-const fn drm_iowr<T>(num: u8) -> u32 {
+pub const fn drm_iowr<T>(num: u8) -> u32 {
     iowr::<T>(BASE, num)
+}
+
+/// For DRM driver specific ioctls.
+pub const fn drm_driver_iowr<T>(num: u8) -> u32 {
+    iowr::<T>(BASE + DRM_COMMAND_BASE, num)
 }
 
 pub type drm_context_t = u32;
@@ -396,6 +406,21 @@ pub struct drm_gem_close {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct drm_gem_flink {
+    pub handle: u32,
+    pub name: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct drm_gem_open {
+    pub name: u32,
+    pub handle: u32,
+    pub size: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct drm_mode_closefb {
     pub fb_id: u32,
     pub pad: u32,
@@ -660,8 +685,8 @@ pub const DRM_IOCTL_GET_STATS: u32 = drm_ior::<drm_stats>(0x06);
 pub const DRM_IOCTL_SET_VERSION: u32 = drm_iowr::<drm_set_version>(0x07);
 // pub const DRM_IOCTL_MODESET_CTL: u32 = drm_iow::<drm_modeset_ctl>(0x08);
 pub const DRM_IOCTL_GEM_CLOSE: u32 = drm_iow::<drm_gem_close>(0x09);
-// pub const DRM_IOCTL_GEM_FLINK: u32 = drm_iowr::<drm_gem_flink>(0x0a);
-// pub const DRM_IOCTL_GEM_OPEN: u32 = drm_iowr::<drm_gem_open>(0x0b);
+pub const DRM_IOCTL_GEM_FLINK: u32 = drm_iowr::<drm_gem_flink>(0x0a);
+pub const DRM_IOCTL_GEM_OPEN: u32 = drm_iowr::<drm_gem_open>(0x0b);
 pub const DRM_IOCTL_GET_CAP: u32 = drm_iowr::<drm_get_cap>(0x0c);
 pub const DRM_IOCTL_SET_CLIENT_CAP: u32 = drm_iow::<drm_set_client_cap>(0x0d);
 pub const DRM_IOCTL_SET_UNIQUE: u32 = drm_iow::<drm_unique>(0x10);
