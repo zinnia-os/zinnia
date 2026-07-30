@@ -1,0 +1,12 @@
+[package]
+name = "virtio_blk"
+version = "0.1.0"
+edition = "2024"
+build = "../../build.rs"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+zinnia = { workspace = true }
+virtio = { path = "../../common/virtio" }
