@@ -72,8 +72,20 @@ fn panic_handler(info: &PanicInfo) -> ! {
         let mut fp = arch::cpu::get_frame_pointer() as *const StackFrame;
         let kernel_map = PageTable::get_kernel();
 
-        while kernel_map.is_mapped(VirtAddr::from(fp)) {
+        /// Max stack trace depth to iterate.
+        const MAX_STACK_FRAMES: usize = 32;
+
+        let mut frames = 0;
+        while frames < MAX_STACK_FRAMES && kernel_map.is_mapped(VirtAddr::from(fp)) {
+            if !(fp as usize).is_multiple_of(align_of::<StackFrame>()) {
+                break;
+            }
+
             let addr = (*fp).return_addr as ElfAddr;
+            if addr == 0 {
+                break;
+            }
+
             let symbol = table.iter().find(|(_, (sym, _))| {
                 (addr >= sym.st_value) && (addr <= (sym.st_value + sym.st_size))
             });
@@ -81,17 +93,23 @@ fn panic_handler(info: &PanicInfo) -> ! {
                 .map(|(name, (sym, _))| (name.as_str(), addr - sym.st_value))
                 .unwrap_or(("???", 0));
 
-            if addr == 0 {
-                break;
-            }
-
             log_panic!(
                 "{:#x} [{:#} + {:#x}]",
                 addr as u64,
                 rustc_demangle::demangle(name),
                 offset
             );
-            fp = (*fp).prev;
+
+            let prev = (*fp).prev;
+            if prev <= fp {
+                break;
+            }
+            fp = prev;
+            frames += 1;
+        }
+
+        if frames == MAX_STACK_FRAMES {
+            log_panic!("... trace truncated at {MAX_STACK_FRAMES} frames");
         }
     }
 
