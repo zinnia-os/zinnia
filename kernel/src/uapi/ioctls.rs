@@ -2,7 +2,7 @@ pub const IOC_VOID: u32 = 0;
 pub const IOC_OUT: u32 = 0x40000000;
 pub const IOC_IN: u32 = 0x80000000;
 pub const IOC_INOUT: u32 = IOC_IN | IOC_OUT;
-pub const IOCPARM_SHIFT: u32 = 13;
+pub const IOCPARM_SHIFT: u32 = 14;
 pub const IOCPARM_MASK: u32 = (1 << IOCPARM_SHIFT) - 1;
 
 pub const fn ioc(inout: u32, group: u8, num: u8, len: u16) -> u32 {
