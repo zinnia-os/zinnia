@@ -66,8 +66,8 @@ impl BlockDevice for PartitionDevice {
 }
 
 impl Device for PartitionDevice {
-    fn open(self: Arc<Self>, flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
-        self.parent.clone().open(flags)
+    fn open(self: Arc<Self>, _flags: OpenFlags) -> EResult<Arc<dyn FileOps>> {
+        Ok(self.clone())
     }
 
     fn major(&self) -> u32 {
