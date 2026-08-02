@@ -99,14 +99,3 @@ impl LoggerSink for KernelLogger {
         }
     }
 }
-
-pub fn init() {
-    add_sink(Box::new(KernelLogger));
-}
-
-pub fn get_kernel_log(target: &mut [u8]) {
-    target.copy_from_slice(&EARLY_BUFFER.lock()[0..EARLY_BUFFER_ADDR.load(Ordering::Acquire)]);
-}
-
-// TODO: Broken
-//early_init_call!(init);
