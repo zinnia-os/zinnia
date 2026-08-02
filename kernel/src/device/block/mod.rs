@@ -7,12 +7,14 @@ pub mod ram;
 use crate::device::Device;
 use crate::{
     arch::virt::get_page_size,
-    memory::{IovecIter, VirtAddr},
+    memory::{IovecIter, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::Identity,
+    uapi,
+    util::mutex::spin::SpinMutex,
     vfs::{self, File, file::FileOps, fs::devtmpfs, inode::Mode},
 };
-use alloc::{format, sync::Arc, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 
 pub use bio::{BioRequest, BlockLimits};
 pub use io::{BlockBuffer, BlockOp, BlockSegment};
@@ -256,6 +258,14 @@ pub fn BLOCK_STAGE() {
     .expect("Unable to create /dev/block");
 }
 
+struct RegisteredDisk {
+    device: Arc<dyn BlockDevice>,
+    partition_nodes: Vec<String>,
+}
+
+static REGISTERED_DISKS: SpinMutex<BTreeMap<String, RegisteredDisk>> =
+    SpinMutex::new(BTreeMap::new());
+
 /// Registers a block device by name and scans for partitions.
 pub fn register_block_device(name: &str, device: Arc<dyn BlockDevice>) -> EResult<()> {
     // Register in devtmpfs as well.
@@ -267,10 +277,52 @@ pub fn register_block_device(name: &str, device: Arc<dyn BlockDevice>) -> EResul
 
     log!("Registered block device: \"{}\"", name);
 
+    REGISTERED_DISKS.lock().insert(
+        String::from(name),
+        RegisteredDisk {
+            device: device.clone(),
+            partition_nodes: Vec::new(),
+        },
+    );
+
     // Scan for GPT partitions.
     scan_partitions(name, device)?;
 
     Ok(())
+}
+
+/// Looks up the registered name of a whole-disk block device.
+fn registered_disk_name(device: &dyn BlockDevice) -> Option<String> {
+    let target = device as *const dyn BlockDevice as *const ();
+    REGISTERED_DISKS
+        .lock()
+        .iter()
+        .find(|(_, disk)| Arc::as_ptr(&disk.device) as *const () == target)
+        .map(|(name, _)| name.clone())
+}
+
+/// Drops every partition node of a disk and scans its partition table again.
+pub fn rescan_partitions(name: &str) -> EResult<()> {
+    let (device, stale) = {
+        let mut disks = REGISTERED_DISKS.lock();
+        let disk = disks.get_mut(name).ok_or(Errno::ENODEV)?;
+        (
+            disk.device.clone(),
+            core::mem::take(&mut disk.partition_nodes),
+        )
+    };
+
+    for node in stale {
+        if let Err(e) = crate::device::unregister_node(node.as_bytes()) {
+            log!(
+                "Unable to remove stale partition node \"{}\": {:?}",
+                node,
+                e
+            );
+        }
+    }
+
+    scan_partitions(name, device)
 }
 
 /// Scans a block device for GPT partitions and registers each as a sub-device.
@@ -280,6 +332,8 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
         Err(_) => return Ok(()), // No GPT found, that's fine.
     };
 
+    let mut nodes = Vec::new();
+
     for (i, part) in partitions.iter().enumerate() {
         let part_name = format!("{}p{}", parent_name, i + 1);
         let part_dev = Arc::new(partition::PartitionDevice::new(
@@ -288,31 +342,45 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             part.end_lba - part.start_lba + 1,
         ));
 
+        let node = format!("block/{}", part_name);
         crate::device::register_block_node(
-            format!("block/{}", part_name).as_bytes(),
+            node.as_bytes(),
             part_dev,
             Mode::from_bits_truncate(0o660),
         )?;
+        nodes.push(node);
 
         let root = devtmpfs::get_root();
         let uuid_str = part.unique_guid.to_string();
         let type_str = part.type_guid.to_string();
 
-        // TODO: This could conflict with other partitions.
+        let type_link = format!("block/parttype-{}", type_str);
+        match vfs::symlink(
+            root.clone(),
+            root.clone(),
+            type_link.as_bytes(),
+            part_name.as_bytes(),
+            &Identity::get_kernel(),
+        ) {
+            Ok(_) => nodes.push(type_link),
+            Err(Errno::EEXIST) => log!(
+                "Partition type {} already claimed, no \"{}\" link for \"{}\"",
+                type_str,
+                type_link,
+                part_name
+            ),
+            Err(e) => return Err(e),
+        }
+
+        let uuid_link = format!("block/partuuid-{}", uuid_str);
         vfs::symlink(
             root.clone(),
             root.clone(),
-            format!("block/parttype-{}", type_str).as_bytes(),
+            uuid_link.as_bytes(),
             part_name.as_bytes(),
             &Identity::get_kernel(),
         )?;
-        vfs::symlink(
-            root.clone(),
-            root.clone(),
-            format!("block/partuuid-{}", uuid_str).as_bytes(),
-            part_name.as_bytes(),
-            &Identity::get_kernel(),
-        )?;
+        nodes.push(uuid_link);
 
         log!(
             "Partition {}: \"{}\" Type: {} UUID: {}",
@@ -321,6 +389,10 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             type_str,
             uuid_str
         );
+    }
+
+    if let Some(disk) = REGISTERED_DISKS.lock().get_mut(parent_name) {
+        disk.partition_nodes = nodes;
     }
 
     Ok(())
@@ -447,6 +519,23 @@ impl<T: BlockDevice> FileOps for T {
     }
 
     fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
-        self.handle_ioctl(file, request, arg)
+        match request as u32 {
+            uapi::ioctls::BLKGETSIZE64 => {
+                let size = self.lba_count() * self.get_lba_size() as u64;
+                UserPtr::new(arg).write(size).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
+            uapi::ioctls::BLKSSZGET => {
+                let lba_size = self.get_lba_size() as u32;
+                UserPtr::new(arg).write(lba_size).ok_or(Errno::EFAULT)?;
+                Ok(0)
+            }
+            uapi::ioctls::BLKRRPART => {
+                let name = registered_disk_name(self).ok_or(Errno::ENOTTY)?;
+                rescan_partitions(&name)?;
+                Ok(0)
+            }
+            _ => self.handle_ioctl(file, request, arg),
+        }
     }
 }

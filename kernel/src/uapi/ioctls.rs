@@ -157,3 +157,7 @@ pub const K_XLATE: u32 = 0x01;
 pub const K_MEDIUMRAW: u32 = 0x02;
 pub const K_UNICODE: u32 = 0x03;
 pub const K_OFF: u32 = 0x04;
+
+pub const BLKGETSIZE64: u32 = ior::<u64>(b'B', 0x00);
+pub const BLKSSZGET: u32 = ior::<u32>(b'B', 0x01);
+pub const BLKRRPART: u32 = io(b'B', 0x02);
