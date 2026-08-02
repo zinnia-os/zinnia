@@ -286,8 +286,8 @@ fn write_stat(inode: &Arc<INode>, statbuf: &mut UserPtr<stat>) -> EResult<()> {
             st_atim: *inode.atime.lock(),
             st_mtim: *inode.mtime.lock(),
             st_ctim: *inode.ctime.lock(),
-            st_blksize: 0,
-            st_blocks: 0,
+            st_blksize: 4096, // TODO
+            st_blocks: 0,     // TODO
         })
         .ok_or(Errno::EFAULT)
 }
