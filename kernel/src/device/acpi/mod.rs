@@ -8,15 +8,24 @@ mod uacpi;
 static RSDP_ADDRESS: Once<PhysAddr> = Once::new();
 
 #[task(
-    name = "device.acpi.tables",
+    name = "device.acpi.root",
     depends = [crate::memory::MEMORY_STAGE],
 )]
-pub fn TABLES_STAGE() {
+pub fn ACPI_ROOT() -> bool {
     match BootInfo::get().rsdp_addr {
-        Some(rsdp) => unsafe { RSDP_ADDRESS.init(rsdp) },
-        None => panic!("No RSDP available, unable to initialize the ACPI subsystem!"),
-    };
+        Some(x) => {
+            unsafe { RSDP_ADDRESS.init(x) };
+            true
+        }
+        None => false,
+    }
+}
 
+#[task(
+    name = "device.acpi.tables",
+    depends = [ACPI_ROOT],
+)]
+pub fn TABLES_STAGE() {
     // Get an early table window so we can initialize e.g. HPET and MADT.
     let early_mem = Box::leak(Box::<[u8]>::new_uninit_slice(4096));
 

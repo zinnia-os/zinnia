@@ -7,8 +7,8 @@ use crate::{
 };
 use alloc::{boxed::Box, vec::Vec};
 use uacpi_sys::{
-    UACPI_STATUS_OK, acpi_mcfg, acpi_mcfg_allocation, acpi_sdt_hdr, uacpi_table,
-    uacpi_table_find_by_signature, uacpi_table_unref,
+    UACPI_STATUS_OK, acpi_mcfg, acpi_mcfg_allocation, uacpi_table, uacpi_table_find_by_signature,
+    uacpi_table_unref,
 };
 
 #[task(
@@ -30,7 +30,7 @@ pub fn MCFG_STAGE() {
         let mcfg_ptr = table.__bindgen_anon_1.ptr as *const uacpi_sys::acpi_mcfg;
         let mcfg = mcfg_ptr.read_unaligned();
 
-        let entry_count = (mcfg.hdr.length as usize - size_of::<acpi_sdt_hdr>())
+        let entry_count = (mcfg.hdr.length as usize).saturating_sub(size_of::<acpi_mcfg>())
             / size_of::<acpi_mcfg_allocation>();
 
         let mut accesses = Vec::new();

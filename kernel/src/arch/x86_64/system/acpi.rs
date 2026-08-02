@@ -102,11 +102,11 @@ impl PortIoAccess {
         unsafe {
             asm::write32(
                 0xCF8,
-                (addr.bus as u32) << 16
-                    | (addr.slot as u32) << 11
-                    | (addr.function as u32) << 8
-                    | (offset & 0xFC)
-                    | 1 << 31,
+                1 << 31
+                    | (addr.bus as u32) << 16
+                    | (addr.slot as u32 & 0x1F) << 11
+                    | (addr.function as u32 & 0x7) << 8
+                    | (offset & 0xFC),
             );
         }
     }
