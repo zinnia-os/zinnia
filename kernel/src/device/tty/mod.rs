@@ -631,6 +631,17 @@ impl FileOps for TtyFileOps {
                 let new_termios = ptr.read().ok_or(Errno::EFAULT)?;
                 self.tty.ldisc.lock().termios = new_termios;
             }
+            uapi::ioctls::TCFLSH => {
+                let queue = arg.value();
+                if queue != TCIFLUSH && queue != TCOFLUSH && queue != TCIOFLUSH {
+                    return Err(Errno::EINVAL);
+                }
+                if queue == TCIFLUSH || queue == TCIOFLUSH {
+                    let mut ldisc = self.tty.ldisc.lock();
+                    ldisc.read_buf.clear();
+                    ldisc.canon_buf.clear();
+                }
+            }
             uapi::ioctls::TIOCGWINSZ => {
                 let mut ptr = UserPtr::new(arg);
                 let ws = *self.tty.winsize.lock();

@@ -97,6 +97,10 @@ pub const NOFLSH: u32 = 0o000200;
 pub const TOSTOP: u32 = 0o000400;
 pub const IEXTEN: u32 = 0o100000;
 
+pub const TCIFLUSH: usize = 0;
+pub const TCOFLUSH: usize = 1;
+pub const TCIOFLUSH: usize = 2;
+
 pub const EXTA: u32 = 0o000016;
 pub const EXTB: u32 = 0o000017;
 pub const CBAUD: u32 = 0o010017;
