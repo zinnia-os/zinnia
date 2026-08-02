@@ -18,7 +18,10 @@ use crate::{
         task::Task,
     },
     sched::Scheduler,
-    uapi,
+    uapi::{
+        self,
+        resource::{PRIO_MAX, PRIO_MIN},
+    },
     util::{
         event::Event,
         mutex::{Mutex, spin::SpinMutex},
@@ -40,7 +43,7 @@ use alloc::{
 };
 use core::{
     mem,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -59,6 +62,8 @@ pub struct Process {
     name: SpinMutex<String>,
     /// The parent of this process, or [`None`], if this is the init process.
     parent: SpinMutex<Option<Weak<Process>>>,
+    /// A value between -20 and 19, where -20 is the highest priority and 0 is a neutral priority.
+    nice: AtomicI8,
     /// A list of [`Task`]s associated with this process.
     pub threads: SpinMutex<Vec<Arc<Task>>>,
     /// The address space for this process.
@@ -137,6 +142,18 @@ impl Process {
         self.parent.lock().as_ref().and_then(Weak::upgrade)
     }
 
+    pub const fn clamp_nice(nice: i32) -> i8 {
+        nice.clamp(PRIO_MIN as i32, PRIO_MAX as i32 - 1) as i8
+    }
+
+    pub fn set_nice(&self, nice: i32) {
+        self.nice.store(Self::clamp_nice(nice), Ordering::Relaxed);
+    }
+
+    pub fn get_nice(&self) -> i8 {
+        self.nice.load(Ordering::Relaxed)
+    }
+
     pub fn new(name: String, parent: Option<Arc<Self>>) -> EResult<Self> {
         Self::new_with_space(name, parent, AddressSpace::new())
     }
@@ -188,6 +205,7 @@ impl Process {
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
+            nice: AtomicI8::new(self.nice.load(Ordering::Relaxed)),
         });
 
         // Create a heap allocated context that we can pass to the entry point.
@@ -273,6 +291,7 @@ impl Process {
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
             umask: AtomicU32::new(0o022),
+            nice: AtomicI8::new(0),
         })
     }
 
