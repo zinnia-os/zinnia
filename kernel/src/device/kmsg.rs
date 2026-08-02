@@ -12,9 +12,8 @@ use alloc::sync::Arc;
 struct Console;
 
 impl FileOps for Console {
-    fn read(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
-        // TODO: Read into buffer
-        Err(Errno::EBADF)
+    fn read(&self, _: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
+        crate::log::read_kernel_log(buffer, offset)
     }
 
     fn write(&self, _: &File, _: &mut IovecIter, _: u64) -> EResult<isize> {
@@ -41,7 +40,7 @@ impl FileOps for Console {
 
 #[task(
     name = "generic.device.kmsg",
-    depends = [PROCESS_STAGE, DEVTMPFS_STAGE]
+    depends = [PROCESS_STAGE, DEVTMPFS_STAGE, crate::log::init]
 )]
 fn KMSG_STAGE() {
     device::register_char_node(

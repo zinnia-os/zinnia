@@ -8,6 +8,9 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use crate::task;
+use crate::{memory::IovecIter, posix::errno::EResult};
+
 /// A sink to write logs to.
 pub trait LoggerSink: Send {
     fn name(&self) -> &'static str;
@@ -100,13 +103,23 @@ impl LoggerSink for KernelLogger {
     }
 }
 
-pub fn init() {
-    add_sink(Box::new(KernelLogger));
-}
+task!(attr(name = "Initialize kernel logger") {
+    pub fn init() {
+        let early_len = EARLY_BUFFER_ADDR.load(Ordering::Acquire);
+        {
+            let mut logger = KERNEL_LOGGER.lock();
+            logger.extend_from_slice(&EARLY_BUFFER.lock()[..early_len]);
+        }
 
-pub fn get_kernel_log(target: &mut [u8]) {
-    target.copy_from_slice(&EARLY_BUFFER.lock()[0..EARLY_BUFFER_ADDR.load(Ordering::Acquire)]);
-}
+        // Force all subsequent writes through the allocated logger. The early
+        // buffer has been copied above and must not be returned a second time.
+        EARLY_BUFFER_ADDR.store(EARLY_BUFFER_LEN, Ordering::Release);
+        add_sink(Box::new(KernelLogger));
+    }
+});
 
-// TODO: Broken
-//early_init_call!(init);
+pub fn read_kernel_log(target: &mut IovecIter, offset: u64) -> EResult<isize> {
+    let logger = KERNEL_LOGGER.lock();
+    let offset = (offset as usize).min(logger.len());
+    target.copy_from_slice(&logger[offset..])
+}
