@@ -42,6 +42,7 @@ impl ExecFormat for ShebangFormat {
         // Parse the shebang command line.
         let mut args = interp
             .split(|&x| x == b' ')
+            .filter(|x| !x.is_empty()) // Skip whitespace.
             .map(|x| x.to_vec())
             .collect::<Vec<_>>();
         args.append(&mut info.argv); // Append the rest to argv.
