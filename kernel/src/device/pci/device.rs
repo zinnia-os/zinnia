@@ -1,21 +1,6 @@
 use super::config::Address;
-use crate::{posix::errno::EResult, util::mutex::spin::SpinMutex};
+use crate::util::mutex::spin::SpinMutex;
 use alloc::vec::Vec;
-
-pub trait Device {
-    /// Returns the PCI address of this device.
-    fn address(&self) -> Address;
-
-    /// Called when a device is put to sleep.
-    fn suspend(&self) -> EResult<()> {
-        Ok(())
-    }
-
-    /// Called when a device is woken up.
-    fn resume(&self) -> EResult<()> {
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PciBar {

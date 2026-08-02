@@ -1,5 +1,6 @@
-use super::{ACCESS, DeviceView, config, device::PCI_DEVICES};
+use super::{DeviceView, config, device::PCI_DEVICES};
 use crate::{
+    device::pci::ACCESS,
     memory::view::MemoryView,
     posix::errno::{EResult, Errno},
     util::mutex::spin::SpinMutex,
@@ -83,22 +84,24 @@ static DRIVERS: SpinMutex<BTreeMap<&'static str, Driver>> = SpinMutex::new(BTree
 
 impl Driver {
     pub fn register(self) -> EResult<()> {
-        let mut drivers = DRIVERS.lock();
+        {
+            let mut drivers = DRIVERS.lock();
 
-        if drivers.contains_key(self.name) {
-            warn!("Driver {} is already registered", self.name);
-            return Err(Errno::EEXIST);
+            if drivers.contains_key(self.name) {
+                warn!("Driver {} is already registered", self.name);
+                return Err(Errno::EEXIST);
+            }
+
+            if self.variants.is_empty() {
+                warn!(
+                    "PCI Driver \"{}\" does not define any variants, ignoring",
+                    self.name
+                );
+                return Ok(());
+            }
+
+            drivers.insert(self.name, self);
         }
-
-        if self.variants.is_empty() {
-            warn!(
-                "PCI Driver \"{}\" does not define any variants, ignoring",
-                self.name
-            );
-            return Ok(());
-        }
-
-        drivers.insert(self.name, self);
 
         log!(
             "Registered new PCI driver \"{}\" with {} variant(s)",
@@ -132,7 +135,9 @@ impl Driver {
                     && v.sub_class.is_none_or(|x| x == sub_class)
                     && v.class.is_none_or(|x| x == class)
             }) {
-                (self.probe)(variant, view)?;
+                if let Err(e) = (self.probe)(variant, view) {
+                    warn!("{}: {} failed to probe: {:?}", addr, self.name, e);
+                }
             }
         }
 

@@ -78,7 +78,7 @@ extern "C" fn uacpi_kernel_pci_device_open(
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_pci_device_close(arg1: uacpi_handle) {
-    // This function intentionally left blank.
+    drop(unsafe { Box::from_raw(arg1 as *mut Address) });
 }
 
 fn pci_access_from_address(address: Address) -> Option<&'static dyn Access> {
