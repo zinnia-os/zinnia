@@ -1613,11 +1613,15 @@ pub fn umount(dir_ptr: VirtAddr, _flags: u32) -> EResult<usize> {
     )?;
 
     // Remove the last mount from this entry's mount list.
-    let mut mounts = mount_point.entry.mounts.lock();
-    if mounts.is_empty() {
-        return Err(Errno::EINVAL);
-    }
-    mounts.pop();
+    let mount = {
+        let mut mounts = mount_point.entry.mounts.lock();
+        if mounts.is_empty() {
+            return Err(Errno::EINVAL);
+        }
+        mounts.pop().unwrap()
+    };
+
+    fs::unmount(&mount)?;
     Ok(0)
 }
 

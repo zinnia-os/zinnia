@@ -109,3 +109,13 @@ pub fn mount(fs_name: &[u8], flags: MountFlags, arg: UserPtr<()>) -> EResult<Arc
 
     Ok(mount)
 }
+
+/// Flushes a mount's file system and forgets its super block.
+pub fn unmount(mount: &Arc<Mount>) -> EResult<()> {
+    let Some(sb) = mount.root.get_inode().and_then(|inode| inode.sb.clone()) else {
+        return Ok(());
+    };
+
+    MOUNTED_SUPERS.lock().retain(|s| !Arc::ptr_eq(s, &sb));
+    sb.sync()
+}
