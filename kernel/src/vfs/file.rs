@@ -307,7 +307,7 @@ impl File {
         if !flags.contains(OpenFlags::Create) || flags.contains(OpenFlags::Temporary) {
             lookup_flags |= LookupFlags::MustExist;
         }
-        if flags.contains(OpenFlags::Exclusive) {
+        if flags.contains(OpenFlags::Create | OpenFlags::Exclusive) {
             lookup_flags |= LookupFlags::MustNotExist;
         }
         if !flags.contains(OpenFlags::NoFollow)
