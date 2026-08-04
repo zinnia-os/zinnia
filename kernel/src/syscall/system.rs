@@ -278,7 +278,7 @@ pub fn reboot(magic: u32, cmd: u32) -> EResult<usize> {
     }
 
     if let Err(e) = crate::vfs::fs::sync_all() {
-        warn!("reboot: failed to sync file systems: {e:?}");
+        warn!("Failed to sync file systems: {e:?}");
     }
 
     match cmd {
@@ -288,8 +288,25 @@ pub fn reboot(magic: u32, cmd: u32) -> EResult<usize> {
         RB_ENABLE_CAD => {
             warn!("RB_ENABLE_CAD is unimplemented");
         }
+        RB_AUTOBOOT => {
+            #[cfg(feature = "acpi")]
+            {
+                let status = crate::device::acpi::reboot();
+                error!("Failed to reset the system: {status}");
+                return Err(Errno::EIO);
+            }
+            #[cfg(not(feature = "acpi"))]
+            return Err(Errno::ENOSYS);
+        }
         RB_POWER_OFF => {
-            todo!("Power off");
+            #[cfg(feature = "acpi")]
+            {
+                let status = crate::device::acpi::power_off();
+                error!("Failed to power off the system: {status}");
+                return Err(Errno::EIO);
+            }
+            #[cfg(not(feature = "acpi"))]
+            return Err(Errno::ENOSYS);
         }
         _ => {
             warn!("Unknown reboot command {:#x}", cmd);

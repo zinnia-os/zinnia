@@ -216,7 +216,7 @@ extern "C" fn uacpi_kernel_stall(usec: uacpi_u8) {
 
 #[unsafe(no_mangle)]
 extern "C" fn uacpi_kernel_sleep(msec: uacpi_u64) {
-    todo!()
+    let _ = clock::sleep(core::time::Duration::from_millis(msec));
 }
 
 #[unsafe(no_mangle)]

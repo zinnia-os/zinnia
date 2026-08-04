@@ -7,6 +7,22 @@ mod uacpi;
 
 static RSDP_ADDRESS: Once<PhysAddr> = Once::new();
 
+pub fn power_off() -> uacpi::uacpi_status {
+    let status = unsafe { uacpi::uacpi_prepare_for_sleep_state(uacpi::UACPI_SLEEP_STATE_S5) };
+    if status != uacpi::UACPI_STATUS_OK {
+        return status;
+    }
+
+    let irq_state = unsafe { crate::arch::irq::set_irq_state(false) };
+    let status = unsafe { uacpi::uacpi_enter_sleep_state(uacpi::UACPI_SLEEP_STATE_S5) };
+    unsafe { crate::arch::irq::set_irq_state(irq_state) };
+    status
+}
+
+pub fn reboot() -> uacpi::uacpi_status {
+    unsafe { uacpi::uacpi_reboot() }
+}
+
 #[task(
     name = "device.acpi.root",
     depends = [crate::memory::MEMORY_STAGE],

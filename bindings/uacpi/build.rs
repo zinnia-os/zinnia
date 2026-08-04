@@ -14,6 +14,7 @@ fn main() {
         "uacpi/source/registers.c",
         "uacpi/source/resources.c",
         "uacpi/source/shareable.c",
+        "uacpi/source/sleep.c",
         "uacpi/source/stdlib.c",
         "uacpi/source/tables.c",
         "uacpi/source/types.c",
