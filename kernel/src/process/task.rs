@@ -80,8 +80,6 @@ pub struct Task {
     pub user_stack: AtomicUsize,
     /// The amount of time that this task can live on.
     pub ticks: usize,
-    /// A value between -20 and 19, where -20 is the highest priority and 0 is a neutral priority.
-    pub priority: i8,
     /// Used to handle [`UserPtr`] page faults.
     pub uar: AtomicPtr<UserAccessRegion>,
     /// Per-thread signal state (pending signals and signal mask).
@@ -212,7 +210,6 @@ impl Task {
             kernel_stack: KernelStack::new()?,
             user_stack: AtomicUsize::new(0),
             ticks: 0,
-            priority: 0,
             name: SpinMutex::new(String::new()),
             last_cpu: AtomicU32::new(u32::MAX),
             sched_cpu: AtomicU32::new(u32::MAX),

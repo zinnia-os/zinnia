@@ -10,11 +10,15 @@ use crate::{
         to_user,
     },
     sched::Scheduler,
-    uapi::{self, gid_t, limits::PATH_MAX, pid_t, uid_t},
+    uapi::{self, gid_t, limits::PATH_MAX, pid_t, resource::*, uid_t},
     vfs::{File, file::OpenFlags, inode::Mode},
     wrap_syscall,
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 #[wrap_syscall]
 pub fn gettid() -> usize {
@@ -359,6 +363,109 @@ pub fn setsid() -> EResult<pid_t> {
     *proc.session.lock() = pid;
     *proc.controlling_tty.lock() = None;
     Ok(pid)
+}
+
+fn parse_processes(which: u32, who: pid_t) -> EResult<Vec<Arc<Process>>> {
+    let current = Scheduler::get_current().get_process();
+
+    if which == PRIO_PROCESS {
+        let proc = if who == 0 {
+            current
+        } else {
+            let table = crate::process::PROCESS_TABLE.lock();
+
+            table
+                .get(&who)
+                .cloned()
+                .ok_or(Errno::ESRCH)?
+                .upgrade()
+                .ok_or(Errno::ESRCH)?
+        };
+
+        return Ok(vec![proc]);
+    }
+
+    let table = crate::process::PROCESS_TABLE
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect::<Vec<_>>();
+
+    let procs = match which {
+        PRIO_PGRP => {
+            let pgrp = if who == 0 { *current.pgrp.lock() } else { who };
+
+            table
+                .into_iter()
+                .filter(|proc| *proc.pgrp.lock() == pgrp)
+                .collect::<Vec<_>>()
+        }
+
+        PRIO_USER => {
+            let uid = if who == 0 {
+                current.identity.lock().user_id
+            } else {
+                who as uid_t
+            };
+
+            table
+                .into_iter()
+                .filter(|proc| proc.identity.lock().user_id == uid)
+                .collect::<Vec<_>>()
+        }
+
+        _ => return Err(Errno::EINVAL),
+    };
+
+    if procs.is_empty() {
+        return Err(Errno::ESRCH);
+    }
+
+    Ok(procs)
+}
+
+#[wrap_syscall]
+pub fn getpriority(which: u32, who: pid_t) -> EResult<i32> {
+    Ok(parse_processes(which, who)?
+        .iter()
+        .map(|p| p.get_nice() as i32)
+        .min()
+        .unwrap())
+}
+
+#[wrap_syscall]
+pub fn setpriority(which: u32, who: pid_t, prio: i32) -> EResult<()> {
+    let procs = parse_processes(which, who)?;
+
+    let nice = Process::clamp_nice(prio);
+
+    let euid = Scheduler::get_current()
+        .get_process()
+        .identity
+        .lock()
+        .effective_user_id;
+
+    let mut last_result = Ok(());
+
+    for proc in procs {
+        let identity = proc.identity.lock();
+
+        if euid != 0 && euid != identity.user_id && euid != identity.effective_user_id {
+            last_result = Err(Errno::EPERM);
+            continue;
+        }
+
+        let current_nice = proc.get_nice();
+
+        if nice < current_nice && euid != 0 {
+            last_result = Err(Errno::EACCES);
+            continue;
+        }
+
+        proc.set_nice(nice as i32);
+    }
+
+    last_result
 }
 
 pub fn exit(error: usize) -> ! {
