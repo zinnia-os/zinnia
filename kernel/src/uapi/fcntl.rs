@@ -87,12 +87,12 @@ pub struct flock {
 }
 
 pub const F_OWNER_TID: u32 = 0;
-pub const POSIX_FADV_NORMAL: u32 = 0;
-pub const POSIX_FADV_RANDOM: u32 = 1;
-pub const POSIX_FADV_SEQUENTIAL: u32 = 2;
-pub const POSIX_FADV_WILLNEED: u32 = 3;
-pub const POSIX_FADV_DONTNEED: u32 = 4;
-pub const POSIX_FADV_NOREUSE: u32 = 5;
+pub const POSIX_FADV_NORMAL: i32 = 0;
+pub const POSIX_FADV_RANDOM: i32 = 1;
+pub const POSIX_FADV_SEQUENTIAL: i32 = 2;
+pub const POSIX_FADV_WILLNEED: i32 = 3;
+pub const POSIX_FADV_DONTNEED: i32 = 4;
+pub const POSIX_FADV_NOREUSE: i32 = 5;
 
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;

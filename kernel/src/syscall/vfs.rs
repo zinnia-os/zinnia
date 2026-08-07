@@ -6,6 +6,7 @@ use crate::{
     process::signal::SignalSet,
     sched::Scheduler,
     uapi::{
+        self,
         access::{R_OK, W_OK, X_OK},
         dev_t,
         dirent::dirent,
@@ -1896,4 +1897,36 @@ pub fn eventfd_create(initval: u32, flags: i32) -> EResult<i32> {
             0,
         )
         .ok_or(Errno::EMFILE)
+}
+
+#[wrap_syscall]
+pub fn fadvise(fd: i32, offset: uapi::off_t, len: uapi::off_t, advice: i32) -> EResult<()> {
+    // We recognize fadvise, but don't actually do anything with the info (yet).
+    // Just perform sanity checks for now for what POSIX enforces.
+
+    // EINVAL: The value of advice is invalid, or the value of len is less than zero.
+    if len < 0 {
+        return Err(Errno::EINVAL);
+    }
+    match advice {
+        POSIX_FADV_NORMAL => {}
+        POSIX_FADV_RANDOM => {}
+        POSIX_FADV_SEQUENTIAL => {}
+        POSIX_FADV_WILLNEED => {}
+        POSIX_FADV_DONTNEED => {}
+        POSIX_FADV_NOREUSE => {}
+        _ => return Err(Errno::EINVAL),
+    };
+
+    let proc = Scheduler::get_current().get_process();
+
+    // EBADF: The fd argument is not a valid file descriptor.
+    let fd = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?;
+
+    // ESPIPE: The fd argument is associated with a pipe or FIFO.
+    if matches!(&fd.file.inode.node_ops, NodeOps::FIFO(_)) {
+        return Err(Errno::ESPIPE);
+    }
+
+    Ok(())
 }
