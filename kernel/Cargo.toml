@@ -9,7 +9,6 @@ crate-type = ["dylib"]
 
 [dependencies]
 uacpi-sys = { path = "../bindings/uacpi" }
-flanterm-sys = { path = "../bindings/flanterm" }
 
 bitflags = { workspace = true }
 cfg-if = { workspace = true }

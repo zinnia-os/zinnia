@@ -1,6 +1,3 @@
 [submodule "bindings/uacpi/uacpi"]
 	path = bindings/uacpi/uacpi
 	url = https://github.com/uACPI/uacpi
-[submodule "bindings/flanterm/flanterm"]
-	path = bindings/flanterm/flanterm
-	url = https://github.com/Mintsuki/Flanterm
