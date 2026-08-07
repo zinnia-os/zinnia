@@ -5,29 +5,27 @@ use crate::{
     util::{align_up, divide_up},
 };
 use alloc::collections::btree_set::BTreeSet;
-use core::{cmp::Ordering, num::NonZeroUsize};
+use core::{num::NonZeroUsize, ops::Bound};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct VirtRange {
     start_page: usize,
     end_page: usize,
 }
 
 impl VirtRange {
-    fn overlaps(self, other: Self) -> bool {
-        self.start_page < other.end_page && other.start_page < self.end_page
+    fn probe_min(start_page: usize) -> Self {
+        Self {
+            start_page,
+            end_page: 0,
+        }
     }
-}
 
-impl PartialOrd for VirtRange {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VirtRange {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.start_page.cmp(&other.start_page)
+    fn probe_max(start_page: usize) -> Self {
+        Self {
+            start_page,
+            end_page: usize::MAX,
+        }
     }
 }
 
@@ -35,6 +33,7 @@ impl Ord for VirtRange {
 pub struct VirtualAllocator {
     start_page: usize,
     end_page: usize,
+    next_fit: usize,
     allocated: BTreeSet<VirtRange>,
 }
 
@@ -54,12 +53,24 @@ impl VirtualAllocator {
         Ok(Self {
             start_page,
             end_page,
+            next_fit: start_page,
             allocated: BTreeSet::new(),
         })
     }
 
     pub fn allocate(&mut self, len: NonZeroUsize) -> EResult<VirtAddr> {
-        self.allocate_from((self.start_page * arch::virt::get_page_size()).into(), len)
+        let page_size = arch::virt::get_page_size();
+
+        let hint = self.next_fit.clamp(self.start_page, self.end_page);
+        let virt = match self.find_free_from((hint * page_size).into(), len) {
+            Ok(virt) => virt,
+            Err(_) => self.find_free_from((self.start_page * page_size).into(), len)?,
+        };
+
+        let range = self.range_from_addr(virt, len)?;
+        self.allocated.insert(range);
+        self.next_fit = range.end_page;
+        Ok(virt)
     }
 
     pub fn allocate_from(&mut self, base: VirtAddr, len: NonZeroUsize) -> EResult<VirtAddr> {
@@ -78,7 +89,16 @@ impl VirtualAllocator {
         let base = align_up(base.value(), page_size) / page_size;
         let mut candidate = self.start_page.max(base);
 
-        for range in self.allocated.iter() {
+        let lower = match self
+            .allocated
+            .range(..=VirtRange::probe_max(candidate))
+            .next_back()
+        {
+            Some(pred) => Bound::Included(*pred),
+            None => Bound::Unbounded,
+        };
+
+        for range in self.allocated.range((lower, Bound::Unbounded)) {
             if range.end_page <= candidate {
                 continue;
             }
@@ -104,8 +124,23 @@ impl VirtualAllocator {
     pub fn reserve(&mut self, addr: VirtAddr, len: NonZeroUsize) -> EResult<()> {
         let range = self.range_from_addr(addr, len)?;
 
-        if self.allocated.iter().any(|other| range.overlaps(*other)) {
-            return Err(Errno::ENOMEM);
+        if let Some(pred) = self
+            .allocated
+            .range(..VirtRange::probe_min(range.start_page))
+            .next_back()
+        {
+            if pred.end_page > range.start_page {
+                return Err(Errno::ENOMEM);
+            }
+        }
+        if let Some(succ) = self
+            .allocated
+            .range(VirtRange::probe_min(range.start_page)..)
+            .next()
+        {
+            if succ.start_page < range.end_page {
+                return Err(Errno::ENOMEM);
+            }
         }
 
         self.allocated.insert(range);
@@ -120,6 +155,11 @@ impl VirtualAllocator {
 
     pub fn clear(&mut self) {
         self.allocated.clear();
+        self.next_fit = self.start_page;
+    }
+
+    pub fn len(&self) -> usize {
+        self.allocated.len()
     }
 
     fn range_from_addr(&self, addr: VirtAddr, len: NonZeroUsize) -> EResult<VirtRange> {
@@ -148,8 +188,9 @@ impl VirtualAllocator {
     fn release_range(&mut self, range: VirtRange) {
         let overlapping = self
             .allocated
-            .iter()
-            .filter(|other| range.overlaps(**other))
+            .range(..VirtRange::probe_min(range.end_page))
+            .rev()
+            .take_while(|other| other.end_page > range.start_page)
             .copied()
             .collect::<alloc::vec::Vec<_>>();
 
