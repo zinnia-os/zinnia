@@ -10,7 +10,7 @@ pub struct Driver {
     pub name: &'static str,
     /// The device tree nodes this driver is compatible with.
     pub compatible: &'static [&'static [u8]],
-    pub probe: fn(node: &Node) -> EResult<()>,
+    pub probe: fn(node: &Node<'static, 'static>) -> EResult<()>,
 }
 
 impl Driver {

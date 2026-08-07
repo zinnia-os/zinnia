@@ -295,11 +295,11 @@ impl<'a, 'b> Property<'a, 'b> {
         self.data.split(|&b| b == 0).filter(|s| !s.is_empty())
     }
 
-    pub fn as_u32(&self) -> Option<&[u32]> {
+    pub fn as_u32(&self) -> Option<&'a [u32]> {
         bytemuck::try_cast_slice(self.data).ok()
     }
 
-    pub fn as_u64(&self) -> Option<&[u64]> {
+    pub fn as_u64(&self) -> Option<&'a [u64]> {
         bytemuck::try_cast_slice(self.data).ok()
     }
 }
@@ -490,22 +490,30 @@ pub static TREE: Once<Option<DeviceTree>> = Once::new();
 pub static DEVICES: Once<Vec<&Node>> = Once::new();
 
 #[task(
-    name = "system.dt.parse-blob",
+    name = "system.dt.root",
     depends = [crate::memory::MEMORY_STAGE],
 )]
-pub fn TREE_STAGE() {
-    let dt = match BootInfo::get().fdt_addr {
-        Some(fdt_addr) => unsafe {
-            let slice = slice::from_raw_parts_mut(fdt_addr.as_hhdm(), 8);
-            let len = slice.read_reg(DeviceTree::TOTAL_SIZE).unwrap().value();
-            let slice = slice::from_raw_parts_mut(fdt_addr.as_hhdm(), len as _);
+pub fn DT_ROOT() -> bool {
+    if BootInfo::get().fdt_addr.is_none() {
+        unsafe { TREE.init(None) };
+        return false;
+    }
 
-            DeviceTree::try_new(slice).expect("Failed to parse DTB")
-        },
-        None => unsafe {
-            TREE.init(None);
-            return;
-        },
+    true
+}
+
+#[task(
+    name = "system.dt.parse-blob",
+    depends = [DT_ROOT],
+)]
+pub fn TREE_STAGE() {
+    let fdt_addr = BootInfo::get().fdt_addr.unwrap();
+    let dt = unsafe {
+        let slice = slice::from_raw_parts_mut(fdt_addr.as_hhdm(), 8);
+        let len = slice.read_reg(DeviceTree::TOTAL_SIZE).unwrap().value();
+        let slice = slice::from_raw_parts_mut(fdt_addr.as_hhdm(), len as _);
+
+        DeviceTree::try_new(slice).expect("Failed to parse DTB")
     };
 
     let root = dt.root();
