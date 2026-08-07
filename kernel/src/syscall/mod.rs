@@ -85,15 +85,15 @@ macro_rules! wrap_syscall {
     attr() {
         $( #[ $($meta:meta)* ] )?
         $vis:vis fn $name:ident (
-            $( $arg:ident : $arg_ty:ty ),* $(,)?
+            $( $($arg:ident)+ : $arg_ty:ty ),* $(,)?
         ) -> $ret:ty $body:block
     } => {
         $( #[ $($meta)* ] )?
         $vis fn $name(ctx: &mut $crate::arch::sched::Context) {
-            fn inner($($arg : $arg_ty),*) -> $ret $body
+            fn inner($($($arg)+ : $arg_ty),*) -> $ret $body
 
             fn inner_wrapper(ctx: &mut $crate::arch::sched::Context) -> $ret {
-                let ($($arg),*) = (
+                let ($(${ignore($arg_ty)} paste::paste! { [< syscall_arg ${index(0)} >] }),*) = (
                     $(
                         paste::paste! {
                             <$arg_ty as $crate::syscall::SyscallArg>::from_usize(
@@ -103,17 +103,8 @@ macro_rules! wrap_syscall {
                     ),*
                 );
 
-                #[cfg(feature = "syscall_log")]
-                $crate::log!(
-                    concat!(stringify!($name), " called with args:", $(" ", stringify!($arg), "={:?}"),*),
-                    $($arg),*
-                );
-
-                let result = inner($($arg),*);
-                #[cfg(feature = "syscall_log")]
-                $crate::log!("-> {:?}", result);
+                let result = inner($(${ignore($arg_ty)} paste::paste! { [< syscall_arg ${index(0)} >] }),*);
                 result
-
             }
 
             $crate::syscall::SyscallReturn::into_ctx(inner_wrapper(ctx), ctx);

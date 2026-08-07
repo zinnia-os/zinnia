@@ -29,7 +29,6 @@ default = ["acpi", "boot_limine"]
 
 # Debug features
 track_spinlock_callers = []
-syscall_log = []
 
 # Boot protocols
 boot_limine = ["dep:limine"]
