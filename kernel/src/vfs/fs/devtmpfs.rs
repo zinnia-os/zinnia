@@ -12,8 +12,8 @@ static DEV_MOUNT: Once<Arc<Mount>> = Once::new();
 struct DevTmpFs;
 
 impl FileSystem for DevTmpFs {
-    fn get_name(&self) -> &'static [u8] {
-        b"devtmpfs"
+    fn get_name(&self) -> &str {
+        "devtmpfs"
     }
 
     fn mount(&self, flags: MountFlags, _: UserPtr<()>) -> EResult<Arc<Mount>> {
@@ -31,12 +31,8 @@ pub fn DEVTMPFS_STAGE() {
     super::register(&DevTmpFs);
 
     // Ask for a singleton-like tmpfs.
-    let tmpfs = super::mount(
-        b"tmpfs",
-        MountFlags::empty(),
-        UserPtr::new(VirtAddr::null()),
-    )
-    .expect("Unable to create devtmpfs from tmpfs");
+    let tmpfs = super::mount("tmpfs", MountFlags::empty(), UserPtr::new(VirtAddr::null()))
+        .expect("Unable to create devtmpfs from tmpfs");
 
     unsafe { DEV_MOUNT.init(tmpfs) };
 }

@@ -27,8 +27,8 @@ use core::{
 struct TmpFs;
 
 impl FileSystem for TmpFs {
-    fn get_name(&self) -> &'static [u8] {
-        b"tmpfs"
+    fn get_name(&self) -> &str {
+        "tmpfs"
     }
 
     fn mount(&self, flags: MountFlags, _: UserPtr<()>) -> EResult<Arc<Mount>> {

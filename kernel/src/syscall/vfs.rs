@@ -1538,8 +1538,9 @@ pub fn mount(
     data_ptr: VirtAddr,
 ) -> EResult<usize> {
     let fs_type = UserCStr::new(type_ptr)
-        .as_vec(PATH_MAX)
+        .as_cstring(PATH_MAX)
         .ok_or(Errno::EFAULT)?;
+    let fs_type = fs_type.to_str().map_err(|_| Errno::EINVAL)?;
     let dir = UserCStr::new(dir_ptr)
         .as_vec(PATH_MAX)
         .ok_or(Errno::EFAULT)?;

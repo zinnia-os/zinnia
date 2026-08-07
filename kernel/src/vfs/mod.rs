@@ -292,12 +292,8 @@ pub fn get_dir_entries(
 )]
 pub fn VFS_STAGE() {
     // Mount a tmpfs as root.
-    let tmpfs = fs::mount(
-        b"tmpfs",
-        MountFlags::empty(),
-        UserPtr::new(VirtAddr::null()),
-    )
-    .expect("Unable to mount the root tmpfs");
+    let tmpfs = fs::mount("tmpfs", MountFlags::empty(), UserPtr::new(VirtAddr::null()))
+        .expect("Unable to mount the root tmpfs");
 
     let root_path = PathNode {
         entry: tmpfs.root.clone(),
@@ -314,7 +310,7 @@ pub fn VFS_STAGE() {
 pub fn VFS_DEV_MOUNT_STAGE() {
     // Mount the devtmpfs on `/dev`.
     let devtmpfs = fs::mount(
-        b"devtmpfs",
+        "devtmpfs",
         MountFlags::empty(),
         UserPtr::new(VirtAddr::null()),
     )

@@ -28,8 +28,8 @@ use zinnia::{
 pub struct Ext2Fs;
 
 impl FileSystem for Ext2Fs {
-    fn get_name(&self) -> &[u8] {
-        b"ext2"
+    fn get_name(&self) -> &'static str {
+        "ext2"
     }
 
     fn mount(&self, flags: MountFlags, arg: UserPtr<()>) -> EResult<Arc<Mount>> {

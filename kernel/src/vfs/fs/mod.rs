@@ -46,7 +46,7 @@ bitflags::bitflags! {
 
 pub trait FileSystem: Sync + Send {
     /// Returns an identifier which can be used to determine this file system.
-    fn get_name(&self) -> &[u8];
+    fn get_name(&self) -> &str;
 
     /// Mounts an instance of this file system from a `source`.
     /// Returns a reference to the mount point with an instance of this file system.
@@ -65,17 +65,14 @@ pub trait SuperBlock: Sync + Send + Any {
 }
 
 /// A map of all known and registered file systems.
-static FS_TABLE: SpinMutex<BTreeMap<&'static [u8], &'static dyn FileSystem>> =
+static FS_TABLE: SpinMutex<BTreeMap<&'static str, &'static dyn FileSystem>> =
     SpinMutex::new(BTreeMap::new());
 
 /// Registers a new file system.
 pub fn register(fs: &'static dyn FileSystem) {
     let name = fs.get_name();
     FS_TABLE.lock().insert(name, fs);
-    log!(
-        "Registered new file system \"{}\"",
-        String::from_utf8_lossy(name)
-    );
+    log!("Registered new file system \"{name}\"");
 }
 
 static MOUNTED_SUPERS: SpinMutex<Vec<Arc<dyn SuperBlock>>> = SpinMutex::new(Vec::new());
@@ -92,7 +89,7 @@ pub fn sync_all() -> EResult<()> {
 }
 
 /// Mounts a file system at path `source` on `target`.
-pub fn mount(fs_name: &[u8], flags: MountFlags, arg: UserPtr<()>) -> EResult<Arc<Mount>> {
+pub fn mount(fs_name: &str, flags: MountFlags, arg: UserPtr<()>) -> EResult<Arc<Mount>> {
     let fs = {
         let table = FS_TABLE.lock();
         *table.get(fs_name).ok_or(Errno::ENODEV)?
