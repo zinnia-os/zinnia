@@ -38,7 +38,7 @@ impl IrqGuard {
     /// # Safety
     /// Intended to be used during rescheduling, where a newly scheduled task
     /// must begin execution with interrupts enabled.
-    pub unsafe fn new_fake() -> Self {
+    pub(crate) unsafe fn new_fake() -> Self {
         Self { _p: PhantomData }
     }
 }

@@ -342,3 +342,13 @@ extern "C" fn uacpi_kernel_wait_for_work_completion() -> uacpi_status {
     // TODO
     return UACPI_STATUS_OK;
 }
+
+#[unsafe(no_mangle)]
+extern "C" fn uacpi_kernel_disable_interrupts() -> uacpi_interrupt_state {
+    unsafe { crate::arch::irq::set_irq_state(false) as u64 }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn uacpi_kernel_restore_interrupts(state: uacpi_interrupt_state) {
+    unsafe { crate::arch::irq::set_irq_state(state != 0) };
+}

@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=src/wrapper.h");
+
     let mut b = cc::Build::new();
     b.files([
         "uacpi/source/default_handlers.c",
