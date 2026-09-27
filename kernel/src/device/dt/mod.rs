@@ -138,19 +138,18 @@ impl<'a, 'b> Node<'a, 'b> {
         }
     }
 
-    /// Reads the first cell of a `u32` property, or `default` if it is absent.
-    pub fn first_cell(&'b self, name: &[u8], default: u32) -> u32 {
+    /// Reads the first cell of a `u32` property, or [`None`] if it is absent.
+    pub fn first_cell(&'b self, name: &[u8]) -> Option<u32> {
         self.properties()
             .find(|p| p.name() == name)
             .and_then(|p| Some(u32::from_be(*p.as_u32()?.first()?)))
-            .unwrap_or(default)
     }
 
     /// Reads the `index`-th (address, size) pair from this node's `reg` property.
     pub fn reg(&'b self, index: usize) -> Option<(u64, u64)> {
         let root = self.tree.root();
-        let addr_cells = root.first_cell(b"#address-cells", 2);
-        let size_cells = root.first_cell(b"#size-cells", 2);
+        let addr_cells = root.first_cell(b"#address-cells").unwrap_or(2);
+        let size_cells = root.first_cell(b"#size-cells").unwrap_or(2);
 
         let prop = self.properties().find(|p| p.name() == b"reg")?;
         let cells = prop.as_u32()?;

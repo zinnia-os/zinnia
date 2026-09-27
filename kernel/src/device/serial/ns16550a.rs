@@ -1,68 +1,48 @@
 use crate::{
     device::dt::{Node, driver::Driver},
-    device::tty::{Tty, TtyDriver},
     log::{self, LoggerSink},
-    memory::{
-        PhysAddr,
-        pmm::KernelAlloc,
-        virt::{VmCacheType, VmFlags, mmu::PageTable},
-    },
+    memory::{MmioView, Register, UnsafeMemoryView, VmCacheType},
     posix::errno::{EResult, Errno},
+    util::mutex::spin::SpinMutex,
 };
-use alloc::{boxed::Box, string::String, sync::Arc};
-use core::{
-    ptr::null_mut,
-    sync::atomic::{AtomicPtr, AtomicU32, Ordering},
-};
+use alloc::boxed::Box;
+
+struct Device {
+    view: SpinMutex<MmioView>,
+    reg_shift: u32,
+}
 
 /// Transmit holding / receive buffer.
-const THR: usize = 0;
+const THR: Register<u8> = Register::new(0);
 /// Interrupt enable.
-const IER: usize = 1;
+const IER: Register<u8> = Register::new(1);
 /// FIFO control.
-const FCR: usize = 2;
+const FCR: Register<u8> = Register::new(2);
 /// Line control.
-const LCR: usize = 3;
+const LCR: Register<u8> = Register::new(3);
 /// Line status.
-const LSR: usize = 5;
+const LSR: Register<u8> = Register::new(5);
 /// Transmit holding register empty.
 const LSR_THR_EMPTY: u8 = 0x20;
 
-static BASE: AtomicPtr<u8> = AtomicPtr::new(null_mut());
-/// Register stride, as the `reg-shift` cell count from the device tree.
-static REG_SHIFT: AtomicU32 = AtomicU32::new(0);
+impl Device {
+    fn put_chars(&self, chars: &[u8]) {
+        let view = self.view.lock();
 
-unsafe fn reg_ptr(base: *mut u8, index: usize) -> *mut u8 {
-    unsafe { base.add(index << REG_SHIFT.load(Ordering::Relaxed)) }
-}
-
-unsafe fn put(base: *mut u8, ch: u8) {
-    unsafe {
-        while reg_ptr(base, LSR).read_volatile() & LSR_THR_EMPTY == 0 {
-            core::hint::spin_loop();
-        }
-        reg_ptr(base, THR).write_volatile(ch);
-    }
-}
-
-struct Ns16550Logger;
-
-impl LoggerSink for Ns16550Logger {
-    fn write(&mut self, input: &[u8]) {
-        let base = BASE.load(Ordering::Relaxed);
-        if base.is_null() {
-            return;
-        }
-        for &ch in input {
-            unsafe { put(base, ch) };
-            if ch == b'\n' {
-                unsafe { put(base, b'\r') };
+        for &ch in chars {
+            unsafe {
+                while view
+                    .read_reg(LSR.shifted(self.reg_shift as usize))
+                    .unwrap()
+                    .value()
+                    & LSR_THR_EMPTY
+                    == 0
+                {
+                    core::hint::spin_loop();
+                }
+                view.write_reg(THR.shifted(self.reg_shift as usize), ch);
             }
         }
-    }
-
-    fn name(&self) -> &'static str {
-        "ttyS0"
     }
 }
 
@@ -74,25 +54,22 @@ static DRIVER: Driver = Driver {
 
 fn probe(node: &Node) -> EResult<()> {
     let (phys, _) = node.reg(0).ok_or(Errno::EINVAL)?;
-    let base = PageTable::get_kernel()
-        .map_memory::<KernelAlloc>(
-            PhysAddr::from(phys as usize),
-            VmFlags::Read | VmFlags::Write,
-            VmCacheType::Uncacheable,
-            0x1000,
-        )
-        .map_err(|_| Errno::ENOMEM)?;
-    REG_SHIFT.store(node.first_cell(b"reg-shift", 0), Ordering::Relaxed);
-    BASE.store(base, Ordering::Relaxed);
+
+    let view =
+        SpinMutex::new(unsafe { MmioView::new(phys.into(), 0x1000, VmCacheType::Uncacheable) });
+    let reg_shift = node.first_cell(b"reg-shift").unwrap_or(0);
 
     // 8N1, FIFOs on, interrupts off.
     unsafe {
-        reg_ptr(base, IER).write_volatile(0x00);
-        reg_ptr(base, FCR).write_volatile(0xC7);
-        reg_ptr(base, LCR).write_volatile(0x03);
+        let locked = view.lock();
+        locked.write_reg(IER.shifted(reg_shift as usize), 0x00);
+        locked.write_reg(FCR.shifted(reg_shift as usize), 0xC7);
+        locked.write_reg(LCR.shifted(reg_shift as usize), 0x03);
     }
 
-    log::add_sink(Box::new(Ns16550Logger));
+    let dev = Device { view, reg_shift };
+
+    log::add_sink(Box::new(dev));
     Ok(())
 }
 
@@ -106,36 +83,12 @@ fn SERIAL_STAGE() {
     }
 }
 
-struct Ns16550TtyDriver;
-
-impl TtyDriver for Ns16550TtyDriver {
-    fn write_output(&self, data: &[u8]) -> EResult<()> {
-        let base = BASE.load(Ordering::Relaxed);
-        if base.is_null() {
-            return Err(Errno::ENODEV);
-        }
-        for &ch in data {
-            unsafe { put(base, ch) };
-        }
-        Ok(())
-    }
-}
-
-#[task(
-    name = "device.serial.ns16550a_file",
-    depends = [
-        crate::vfs::VFS_STAGE,
-        crate::vfs::fs::devtmpfs::DEVTMPFS_STAGE,
-        SERIAL_STAGE,
-    ],
-)]
-fn SERIAL_FILE_STAGE() {
-    let base = BASE.load(Ordering::Relaxed);
-    if base.is_null() {
-        return;
+impl LoggerSink for Device {
+    fn write(&mut self, input: &[u8]) {
+        self.put_chars(input);
     }
 
-    // TODO: wire an RX interrupt via `arch::irq::map_dt_interrupt`.
-    let tty = Tty::new(String::from("ttyS0"), Arc::new(Ns16550TtyDriver));
-    tty.register_device().expect("Unable to create ttyS0");
+    fn name(&self) -> &'static str {
+        "ns16550a"
+    }
 }

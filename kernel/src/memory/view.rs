@@ -103,6 +103,12 @@ impl<T: PrimInt> Register<T> {
         }
     }
 
+    /// Creates a new copy of the register, with the offset shifted left by some value.
+    pub const fn shifted(mut self, shift: usize) -> Self {
+        self.offset <<= shift;
+        self
+    }
+
     /// Marks this field as little endian.
     pub const fn with_le(mut self) -> Self {
         self.native_endian = is_little_endian();
