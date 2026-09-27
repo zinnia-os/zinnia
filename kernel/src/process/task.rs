@@ -194,6 +194,7 @@ impl Task {
         address_space: Arc<Mutex<AddressSpace>>,
         is_user: bool,
     ) -> EResult<Self> {
+        let kernel_stack = KernelStack::new()?;
         Ok(Self {
             id: TASK_ID_COUNTER.fetch_add(1, Ordering::Acquire),
             is_user,
@@ -207,7 +208,7 @@ impl Task {
             on_cpu: AtomicBool::new(false),
             block_token: AtomicUsize::new(0),
             executor: SyncUnsafeCell::new(arch::sched::Executor::default()),
-            kernel_stack: KernelStack::new()?,
+            kernel_stack,
             user_stack: AtomicUsize::new(0),
             ticks: 0,
             name: SpinMutex::new(String::new()),
