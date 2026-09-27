@@ -780,6 +780,42 @@ fn get_controlling_tty() -> EResult<Arc<Tty>> {
     proc.controlling_tty.lock().clone().ok_or(Errno::ENXIO)
 }
 
+pub struct Console;
+
+static ACTIVE_CONSOLE: SpinMutex<Option<Arc<Tty>>> = SpinMutex::new(None);
+
+impl Console {
+    pub fn get_active() -> EResult<Arc<Tty>> {
+        ACTIVE_CONSOLE.lock().clone().ok_or(Errno::ENXIO)
+    }
+
+    pub fn set_active(tty: Arc<Tty>) {
+        *ACTIVE_CONSOLE.lock() = Some(tty);
+    }
+}
+
+impl FileOps for Console {
+    fn read(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
+        let tty = Self::get_active()?;
+        TtyFileOps { tty }.read(file, buffer, offset)
+    }
+
+    fn write(&self, file: &File, buffer: &mut IovecIter, offset: u64) -> EResult<isize> {
+        let tty = Self::get_active()?;
+        TtyFileOps { tty }.write(file, buffer, offset)
+    }
+
+    fn ioctl(&self, file: &File, request: usize, arg: VirtAddr) -> EResult<usize> {
+        let tty = Self::get_active()?;
+        TtyFileOps { tty }.ioctl(file, request, arg)
+    }
+
+    fn poll(&self, file: &File, mask: PollFlags) -> EResult<PollFlags> {
+        let tty = Self::get_active()?;
+        TtyFileOps { tty }.poll(file, mask)
+    }
+}
+
 #[task(
     name = "generic.device.tty.ctty",
     depends = [devtmpfs::DEVTMPFS_STAGE],
@@ -791,4 +827,11 @@ pub fn CTTY_STAGE() {
         Mode::from_bits_truncate(0o660),
     )
     .expect("Unable to register ctty device");
+
+    device::register_char_node(
+        b"console",
+        device::make_shared(Arc::new(Console), 5, 1),
+        Mode::from_bits_truncate(0o600),
+    )
+    .expect("Unable to register console device");
 }

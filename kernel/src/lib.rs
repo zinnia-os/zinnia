@@ -55,7 +55,7 @@ pub mod util;
 pub mod vfs;
 
 use crate::{
-    device::block::ram::RamDisk,
+    device::{block::ram::RamDisk, tty::Console},
     irq::lock::IrqLock,
     percpu::CpuData,
     process::{Identity, Process},
@@ -160,6 +160,7 @@ pub extern "C" fn main(_: usize, _: usize) {
         .get_string("console")
         .unwrap_or("tty1");
     let tty = device::tty::get_tty_by_name(console_name).expect("Unable to open TTY for init");
+    Console::set_active(tty.clone());
 
     {
         *tty.session.lock() = Some(init_proc.get_pid());
