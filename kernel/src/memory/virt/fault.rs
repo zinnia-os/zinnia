@@ -120,7 +120,7 @@ pub fn handler(info: &PageFaultInfo) -> bool {
         .find(|m| faulty_page >= m.start_page && faulty_page < m.end_page)
         .is_some_and(|m| {
             let same_offset = (faulty_page - m.start_page) + m.offset_page == resolved.object_page;
-            let flags = m.get_flags();
+            let mut flags = m.get_flags();
             let wants_cow_now = flags.contains(VmFlags::CopyOnWrite);
             let cow_write_now = wants_cow_now && info.caused_by_write;
             let allowed = if info.caused_by_write {
@@ -130,10 +130,18 @@ pub fn handler(info: &PageFaultInfo) -> bool {
             } else {
                 flags.intersects(VmFlags::Read | VmFlags::Write)
             };
+
+            if cow_write_now {
+                flags &= !VmFlags::CopyOnWrite;
+            } else if wants_cow_now {
+                flags &= !VmFlags::Write;
+            }
+
             Arc::ptr_eq(&m.object, &resolved.object)
                 && same_offset
                 && allowed
                 && cow_write_now == resolved.cow_write
+                && flags == resolved.map_flags
         });
 
     if !still_valid {
