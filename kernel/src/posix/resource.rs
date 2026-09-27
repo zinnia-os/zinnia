@@ -20,6 +20,7 @@ pub enum Resource {
     RtTime = RLIMIT_RTTIME,
 }
 
+#[derive(Clone, Copy)]
 pub struct Limits {
     pub open_max: rlimit,
     pub core_size: rlimit,
@@ -34,7 +35,7 @@ impl Default for Limits {
             },
             core_size: rlimit {
                 rlim_cur: 0,
-                rlim_max: 0,
+                rlim_max: RLIM_INFINITY,
             },
         }
     }
