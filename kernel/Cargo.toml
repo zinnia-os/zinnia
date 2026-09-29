@@ -11,7 +11,6 @@ crate-type = ["dylib"]
 uacpi-sys = { path = "../bindings/uacpi" }
 
 bitflags = { workspace = true }
-cfg-if = { workspace = true }
 seq-macro = { workspace = true }
 bytemuck = { version = "1.24.0", features = ["derive", "min_const_generics"] }
 num-traits = { version = "0.2.19", default-features = false }
