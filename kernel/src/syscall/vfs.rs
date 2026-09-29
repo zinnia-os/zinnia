@@ -431,7 +431,9 @@ pub fn dup3(fd1: i32, fd2: i32, flags: usize) -> EResult<i32> {
 
         proc_inner.open_file(file, fd2).ok_or(Errno::EMFILE)
     };
-    drop(displaced);
+    if let Some(displaced) = &displaced {
+        displaced.file.flush_on_close()?;
+    }
     result
 }
 
