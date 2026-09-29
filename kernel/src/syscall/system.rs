@@ -246,8 +246,7 @@ const LOG_INFO: usize = 6;
 const LOG_DEBUG: usize = 7;
 
 #[wrap_syscall]
-pub fn syslog(level: usize, ptr: VirtAddr, len: usize) -> EResult<usize> {
-    let ptr = UserPtr::<u8>::new(ptr);
+pub fn syslog(level: usize, ptr: UserPtr<u8>, len: usize) -> EResult<usize> {
     if ptr.is_null() {
         return Ok(0);
     }
