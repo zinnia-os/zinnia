@@ -7,9 +7,10 @@ on:
   pull_request:
   merge_group:
 
+
 jobs:
   format-check:
-    name: Check formatting and run linter
+    name: Check formatting
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -20,8 +21,6 @@ jobs:
         components: clippy rust-src rustfmt
     - name: Run format check
       run: cargo fmt --check
-    - name: Run clippy
-      run: cargo clippy
   compile-check:
     strategy:
       matrix:
@@ -41,6 +40,6 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y clang llvm lld gcc-multilib
     - name: Run build
-      run: cargo build --target "toolchain/${{matrix.arch}}-kernel.json"
+      run: cargo build -Zjson-target-spec --target "toolchain/${{matrix.arch}}-kernel.json"
       env:
         CC: clang

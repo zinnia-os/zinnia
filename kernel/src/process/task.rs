@@ -273,7 +273,7 @@ impl Task {
     pub(crate) fn next_block_token(&self) -> BlockToken {
         let mut result = 0;
         self.block_token
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                 result = (old & !UNBLOCKED_BIT).wrapping_add(NEXT_BLOCK_TOKEN);
                 Some(result)
             })
