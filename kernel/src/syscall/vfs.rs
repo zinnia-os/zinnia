@@ -1657,6 +1657,21 @@ pub fn umount(dir_ptr: VirtAddr, _flags: u32) -> EResult<usize> {
         LookupFlags::MustExist | LookupFlags::FollowSymlinks,
     )?;
 
+    let sb = {
+        let mounts = mount_point.entry.mounts.lock();
+        mounts
+            .last()
+            .ok_or(Errno::EINVAL)?
+            .root
+            .get_inode()
+            .and_then(|inode| inode.sb.clone())
+    };
+
+    if let Some(sb) = sb {
+        sb.clone().sync()?;
+        crate::vfs::fs::unregister_super(&sb);
+    }
+
     // Remove the last mount from this entry's mount list.
     let mount = {
         let mut mounts = mount_point.entry.mounts.lock();

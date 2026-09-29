@@ -10,7 +10,7 @@ use crate::{
     util::mutex::spin::SpinMutex,
     vfs::{PathNode, cache::Entry},
 };
-use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::{any::Any, fmt::Debug};
 
 /// A mounted file system.
@@ -86,6 +86,10 @@ pub fn sync_all() -> EResult<()> {
         }
     }
     result
+}
+
+pub fn unregister_super(sb: &Arc<dyn SuperBlock>) {
+    MOUNTED_SUPERS.lock().retain(|s| !Arc::ptr_eq(s, sb));
 }
 
 /// Mounts a file system at path `source` on `target`.
