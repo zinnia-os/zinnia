@@ -4,7 +4,6 @@ use crate::{
     percpu::CpuData,
     posix::{
         errno::{EResult, Errno},
-        resource::Limits,
         utsname::UTSNAME,
     },
     process::signal::Signal,
@@ -297,8 +296,8 @@ pub fn itimer_set(which: usize, new_value: VirtAddr, old_value: VirtAddr) -> ERe
 
 #[wrap_syscall]
 pub fn getrlimit(resource: u32, rlim: VirtAddr) -> EResult<usize> {
-    // TODO: Implement properly
-    let limits = Limits::default();
+    let proc = Scheduler::get_current().get_process();
+    let limits = proc.limits.lock();
     let value = match resource {
         RLIMIT_NOFILE => limits.open_max,
         RLIMIT_CORE => limits.core_size,
@@ -316,7 +315,23 @@ pub fn getrlimit(resource: u32, rlim: VirtAddr) -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn setrlimit(resource: u32, rlim: VirtAddr) -> EResult<usize> {
-    let _ = (resource, rlim);
+    let new_limit = UserPtr::<rlimit>::new(rlim).read().ok_or(Errno::EFAULT)?;
+    if new_limit.rlim_cur > new_limit.rlim_max {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    let superuser = proc.identity.lock().is_effective_superuser();
+    let mut limits = proc.limits.lock();
+    let limit = match resource {
+        RLIMIT_NOFILE => &mut limits.open_max,
+        RLIMIT_CORE => &mut limits.core_size,
+        _ => return Err(Errno::EINVAL),
+    };
+    if new_limit.rlim_max > limit.rlim_max && !superuser {
+        return Err(Errno::EPERM);
+    }
+    *limit = new_limit;
     Ok(0)
 }
 
@@ -537,6 +552,7 @@ pub(super) fn read_timeout_deadline(timeout: VirtAddr) -> EResult<Option<Duratio
 #[wrap_syscall]
 pub fn sysconf(value: i32) -> EResult<usize> {
     let ret = match value {
+        uapi::sysconf::ARG_MAX => uapi::limits::ARG_MAX,
         uapi::sysconf::NPROCESSORS_ONLN => CpuData::num_online(),
         uapi::sysconf::NPROCESSORS_CONF => CpuData::num_present(),
         _ => return Err(Errno::EINVAL),

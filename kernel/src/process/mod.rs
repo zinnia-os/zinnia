@@ -11,7 +11,10 @@ use crate::{
         virt::{AddressSpace, KERNEL_PAGE_TABLE},
     },
     percpu::CpuData,
-    posix::errno::{EResult, Errno},
+    posix::{
+        errno::{EResult, Errno},
+        resource::Limits,
+    },
     process::{
         itimer::{IntervalTimerState, PosixTimers},
         signal::{SigQueue, Signal, SignalState},
@@ -64,6 +67,8 @@ pub struct Process {
     parent: SpinMutex<Option<Weak<Process>>>,
     /// A value between -20 and 19, where -20 is the highest priority and 0 is a neutral priority.
     nice: AtomicI8,
+    /// Resource limits inherited across fork and preserved across exec.
+    pub limits: SpinMutex<Limits>,
     /// A list of [`Task`]s associated with this process.
     pub threads: SpinMutex<Vec<Arc<Task>>>,
     /// The address space for this process.
@@ -235,6 +240,7 @@ impl Process {
             has_execed: AtomicBool::new(false),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
             nice: AtomicI8::new(self.nice.load(Ordering::Relaxed)),
+            limits: SpinMutex::new(*self.limits.lock()),
         });
 
         // Create a heap allocated context that we can pass to the entry point.
@@ -268,7 +274,7 @@ impl Process {
         parent: Option<Arc<Self>>,
         space: AddressSpace,
     ) -> EResult<Self> {
-        let (root, cwd, identity, pgrp, session, ctty) = match &parent {
+        let (root, cwd, identity, pgrp, session, ctty, limits) = match &parent {
             Some(x) => (
                 x.root_dir.lock().clone(),
                 x.working_dir.lock().clone(),
@@ -276,6 +282,7 @@ impl Process {
                 *x.pgrp.lock(),
                 *x.session.lock(),
                 x.controlling_tty.lock().clone(),
+                *x.limits.lock(),
             ),
             None => (
                 vfs::get_root(),
@@ -284,6 +291,7 @@ impl Process {
                 0,
                 0,
                 None,
+                Limits::default(),
             ),
         };
 
@@ -323,6 +331,7 @@ impl Process {
             has_execed: AtomicBool::new(false),
             umask: AtomicU32::new(0o022),
             nice: AtomicI8::new(0),
+            limits: SpinMutex::new(limits),
         })
     }
 
