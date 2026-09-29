@@ -59,7 +59,7 @@ pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<
     // Read user memory before locking.
     let new_set = if !set_ptr.is_null() {
         let how = how as u32;
-        if how < uapi::signal::SIG_BLOCK || how > uapi::signal::SIG_SETMASK {
+        if !(uapi::signal::SIG_BLOCK..=uapi::signal::SIG_SETMASK).contains(&how) {
             return Err(Errno::EINVAL);
         }
         let set: UserPtr<uapi::signal::sigset_t> = UserPtr::new(set_ptr);
@@ -81,7 +81,7 @@ pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<
         let mut sig_state = task.signal.lock();
         match how {
             uapi::signal::SIG_BLOCK => sig_state.mask |= new_set,
-            uapi::signal::SIG_UNBLOCK => sig_state.mask = sig_state.mask & !new_set,
+            uapi::signal::SIG_UNBLOCK => sig_state.mask &= !new_set,
             uapi::signal::SIG_SETMASK => sig_state.mask = new_set,
             _ => unreachable!(),
         }

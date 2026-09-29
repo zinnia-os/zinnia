@@ -96,7 +96,7 @@ fn SERIAL_STAGE() {
         write8(COM1_BASE + 1, 0x00); // Disable interrupts
         write8(COM1_BASE + 3, 0x80); // Enable DLAB (set baud rate divisor)#
 
-        write8(COM1_BASE + 0, 0x03); // Set divisor low byte (115200 baud if 1)
+        write8(COM1_BASE, 0x03); // Set divisor low byte (115200 baud if 1)
         write8(COM1_BASE + 1, 0x00); // Set divisor high byte
 
         write8(COM1_BASE + 3, 0x03); // 8 bits, no parity, one stop bit (8n1)

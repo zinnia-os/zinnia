@@ -264,7 +264,7 @@ impl PathNode {
 
     /// Resolve the absolute path of this node as seen from `root`.
     pub fn absolute_path(&self, root: &Self) -> EResult<Vec<u8>> {
-        let mut buffer = alloc::vec![0u8; PATH_MAX as usize];
+        let mut buffer = alloc::vec![0u8; PATH_MAX];
         let mut cursor = buffer.len();
         let mut mount = self.mount.clone();
         let mut entry = self.entry.clone();

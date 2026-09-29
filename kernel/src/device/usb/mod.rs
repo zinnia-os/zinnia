@@ -392,7 +392,9 @@ impl Device {
 
         let len = (buf[0] as usize).min(n);
         let units = buf[2..len]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]));
         let s: String = char::decode_utf16(units)
             .map(|r| r.unwrap_or('\u{fffd}'))

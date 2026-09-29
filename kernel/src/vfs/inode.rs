@@ -261,7 +261,7 @@ pub trait DirectoryOps: FileOps + Any {
         let mut read = 0;
         let mut current = 0;
 
-        for (_, child) in children.iter() {
+        for child in children.values() {
             let inode = match child.get_inode() {
                 Some(x) => x,
                 None => continue,

@@ -463,15 +463,13 @@ impl Global {
                 local.has_usage_minimum = true;
                 local.usage_minimum = udata;
             }
-            0x02 => {
-                if local.has_usage_minimum {
-                    local.usages.push(Usage {
-                        usage: self.usage_page << 16,
-                        minimum: local.usage_minimum,
-                        maximum: udata,
-                    });
-                    local.has_usage_minimum = false;
-                }
+            0x02 if local.has_usage_minimum => {
+                local.usages.push(Usage {
+                    usage: self.usage_page << 16,
+                    minimum: local.usage_minimum,
+                    maximum: udata,
+                });
+                local.has_usage_minimum = false;
             }
             // Designator/string indices and delimiters ignored.
             _ => {}

@@ -355,14 +355,14 @@ impl IrqHandler for KeyboardIrqHandler {
 }
 
 struct Ps2Mouse {
-    rel_bits: [u8; (REL_CNT as usize + 7) / 8],
-    key_bits: [u8; (KEY_CNT as usize + 7) / 8],
+    rel_bits: [u8; (REL_CNT as usize).div_ceil(8)],
+    key_bits: [u8; (KEY_CNT as usize).div_ceil(8)],
 }
 
 impl Ps2Mouse {
     fn new() -> Self {
-        let mut rel_bits = [0u8; (REL_CNT as usize + 7) / 8];
-        let mut key_bits = [0u8; (KEY_CNT as usize + 7) / 8];
+        let mut rel_bits = [0u8; (REL_CNT as usize).div_ceil(8)];
+        let mut key_bits = [0u8; (KEY_CNT as usize).div_ceil(8)];
 
         // REL_X, REL_Y
         rel_bits[(REL_X / 8) as usize] |= 1 << (REL_X % 8);

@@ -189,7 +189,7 @@ impl Controller {
         // Check if the identification was successful.
         if !comp.status.is_success() {
             error!("Identification failed with status {:x}", comp.status.0);
-            return Err(NvmeError::CommandFailed)?;
+            Err(NvmeError::CommandFailed)?;
         }
 
         // Read the model strings.

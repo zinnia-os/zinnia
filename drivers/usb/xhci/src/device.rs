@@ -110,7 +110,7 @@ pub(crate) fn xhci_speed_to_usb(code: u8) -> Speed {
         2 => Speed::Low,
         3 => Speed::High,
         4 => Speed::Super,
-        5 | 6 | 7 => Speed::SuperPlus,
+        5..=7 => Speed::SuperPlus,
         _ => Speed::Unknown,
     }
 }

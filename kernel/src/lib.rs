@@ -150,7 +150,7 @@ pub extern "C" fn main(_: usize, _: usize) {
         .push(init_proc.clone());
     process::PROCESS_TABLE
         .lock()
-        .insert(init_proc.get_pid(), Arc::downgrade(&init_proc));
+        .insert(init_proc.get_pid(), Arc::downgrade(init_proc));
 
     let console_name = BootInfo::get()
         .command_line

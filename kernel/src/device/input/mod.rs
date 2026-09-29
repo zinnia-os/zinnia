@@ -585,7 +585,7 @@ pub fn INPUT_STAGE() {
         root,
         b"input",
         Mode::from_bits_truncate(0o755),
-        &Identity::get_kernel(),
+        Identity::get_kernel(),
     )
     .expect("Unable to create /dev/input");
 }

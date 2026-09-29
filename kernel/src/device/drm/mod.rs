@@ -1053,10 +1053,10 @@ impl FileOps for DrmFile {
 
                 // If this was the active framebuffer, clear it
                 let mut active = self.active_fb.lock();
-                if let Some((_, ref fb)) = *active {
-                    if fb.id == fb_id {
-                        *active = None;
-                    }
+                if let Some((_, ref fb)) = *active
+                    && fb.id == fb_id
+                {
+                    *active = None;
                 }
             }
             drm::DRM_IOCTL_MODE_GETCRTC => {
@@ -1081,11 +1081,11 @@ impl FileOps for DrmFile {
 
                         // Check if there's a mode on the connector
                         let connectors = state.connectors.lock();
-                        if let Some(conn) = connectors.first() {
-                            if let Some(mode) = conn.modes.first() {
-                                val.mode = *mode;
-                                val.mode_valid = 1;
-                            }
+                        if let Some(conn) = connectors.first()
+                            && let Some(mode) = conn.modes.first()
+                        {
+                            val.mode = *mode;
+                            val.mode_valid = 1;
                         }
                     }
                 } else {
@@ -1562,7 +1562,7 @@ pub fn INPUT_STAGE() {
         root,
         b"drm",
         Mode::from_bits_truncate(0o755),
-        &Identity::get_kernel(),
+        Identity::get_kernel(),
     )
     .expect("Unable to create /dev/drm/");
 }

@@ -581,12 +581,7 @@ fn prepare_signal(proc: &Arc<Process>, sig: Signal, blocked: bool) -> bool {
     }
 
     // Drop ignored signals at send time, unless they are blocked.
-    if !sig.is_uncatchable() && !blocked && proc.signal_actions.lock().get_action(sig).ignores(sig)
-    {
-        return false;
-    }
-
-    true
+    !(!sig.is_uncatchable() && !blocked && proc.signal_actions.lock().get_action(sig).ignores(sig))
 }
 
 /// Queue a signal on the given thread and wake it if it is sleeping.

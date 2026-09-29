@@ -816,10 +816,8 @@ impl SocketOps for TcpSocket {
                     revents |= PollFlags::Hup;
                 }
             }
-            TcpState::Closed => {
-                if inner.error.is_some() {
-                    revents |= PollFlags::Err;
-                }
+            TcpState::Closed if inner.error.is_some() => {
+                revents |= PollFlags::Err;
             }
             _ => {}
         }

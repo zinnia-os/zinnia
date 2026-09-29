@@ -554,10 +554,10 @@ impl XhciController {
     /// Clears the DCBAA entry and slot-table entry for `slot`.
     pub(crate) fn release_slot(&self, slot: u8, device: &Arc<XhciDevice>) {
         self.set_dcbaa(slot, 0);
-        if let Some(entry) = self.slots.lock().get_mut(slot as usize) {
-            if entry.as_ref().is_some_and(|d| Arc::ptr_eq(d, device)) {
-                *entry = None;
-            }
+        if let Some(entry) = self.slots.lock().get_mut(slot as usize)
+            && entry.as_ref().is_some_and(|d| Arc::ptr_eq(d, device))
+        {
+            *entry = None;
         }
     }
 
@@ -574,28 +574,27 @@ impl XhciController {
                 let code = ((status >> 24) & 0xff) as u8;
 
                 if trb_type == TrbType::CommandCompletionEvent as u8 {
-                    let slot = ((control >> 24) & 0xff) as u32;
+                    let slot = (control >> 24) & 0xff;
                     let mut command_ring = self.command_ring.lock();
-                    if let Some(index) = command_ring.index_of_phys(parameter) {
-                        if let Some(cell) = command_ring.take_pending(index) {
-                            cell.complete(code, slot);
-                        }
+                    if let Some(index) = command_ring.index_of_phys(parameter)
+                        && let Some(cell) = command_ring.take_pending(index)
+                    {
+                        cell.complete(code, slot);
                     }
                 } else if trb_type == TrbType::TransferEvent as u8 {
                     let residue = status & 0x00ff_ffff;
                     let slot = ((control >> 24) & 0xff) as usize;
                     let endpoint = ((control >> 16) & 0x1f) as usize;
                     let device = self.slots.lock().get(slot).and_then(|d| d.clone());
-                    if let Some(device) = device {
-                        if (1..=31).contains(&endpoint) {
-                            let mut ring = device.ep_rings[endpoint - 1].lock();
-                            if let Some(ring) = ring.as_mut() {
-                                if let Some(index) = ring.index_of_phys(parameter) {
-                                    if let Some(cell) = ring.take_pending(index) {
-                                        cell.complete(code, residue);
-                                    }
-                                }
-                            }
+                    if let Some(device) = device
+                        && (1..=31).contains(&endpoint)
+                    {
+                        let mut ring = device.ep_rings[endpoint - 1].lock();
+                        if let Some(ring) = ring.as_mut()
+                            && let Some(index) = ring.index_of_phys(parameter)
+                            && let Some(cell) = ring.take_pending(index)
+                        {
+                            cell.complete(code, residue);
                         }
                     }
                 } else if trb_type == TrbType::PortStatusChangeEvent as u8 {

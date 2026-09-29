@@ -676,5 +676,5 @@ pub fn PROCESS_STAGE() {
     let kproc = KERNEL_PROCESS.get();
     PROCESS_TABLE
         .lock()
-        .insert(kproc.get_pid(), Arc::downgrade(&kproc));
+        .insert(kproc.get_pid(), Arc::downgrade(kproc));
 }

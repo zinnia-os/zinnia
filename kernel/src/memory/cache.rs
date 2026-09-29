@@ -383,7 +383,7 @@ impl Drop for PagedMemoryObject {
         }
 
         let p = self.pages.lock();
-        for (_, &addr) in p.iter() {
+        for &addr in p.values() {
             unsafe { KernelAlloc::dealloc(addr, 1) };
         }
     }

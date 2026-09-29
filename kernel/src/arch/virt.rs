@@ -84,7 +84,7 @@ pub unsafe fn set_user_access(state: bool) {
 /// `dest` must be a valid kernel memory address.
 #[must_use]
 pub fn copy_from_user(dest: &mut [u8], src: VirtAddr) -> bool {
-    if dest.len() == 0 {
+    if dest.is_empty() {
         return true;
     }
     let task = Scheduler::get_current();
@@ -102,7 +102,7 @@ pub fn copy_from_user(dest: &mut [u8], src: VirtAddr) -> bool {
 /// `src` must be a valid kernel memory address.
 #[must_use]
 pub fn copy_to_user(dest: VirtAddr, src: &[u8]) -> bool {
-    if src.len() == 0 {
+    if src.is_empty() {
         return true;
     }
     let task = Scheduler::get_current();

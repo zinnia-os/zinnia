@@ -162,10 +162,10 @@ impl VtManager {
     }
 
     fn refresh_if_text(&self, vt: &Vt) {
-        if vt.kd_mode.load(Ordering::Acquire) == ioctls::KD_TEXT {
-            if let Some(display) = self.display.lock().as_ref() {
-                display.refresh();
-            }
+        if vt.kd_mode.load(Ordering::Acquire) == ioctls::KD_TEXT
+            && let Some(display) = self.display.lock().as_ref()
+        {
+            display.refresh();
         }
     }
 
@@ -185,15 +185,13 @@ impl VtManager {
             (mode.process, mode.relsig, mode.owner)
         };
 
-        if process {
-            if let (Some(pid), Ok(sig)) = (owner, Signal::try_from(relsig as u32)) {
-                *self.switch_pending.lock() = Some(target);
-                if signal_pid(pid, sig) {
-                    return Ok(0);
-                }
-                // The controlling process is gone, switch immediately.
-                *self.switch_pending.lock() = None;
+        if process && let (Some(pid), Ok(sig)) = (owner, Signal::try_from(relsig as u32)) {
+            *self.switch_pending.lock() = Some(target);
+            if signal_pid(pid, sig) {
+                return Ok(0);
             }
+            // The controlling process is gone, switch immediately.
+            *self.switch_pending.lock() = None;
         }
 
         self.finish_switch(target);
@@ -213,10 +211,8 @@ impl VtManager {
             let mode = vt.mode.lock();
             (mode.process, mode.acqsig, mode.owner)
         };
-        if process {
-            if let (Some(pid), Ok(sig)) = (owner, Signal::try_from(acqsig as u32)) {
-                signal_pid(pid, sig);
-            }
+        if process && let (Some(pid), Ok(sig)) = (owner, Signal::try_from(acqsig as u32)) {
+            signal_pid(pid, sig);
         }
 
         self.switch_event.wake_all();

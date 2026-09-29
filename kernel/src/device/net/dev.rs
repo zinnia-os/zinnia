@@ -92,7 +92,7 @@ pub fn NET_DEVICE_STAGE() {
         root,
         b"net",
         Mode::from_bits_truncate(0o755),
-        &Identity::get_kernel(),
+        Identity::get_kernel(),
     )
     .expect("Unable to create /dev/net");
 }

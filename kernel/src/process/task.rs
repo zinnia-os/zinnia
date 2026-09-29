@@ -163,7 +163,7 @@ impl Task {
 
         let proc = Process::get_kernel();
         let result = Arc::try_new(Self::new_uninitialized(
-            &proc,
+            proc,
             proc.address_space.lock().clone(),
             false,
         )?)?;

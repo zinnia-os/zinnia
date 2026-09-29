@@ -128,19 +128,17 @@ impl VirtualAllocator {
             .allocated
             .range(..VirtRange::probe_min(range.start_page))
             .next_back()
+            && pred.end_page > range.start_page
         {
-            if pred.end_page > range.start_page {
-                return Err(Errno::ENOMEM);
-            }
+            return Err(Errno::ENOMEM);
         }
         if let Some(succ) = self
             .allocated
             .range(VirtRange::probe_min(range.start_page)..)
             .next()
+            && succ.start_page < range.end_page
         {
-            if succ.start_page < range.end_page {
-                return Err(Errno::ENOMEM);
-            }
+            return Err(Errno::ENOMEM);
         }
 
         self.allocated.insert(range);

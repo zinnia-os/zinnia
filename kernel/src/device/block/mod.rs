@@ -140,10 +140,10 @@ pub fn submit_all(
         }
     }
 
-    if total == 0 {
-        if let Some(e) = first_err {
-            return Err(e);
-        }
+    if total == 0
+        && let Some(e) = first_err
+    {
+        return Err(e);
     }
 
     Ok(total)
@@ -253,7 +253,7 @@ pub fn BLOCK_STAGE() {
         root,
         b"block",
         Mode::from_bits_truncate(0o755),
-        &Identity::get_kernel(),
+        Identity::get_kernel(),
     )
     .expect("Unable to create /dev/block");
 }
@@ -360,7 +360,7 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             root.clone(),
             type_link.as_bytes(),
             part_name.as_bytes(),
-            &Identity::get_kernel(),
+            Identity::get_kernel(),
         ) {
             Ok(_) => nodes.push(type_link),
             Err(Errno::EEXIST) => log!(
@@ -378,7 +378,7 @@ fn scan_partitions(parent_name: &str, device: Arc<dyn BlockDevice>) -> EResult<(
             root.clone(),
             uuid_link.as_bytes(),
             part_name.as_bytes(),
-            &Identity::get_kernel(),
+            Identity::get_kernel(),
         )?;
         nodes.push(uuid_link);
 

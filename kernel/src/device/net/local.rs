@@ -741,10 +741,10 @@ impl SocketOps for LocalSocket {
                 return None;
             }
 
-            if len > 0 {
-                if let Err(e) = buf.copy_from_slice(&scratch[..len]) {
-                    return Some(Err(e));
-                }
+            if len > 0
+                && let Err(e) = buf.copy_from_slice(&scratch[..len])
+            {
+                return Some(Err(e));
             }
             let mut out_flags = 0u32;
             let ctrl_written =

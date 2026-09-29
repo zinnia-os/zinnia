@@ -134,10 +134,9 @@ impl Driver {
                     && v.prog_if.is_none_or(|x| x == prog_if)
                     && v.sub_class.is_none_or(|x| x == sub_class)
                     && v.class.is_none_or(|x| x == class)
-            }) {
-                if let Err(e) = (self.probe)(variant, view) {
-                    warn!("{}: {} failed to probe: {:?}", addr, self.name, e);
-                }
+            }) && let Err(e) = (self.probe)(variant, view)
+            {
+                warn!("{}: {} failed to probe: {:?}", addr, self.name, e);
             }
         }
 

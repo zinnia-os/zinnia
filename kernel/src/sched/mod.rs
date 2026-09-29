@@ -149,10 +149,10 @@ impl Runq {
     fn steal_from(&mut self, start: usize) -> Option<Arc<Task>> {
         for offset in 0..RQ_NQS {
             let idx = (start + offset) % RQ_NQS;
-            if self.is_set(idx) {
-                if let Some(task) = self.take_migratable(idx) {
-                    return Some(task);
-                }
+            if self.is_set(idx)
+                && let Some(task) = self.take_migratable(idx)
+            {
+                return Some(task);
             }
         }
         None
@@ -349,37 +349,33 @@ impl Scheduler {
             task.last_cpu.load(Ordering::Acquire)
         };
 
-        if task.load_counted.load(Ordering::Acquire) {
-            if let Some(owner_cpu) = CpuData::get_for(assigned_cpu_id) {
-                if owner_cpu.online.load(Ordering::Acquire) {
-                    return owner_cpu;
-                }
-            }
+        if task.load_counted.load(Ordering::Acquire)
+            && let Some(owner_cpu) = CpuData::get_for(assigned_cpu_id)
+            && owner_cpu.online.load(Ordering::Acquire)
+        {
+            return owner_cpu;
         }
 
-        if task.queued.load(Ordering::Acquire) {
-            if let Some(queued_cpu) = CpuData::get_for(assigned_cpu_id) {
-                if queued_cpu.online.load(Ordering::Acquire) {
-                    return queued_cpu;
-                }
-            }
+        if task.queued.load(Ordering::Acquire)
+            && let Some(queued_cpu) = CpuData::get_for(assigned_cpu_id)
+            && queued_cpu.online.load(Ordering::Acquire)
+        {
+            return queued_cpu;
         }
 
-        if honor_affinity {
-            if let Some(last_cpu) = CpuData::get_for(last_cpu_id) {
-                let last_run = task.last_run_tick.load(Ordering::Acquire);
-                if last_cpu.online.load(Ordering::Acquire)
-                    && now.saturating_sub(last_run) <= AFFINITY_TICKS
-                {
-                    if current_cpu.online.load(Ordering::Acquire) && current_cpu.id != last_cpu.id {
-                        let current_load = current_cpu.scheduler.load.load(Ordering::Acquire);
-                        let last_load = last_cpu.scheduler.load.load(Ordering::Acquire);
-                        if current_load <= last_load.saturating_add(WAKE_AFFINE_LOAD_MARGIN) {
-                            return current_cpu;
-                        }
+        if honor_affinity && let Some(last_cpu) = CpuData::get_for(last_cpu_id) {
+            let last_run = task.last_run_tick.load(Ordering::Acquire);
+            if last_cpu.online.load(Ordering::Acquire)
+                && now.saturating_sub(last_run) <= AFFINITY_TICKS
+            {
+                if current_cpu.online.load(Ordering::Acquire) && current_cpu.id != last_cpu.id {
+                    let current_load = current_cpu.scheduler.load.load(Ordering::Acquire);
+                    let last_load = last_cpu.scheduler.load.load(Ordering::Acquire);
+                    if current_load <= last_load.saturating_add(WAKE_AFFINE_LOAD_MARGIN) {
+                        return current_cpu;
                     }
-                    return last_cpu;
                 }
+                return last_cpu;
             }
         }
 

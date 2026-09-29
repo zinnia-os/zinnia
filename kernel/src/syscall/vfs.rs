@@ -1611,7 +1611,7 @@ pub fn mount(
         LookupFlags::MustExist | LookupFlags::FollowSymlinks,
     )?;
 
-    let new_mount = fs::mount(&fs_type, mount_flags, UserPtr::new(data_ptr))?;
+    let new_mount = fs::mount(fs_type, mount_flags, UserPtr::new(data_ptr))?;
 
     mount_point.mount(new_mount)?;
     Ok(0)

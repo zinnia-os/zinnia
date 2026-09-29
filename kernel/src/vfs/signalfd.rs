@@ -34,10 +34,10 @@ impl SignalfdFile {
     fn dequeue_one(&self) -> Option<(Signal, SigInfoData, PendingQueue)> {
         let mask = *self.mask.lock();
         let task = Scheduler::get_current();
-        if Arc::ptr_eq(&task.get_process(), &self.process) {
-            if let Some(dequeued) = task.signal.lock().queue.dequeue(mask) {
-                return Some((dequeued.0, dequeued.1, PendingQueue::Thread));
-            }
+        if Arc::ptr_eq(&task.get_process(), &self.process)
+            && let Some(dequeued) = task.signal.lock().queue.dequeue(mask)
+        {
+            return Some((dequeued.0, dequeued.1, PendingQueue::Thread));
         }
         self.process
             .shared_pending

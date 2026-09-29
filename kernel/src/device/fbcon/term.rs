@@ -1154,21 +1154,19 @@ impl Term {
                     self.revscroll();
                 }
             }
-            b'b' => {
-                if self.last_was_graphic {
-                    self.scroll_enabled = saved_scroll;
-                    self.wrap_enabled = saved_wrap;
-                    for _ in 0..ev0.min(self.cols) {
-                        if self.insert_mode {
-                            let (ix, iy) = self.get_cursor_pos();
-                            let mut j = self.cols - 1;
-                            while j > ix {
-                                self.move_character(j, iy, j - 1, iy);
-                                j -= 1;
-                            }
+            b'b' if self.last_was_graphic => {
+                self.scroll_enabled = saved_scroll;
+                self.wrap_enabled = saved_wrap;
+                for _ in 0..ev0.min(self.cols) {
+                    if self.insert_mode {
+                        let (ix, iy) = self.get_cursor_pos();
+                        let mut j = self.cols - 1;
+                        while j > ix {
+                            self.move_character(j, iy, j - 1, iy);
+                            j -= 1;
                         }
-                        self.raw_putchar(self.last_printed_char);
                     }
+                    self.raw_putchar(self.last_printed_char);
                 }
             }
             _ => {}

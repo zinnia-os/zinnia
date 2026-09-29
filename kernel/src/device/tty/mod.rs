@@ -152,10 +152,8 @@ impl LineDiscipline {
 
     fn input_canon(&mut self, byte: u8, tty: &Tty, output: &mut Vec<u8>) {
         if byte == self.cc(VERASE) {
-            if let Some(_) = self.canon_buf.pop() {
-                if self.is_echo() && self.is_echoe() {
-                    self.append_output(b"\x08 \x08", output);
-                }
+            if self.canon_buf.pop().is_some() && self.is_echo() && self.is_echoe() {
+                self.append_output(b"\x08 \x08", output);
             }
             return;
         }
@@ -603,10 +601,10 @@ impl FileOps for TtyFileOps {
                         Some(clock::get_elapsed() + Duration::from_millis(vtime as u64 * 100));
                 }
 
-                if let Some(dl) = deadline {
-                    if clock::get_elapsed() >= dl {
-                        return Ok(bytes_read as isize);
-                    }
+                if let Some(dl) = deadline
+                    && clock::get_elapsed() >= dl
+                {
+                    return Ok(bytes_read as isize);
                 }
 
                 if self.tty.is_hung_up() {
@@ -692,7 +690,7 @@ impl FileOps for TtyFileOps {
                 self.require_ctty()?;
                 let pgrp = self.tty.foreground_pgrp.lock().unwrap_or(0);
                 let mut ptr: UserPtr<i32> = UserPtr::new(arg);
-                ptr.write(pgrp as i32).ok_or(Errno::EFAULT)?;
+                ptr.write(pgrp).ok_or(Errno::EFAULT)?;
             }
             uapi::ioctls::TIOCSPGRP => {
                 let session = self.require_ctty()?;
@@ -745,7 +743,7 @@ impl FileOps for TtyFileOps {
                 self.require_ctty()?;
                 let sid = self.tty.session.lock().unwrap_or(0);
                 let mut ptr: UserPtr<i32> = UserPtr::new(arg);
-                ptr.write(sid as i32).ok_or(Errno::EFAULT)?;
+                ptr.write(sid).ok_or(Errno::EFAULT)?;
             }
             uapi::ioctls::FIONREAD => {
                 let ldisc = self.tty.ldisc.lock();

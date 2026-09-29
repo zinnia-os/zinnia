@@ -103,7 +103,7 @@ pub fn init() {
     log!("Enabling FRED on core {}", CpuData::get().id);
 
     let addr = fred_ring3_entry as *const () as u64;
-    assert!(addr % 4096 == 0);
+    assert!(addr.is_multiple_of(4096));
 
     unsafe {
         asm::wrmsr(consts::MSR_FRED_CONFIG, addr);
