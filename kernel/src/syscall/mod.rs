@@ -286,6 +286,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::ITIMER_SET => system::itimer_set,
         numbers::CLOCK_GET => system::clock_get,
         numbers::CLOCK_GETRES => system::clock_getres,
+        numbers::CLOCK_SET => system::clock_set,
 
         // Scheduling
         numbers::SLEEP => system::sleep,

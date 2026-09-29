@@ -285,6 +285,7 @@ pub fn set_realtime(now_unix: Duration) {
     let base = (now_unix.as_nanos() as i64).saturating_sub(elapsed);
     BOOT_REALTIME_NS.store(base, Ordering::Release);
 }
+
 pub fn realtime() -> Option<Duration> {
     let base = BOOT_REALTIME_NS.load(Ordering::Acquire);
     if base == i64::MIN {

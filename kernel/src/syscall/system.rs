@@ -80,6 +80,26 @@ pub fn clock_get(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
 }
 
 #[wrap_syscall]
+pub fn clock_set(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
+    if clockid as usize != CLOCK_REALTIME {
+        return Err(Errno::EINVAL);
+    }
+
+    let proc = Scheduler::get_current().get_process();
+    if proc.identity.lock().user_id != 0 {
+        return Err(Errno::EPERM);
+    }
+
+    let ts: timespec = UserPtr::new(tp).read().ok_or(Errno::EFAULT)?;
+    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+        return Err(Errno::EINVAL);
+    }
+
+    clock::set_realtime(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32));
+    Ok(0)
+}
+
+#[wrap_syscall]
 pub fn clock_getres(clockid: uapi::clockid_t, tp: VirtAddr) -> EResult<usize> {
     let _ = clockid; // TODO: Respect clockid
 
