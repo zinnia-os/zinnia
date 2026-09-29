@@ -216,7 +216,7 @@ pub(in crate::arch) unsafe extern "C" fn copy_from_user(
 
     naked_asm!("
         xchg rcx, rdx
-        mov rax, [rip + {uar}]
+        lea rax, [rip + {uar}]
         xchg [rdx], rax
 
     .global {start}
@@ -234,6 +234,7 @@ pub(in crate::arch) unsafe extern "C" fn copy_from_user(
     {fault}:
         xor rax, rax
         xchg [rdx], rax
+        xor eax, eax
         ret",
         uar = sym READ_UAR,
         start = sym copy_from_user_start,
@@ -263,7 +264,7 @@ pub(in crate::arch) unsafe extern "C" fn copy_to_user(
 
     naked_asm!("
         xchg rcx, rdx
-        mov rax, [rip + {uar}]
+        lea rax, [rip + {uar}]
         xchg [rdx], rax
 
     .global {start}
@@ -281,6 +282,7 @@ pub(in crate::arch) unsafe extern "C" fn copy_to_user(
     {fault}:
         xor rax, rax
         xchg [rdx], rax
+        xor eax, eax
         ret",
         uar = sym WRITE_UAR,
         start = sym copy_to_user_start,
@@ -309,12 +311,14 @@ pub(in crate::arch) unsafe extern "C" fn cstr_len_user(
     };
 
     naked_asm!("
-        mov rax, [rip + {uar}]
+        lea rax, [rip + {uar}]
         xchg [rcx], rax
 
     .global {start}
     {start}:
         xor r8, r8
+        test rsi, rsi
+        jz .Lleave
     .Lloop:
         cmp byte ptr [rdi + r8], 0
         je .Lleave
@@ -335,6 +339,7 @@ pub(in crate::arch) unsafe extern "C" fn cstr_len_user(
     {fault}:
         xor rax, rax
         xchg [rcx], rax
+        xor eax, eax
         ret",
         uar = sym CSTR_UAR,
         start = sym cstr_len_user_start,
