@@ -12,6 +12,7 @@ use crate::{
         dirent::dirent,
         epoll::{EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLEXCLUSIVE, epoll_event},
         fcntl::{O_CLOEXEC, *},
+        ioctls::FIONBIO,
         limits::PATH_MAX,
         mode_t,
         poll::pollfd,
@@ -226,9 +227,21 @@ pub fn fdatasync(fd: i32) -> EResult<usize> {
 #[wrap_syscall]
 pub fn ioctl(fd: i32, request: usize, arg: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
-    let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
-    drop(proc_inner);
+    let file = {
+        let proc_inner = proc.open_files.lock();
+        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
+
+    if request as u32 == FIONBIO {
+        let value = UserPtr::<u32>::new(arg).read().ok_or(Errno::EFAULT)?;
+        let mut flags = file.flags.lock();
+        if value != 0 {
+            flags.insert(OpenFlags::NonBlocking);
+        } else {
+            flags.remove(OpenFlags::NonBlocking);
+        }
+        return Ok(0);
+    }
 
     file.ioctl(request, arg)
 }
