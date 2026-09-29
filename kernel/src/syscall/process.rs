@@ -5,7 +5,7 @@ use crate::{
     memory::{UserCStr, VirtAddr, user::UserPtr},
     posix::errno::{EResult, Errno},
     process::{
-        PROCESS_TABLE, Process, State,
+        Process, State, pgrp_in_session,
         signal::{self, Signal},
         to_user,
     },
@@ -277,34 +277,18 @@ fn setresgid_inner(rgid: gid_t, egid: gid_t, sgid: gid_t) -> EResult<()> {
 
 #[wrap_syscall]
 pub fn getpgid(pid: pid_t) -> EResult<pid_t> {
-    let proc = if pid == 0 {
-        Scheduler::get_current().get_process()
-    } else {
-        let table = crate::process::PROCESS_TABLE.lock();
-        table
-            .get(&pid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-            .upgrade()
-            .ok_or(Errno::ESRCH)?
-    };
+    let proc = Process::lookup_or_self(pid)?;
     Ok(*proc.pgrp.lock())
 }
 
 #[wrap_syscall]
 pub fn setpgid(pid: pid_t, pgid: pid_t) -> EResult<pid_t> {
+    if pgid < 0 {
+        return Err(Errno::EINVAL);
+    }
+
     let current = Scheduler::get_current().get_process();
-    let target = if pid == 0 {
-        current.clone()
-    } else {
-        let table = crate::process::PROCESS_TABLE.lock();
-        table
-            .get(&pid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-            .upgrade()
-            .ok_or(Errno::ESRCH)?
-    };
+    let target = Process::lookup_or_self(pid)?;
 
     // Can only set pgid on self or own children.
     if target.get_pid() != current.get_pid() {
@@ -320,9 +304,21 @@ pub fn setpgid(pid: pid_t, pgid: pid_t) -> EResult<pid_t> {
         if *target.session.lock() != *current.session.lock() {
             return Err(Errno::EPERM);
         }
+        if target.has_execed.load(Ordering::Acquire) {
+            return Err(Errno::EACCES);
+        }
+    }
+
+    let session = *target.session.lock();
+    if session == target.get_pid() {
+        return Err(Errno::EPERM);
     }
 
     let new_pgid = if pgid == 0 { target.get_pid() } else { pgid };
+
+    if new_pgid != target.get_pid() && !pgrp_in_session(new_pgid, session) {
+        return Err(Errno::EPERM);
+    }
 
     *target.pgrp.lock() = new_pgid;
     Ok(0)
@@ -330,17 +326,7 @@ pub fn setpgid(pid: pid_t, pgid: pid_t) -> EResult<pid_t> {
 
 #[wrap_syscall]
 pub fn getsid(pid: pid_t) -> EResult<pid_t> {
-    let proc = if pid == 0 {
-        Scheduler::get_current().get_process()
-    } else {
-        let table = crate::process::PROCESS_TABLE.lock();
-        table
-            .get(&pid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-            .upgrade()
-            .ok_or(Errno::ESRCH)?
-    };
+    let proc = Process::lookup_or_self(pid)?;
     Ok(*proc.session.lock())
 }
 
@@ -482,39 +468,32 @@ pub fn fork(ctx: &Context) -> EResult<pid_t> {
     Ok(child_pid)
 }
 
+fn read_string_array(array: VirtAddr) -> EResult<Vec<Vec<u8>>> {
+    let array_ptr = UserPtr::<usize>::new(array);
+    let mut result: Vec<Vec<u8>> = Vec::new();
+
+    for i in 0.. {
+        let entry = VirtAddr::new(array_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
+        if entry.is_null() {
+            break;
+        }
+        result.push(
+            UserCStr::new(entry)
+                .as_vec(uapi::limits::ARG_MAX)
+                .ok_or(Errno::EFAULT)?,
+        );
+    }
+
+    Ok(result)
+}
+
 #[wrap_syscall]
 pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
     let path_str = UserCStr::new(path).as_vec(PATH_MAX).ok_or(Errno::EFAULT)?;
 
-    let argv_ptr = UserPtr::<usize>::new(argv);
-    let envp_ptr = UserPtr::<usize>::new(envp);
-
-    let mut args: Vec<Vec<u8>> = Vec::new();
-    let mut envs: Vec<Vec<u8>> = Vec::new();
-
-    for i in 0.. {
-        let arg_ptr = VirtAddr::new(argv_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
-        if arg_ptr.is_null() {
-            break;
-        }
-        let arg = UserCStr::new(arg_ptr)
-            .as_vec(PATH_MAX)
-            .ok_or(Errno::EFAULT)?;
-        args.push(arg);
-    }
-
-    for i in 0.. {
-        let env_ptr = VirtAddr::new(envp_ptr.offset(i).read().ok_or(Errno::EFAULT)?);
-        if env_ptr.is_null() {
-            break;
-        }
-        let env = UserCStr::new(env_ptr)
-            .as_vec(PATH_MAX)
-            .ok_or(Errno::EFAULT)?;
-
-        envs.push(env);
-    }
+    let args = read_string_array(argv)?;
+    let envs = read_string_array(envp)?;
 
     let root = proc.root_dir.lock().clone();
     let cwd = proc.working_dir.lock().clone();
@@ -533,6 +512,25 @@ pub fn execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> 
     unreachable!("fexecve should never return on success");
 }
 
+#[wrap_syscall]
+pub fn fexecve(fd: i32, argv: VirtAddr, envp: VirtAddr) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    let file = proc.open_files.lock().get_fd(fd).ok_or(Errno::EBADF)?.file;
+
+    if !file.flags.lock().contains(OpenFlags::Read) {
+        return Err(Errno::EBADF);
+    }
+
+    let args = read_string_array(argv)?;
+    let envs = read_string_array(envp)?;
+
+    let exec_path = args.first().cloned().unwrap_or_default();
+
+    proc.fexecve(file, exec_path, args, envs)?;
+
+    unreachable!("fexecve should never return on success");
+}
+
 fn waitpid_matches(pid: pid_t, caller_pgrp: pid_t, child: &Process) -> bool {
     match pid {
         p if p > 0 => child.get_pid() == pid,
@@ -542,123 +540,120 @@ fn waitpid_matches(pid: pid_t, caller_pgrp: pid_t, child: &Process) -> bool {
     }
 }
 
-fn encode_exit(code: u8) -> i32 {
-    (code as i32) << 8
+enum WaitEvent {
+    Exited { pid: pid_t, uid: uid_t, code: u8 },
+    Signaled { pid: pid_t, uid: uid_t, sig: Signal },
+    Stopped { pid: pid_t, uid: uid_t, sig: Signal },
+    Continued { pid: pid_t, uid: uid_t },
 }
 
-fn encode_signaled(sig: u32) -> i32 {
-    sig as i32
+impl WaitEvent {
+    fn pid(&self) -> pid_t {
+        match *self {
+            Self::Exited { pid, .. }
+            | Self::Signaled { pid, .. }
+            | Self::Stopped { pid, .. }
+            | Self::Continued { pid, .. } => pid,
+        }
+    }
+
+    fn encode_waitpid(&self) -> i32 {
+        match *self {
+            Self::Exited { code, .. } => (code as i32) << 8,
+            Self::Signaled { sig, .. } => sig as i32,
+            Self::Stopped { sig, .. } => 0x7f | ((sig as i32) << 8),
+            Self::Continued { .. } => 0xffff,
+        }
+    }
+
+    fn reaps(&self) -> bool {
+        matches!(self, Self::Exited { .. } | Self::Signaled { .. })
+    }
 }
 
-fn encode_stopped(sig: u32) -> i32 {
-    0x7f | ((sig as i32) << 8)
+struct WaitFilter {
+    selector: pid_t,
+    exited: bool,
+    stopped: bool,
+    continued: bool,
+    nohang: bool,
+    nowait: bool,
 }
 
-#[wrap_syscall]
-pub fn waitpid(
-    pid: pid_t,
-    stat_loc: VirtAddr,
-    options: i32,
-    rusage_loc: VirtAddr,
-) -> EResult<pid_t> {
-    let proc = Scheduler::get_current().get_process();
+fn wait_for_child(
+    proc: &Arc<Process>,
+    filter: &WaitFilter,
+    mut deliver: impl FnMut(&WaitEvent) -> EResult<()>,
+) -> EResult<Option<WaitEvent>> {
     let caller_pgrp = *proc.pgrp.lock();
-    let mut stat_ptr: UserPtr<i32> = UserPtr::new(stat_loc);
-
-    let write_status = |p: &mut UserPtr<i32>, s: i32| -> EResult<()> {
-        if stat_loc.is_null() {
-            Ok(())
-        } else {
-            p.write(s).ok_or(Errno::EFAULT).map(|_| ())
-        }
-    };
-
-    let write_rusage = || -> EResult<()> {
-        if rusage_loc.is_null() {
-            Ok(())
-        } else {
-            UserPtr::<uapi::resource::rusage>::new(rusage_loc)
-                .write(uapi::resource::rusage::default())
-                .ok_or(Errno::EFAULT)
-                .map(|_| ())
-        }
-    };
 
     loop {
         let guard = proc.child_event.guard();
         {
             let mut children = proc.children.lock();
-
             if children.is_empty() {
                 return Err(Errno::ECHILD);
             }
 
             let mut saw_match = false;
-            let mut reap: Option<(usize, pid_t, i32)> = None;
-            let mut report: Option<(pid_t, i32, Arc<Process>, bool)> = None;
+            let mut hit: Option<(usize, WaitEvent)> = None;
 
             for (idx, child) in children.iter().enumerate() {
-                if !waitpid_matches(pid, caller_pgrp, child) {
+                if !waitpid_matches(filter.selector, caller_pgrp, child) {
                     continue;
                 }
                 saw_match = true;
 
+                let pid = child.get_pid();
+                let uid = child.identity.lock().user_id;
                 let state = child.status.lock();
                 match *state {
-                    State::Exited(code) => {
-                        reap = Some((idx, child.get_pid(), encode_exit(code)));
-                        break;
+                    State::Exited(code) if filter.exited => {
+                        hit = Some((idx, WaitEvent::Exited { pid, uid, code }));
                     }
-                    State::Signaled(sig) => {
-                        reap = Some((idx, child.get_pid(), encode_signaled(sig as u32)));
-                        break;
+                    State::Signaled(sig) if filter.exited => {
+                        hit = Some((idx, WaitEvent::Signaled { pid, uid, sig }));
                     }
                     State::Stopped(sig)
-                        if (options & uapi::wait::WUNTRACED) != 0
-                            && child.stop_unwaited.load(Ordering::Acquire) =>
+                        if filter.stopped && child.stop_unwaited.load(Ordering::Acquire) =>
                     {
-                        report = Some((
-                            child.get_pid(),
-                            encode_stopped(sig as u32),
-                            child.clone(),
-                            true,
-                        ));
-                        break;
+                        hit = Some((idx, WaitEvent::Stopped { pid, uid, sig }));
                     }
-                    _ if (options & uapi::wait::WCONTINUED) != 0
-                        && child.continue_unwaited.load(Ordering::Acquire) =>
-                    {
-                        report = Some((child.get_pid(), 0xffff, child.clone(), false));
-                        break;
+                    _ if filter.continued && child.continue_unwaited.load(Ordering::Acquire) => {
+                        hit = Some((idx, WaitEvent::Continued { pid, uid }));
                     }
-                    _ => {}
+                    _ => continue,
                 }
+                break;
             }
 
-            if let Some((idx, child_pid, status)) = reap {
-                write_status(&mut stat_ptr, status)?;
-                write_rusage()?;
-                children.remove(idx);
-                return Ok(child_pid);
-            }
-
-            if let Some((child_pid, status, child, stopped)) = report {
-                write_status(&mut stat_ptr, status)?;
-                write_rusage()?;
-                if stopped {
-                    child.stop_unwaited.store(false, Ordering::Release);
-                } else {
-                    child.continue_unwaited.store(false, Ordering::Release);
+            if let Some((idx, event)) = hit {
+                deliver(&event)?;
+                if !filter.nowait {
+                    match event {
+                        WaitEvent::Stopped { .. } => {
+                            children[idx].stop_unwaited.store(false, Ordering::Release);
+                        }
+                        WaitEvent::Continued { .. } => {
+                            children[idx]
+                                .continue_unwaited
+                                .store(false, Ordering::Release);
+                        }
+                        _ => {}
+                    }
+                    if event.reaps() {
+                        children.remove(idx);
+                    }
                 }
-                return Ok(child_pid);
+                return Ok(Some(event));
             }
 
             if !saw_match {
                 return Err(Errno::ECHILD);
             }
 
-            if (options & uapi::wait::WNOHANG) != 0 {
-                return Ok(0);
+            if filter.nohang {
+                return Ok(None);
             }
         }
 
@@ -670,6 +665,41 @@ pub fn waitpid(
             return Err(Errno::ERESTART);
         }
     }
+}
+
+#[wrap_syscall]
+pub fn waitpid(
+    pid: pid_t,
+    stat_loc: VirtAddr,
+    options: i32,
+    rusage_loc: VirtAddr,
+) -> EResult<pid_t> {
+    let proc = Scheduler::get_current().get_process();
+
+    let filter = WaitFilter {
+        selector: pid,
+        exited: true,
+        stopped: (options & uapi::wait::WUNTRACED) != 0,
+        continued: (options & uapi::wait::WCONTINUED) != 0,
+        nohang: (options & uapi::wait::WNOHANG) != 0,
+        nowait: false,
+    };
+
+    let deliver = |event: &WaitEvent| -> EResult<()> {
+        if !stat_loc.is_null() {
+            UserPtr::<i32>::new(stat_loc)
+                .write(event.encode_waitpid())
+                .ok_or(Errno::EFAULT)?;
+        }
+        if !rusage_loc.is_null() {
+            UserPtr::<uapi::resource::rusage>::new(rusage_loc)
+                .write(uapi::resource::rusage::default())
+                .ok_or(Errno::EFAULT)?;
+        }
+        Ok(())
+    };
+
+    Ok(wait_for_child(&proc, &filter, deliver)?.map_or(0, |event| event.pid()))
 }
 
 const P_ALL: i32 = 0;
@@ -696,16 +726,23 @@ pub fn waitid(idtype: i32, id: pid_t, info_loc: VirtAddr, options: i32) -> EResu
     }
 
     let proc = Scheduler::get_current().get_process();
-    let caller_pgrp = *proc.pgrp.lock();
-    let nowait = (options & WNOWAIT) != 0;
 
-    let write_info = |signo: i32, code: u32, pid: pid_t, uid: u32, status: i32| -> EResult<()> {
+    let filter = WaitFilter {
+        selector,
+        exited: (options & WEXITED) != 0,
+        stopped: (options & WSTOPPED) != 0,
+        continued: (options & WCONTINUED) != 0,
+        nohang: (options & WNOHANG) != 0,
+        nowait: (options & WNOWAIT) != 0,
+    };
+
+    let write_info = |signo: i32, code: i32, pid: pid_t, uid: uid_t, status: i32| -> EResult<()> {
         if info_loc.is_null() {
             return Ok(());
         }
         let info = siginfo_t {
             si_signo: signo,
-            si_code: code as i32,
+            si_code: code,
             si_errno: 0,
             si_pid: pid,
             si_uid: uid,
@@ -718,93 +755,20 @@ pub fn waitid(idtype: i32, id: pid_t, info_loc: VirtAddr, options: i32) -> EResu
             .ok_or(Errno::EFAULT)
     };
 
-    loop {
-        let guard = proc.child_event.guard();
-        {
-            let mut children = proc.children.lock();
-            if children.is_empty() {
-                return Err(Errno::ECHILD);
-            }
+    let deliver = |event: &WaitEvent| -> EResult<()> {
+        let (code, pid, uid, status) = match *event {
+            WaitEvent::Exited { pid, uid, code } => (CLD_EXITED, pid, uid, code as i32),
+            WaitEvent::Signaled { pid, uid, sig } => (CLD_KILLED, pid, uid, sig as i32),
+            WaitEvent::Stopped { pid, uid, sig } => (CLD_STOPPED, pid, uid, sig as i32),
+            WaitEvent::Continued { pid, uid } => (CLD_CONTINUED, pid, uid, SIGCONT as i32),
+        };
+        write_info(SIGCHLD as i32, code as i32, pid, uid, status)
+    };
 
-            let mut saw_match = false;
-            // (index, reapable, pid, uid, code, status)
-            let mut hit: Option<(usize, bool, pid_t, u32, u32, i32)> = None;
-
-            for (idx, child) in children.iter().enumerate() {
-                if !waitpid_matches(selector, caller_pgrp, child) {
-                    continue;
-                }
-                saw_match = true;
-                let uid = child.identity.lock().user_id as u32;
-                let state = child.status.lock();
-                match *state {
-                    State::Exited(code) if (options & WEXITED) != 0 => {
-                        hit = Some((idx, true, child.get_pid(), uid, CLD_EXITED, code as i32));
-                        break;
-                    }
-                    State::Signaled(sig) if (options & WEXITED) != 0 => {
-                        hit = Some((idx, true, child.get_pid(), uid, CLD_KILLED, sig as i32));
-                        break;
-                    }
-                    State::Stopped(sig)
-                        if (options & WSTOPPED) != 0
-                            && (if nowait {
-                                child.stop_unwaited.load(Ordering::Acquire)
-                            } else {
-                                child.stop_unwaited.swap(false, Ordering::AcqRel)
-                            }) =>
-                    {
-                        hit = Some((idx, false, child.get_pid(), uid, CLD_STOPPED, sig as i32));
-                        break;
-                    }
-                    _ if (options & WCONTINUED) != 0
-                        && (if nowait {
-                            child.continue_unwaited.load(Ordering::Acquire)
-                        } else {
-                            child.continue_unwaited.swap(false, Ordering::AcqRel)
-                        }) =>
-                    {
-                        hit = Some((
-                            idx,
-                            false,
-                            child.get_pid(),
-                            uid,
-                            CLD_CONTINUED,
-                            SIGCONT as i32,
-                        ));
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            if let Some((idx, reapable, pid, uid, code, status)) = hit {
-                write_info(SIGCHLD as i32, code, pid, uid, status)?;
-                if reapable && !nowait {
-                    children.remove(idx);
-                }
-                return Ok(0);
-            }
-
-            if !saw_match {
-                return Err(Errno::ECHILD);
-            }
-
-            // Nothing waitable yet.
-            if (options & WNOHANG) != 0 {
-                write_info(0, 0, 0, 0, 0)?;
-                return Ok(0);
-            }
-        }
-
-        if Scheduler::get_current().has_pending_signals() {
-            return Err(Errno::ERESTART);
-        }
-        guard.wait();
-        if Scheduler::get_current().has_pending_signals() {
-            return Err(Errno::ERESTART);
-        }
+    if wait_for_child(&proc, &filter, deliver)?.is_none() {
+        write_info(0, 0, 0, 0, 0)?;
     }
+    Ok(0)
 }
 
 const THREAD_NAME_MAX: usize = 16;
@@ -824,57 +788,32 @@ pub fn thread_create(entry: usize, stack: usize) -> EResult<usize> {
 }
 
 pub fn thread_exit() -> ! {
-    let task = Scheduler::get_current();
-    let proc = task.get_process();
-    let tid = task.get_id();
-
     let last_thread = {
+        let task = Scheduler::get_current();
+        let proc = task.get_process();
+        let tid = task.get_id();
+
         let mut threads = proc.threads.lock();
         threads.retain(|t| t.get_id() != tid);
         threads.is_empty()
     };
 
     if last_thread {
-        drop(proc);
-        drop(task);
         Process::exit(State::Exited(0));
     }
-
-    drop(proc);
-    drop(task);
     Scheduler::kill_current();
 }
 
 #[wrap_syscall]
 pub fn thread_kill(pid: pid_t, tid: usize, sig: u32) -> EResult<pid_t> {
-    let sig_num = sig as u32;
-
-    // Signal 0 is used to check existence without sending.
-    if sig_num != 0 {
-        let _ = Signal::try_from(sig_num).map_err(|_| Errno::EINVAL)?;
-    }
-
-    let target_proc = {
-        let table = PROCESS_TABLE.lock();
-        table
-            .get(&pid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-            .upgrade()
-            .ok_or(Errno::ESRCH)?
+    let sig = match sig {
+        0 => None,
+        num => Some(Signal::try_from(num).map_err(|_| Errno::EINVAL)?),
     };
 
-    let thread = {
-        let threads = target_proc.threads.lock();
-        threads
-            .iter()
-            .find(|t| t.get_id() == tid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-    };
+    let thread = Process::lookup(pid)?.find_thread(tid)?;
 
-    if sig_num != 0 {
-        let sig = Signal::try_from(sig_num).unwrap();
+    if let Some(sig) = sig {
         let sender = Scheduler::get_current().get_process();
         let mut info = signal::SigInfoData::user(sender.get_pid(), sender.identity.lock().user_id);
         info.code = crate::uapi::signal::SI_TKILL as i32;
@@ -887,14 +826,7 @@ pub fn thread_kill(pid: pid_t, tid: usize, sig: u32) -> EResult<pid_t> {
 #[wrap_syscall]
 pub fn thread_setname(tid: usize, name_ptr: VirtAddr) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-    let thread = {
-        let threads = proc.threads.lock();
-        threads
-            .iter()
-            .find(|t| t.get_id() == tid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-    };
+    let thread = proc.find_thread(tid)?;
 
     let name_bytes = UserCStr::new(name_ptr)
         .as_vec(THREAD_NAME_MAX)
@@ -915,14 +847,7 @@ pub fn umask(mask: usize) -> EResult<usize> {
 #[wrap_syscall]
 pub fn thread_getname(tid: usize, buf: VirtAddr, size: usize) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
-    let thread = {
-        let threads = proc.threads.lock();
-        threads
-            .iter()
-            .find(|t| t.get_id() == tid)
-            .cloned()
-            .ok_or(Errno::ESRCH)?
-    };
+    let thread = proc.find_thread(tid)?;
 
     let name = thread.name.lock();
     // Need space for the name plus a null terminator.

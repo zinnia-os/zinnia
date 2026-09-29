@@ -158,6 +158,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
         // Processes
         numbers::EXIT => process::exit(frame.arg0()),
         numbers::EXECVE => process::execve,
+        numbers::FEXECVE => process::fexecve,
         numbers::FORK => {
             SyscallReturn::into_ctx(process::fork(frame), frame);
             return;

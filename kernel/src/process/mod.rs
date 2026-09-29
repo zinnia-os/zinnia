@@ -106,6 +106,7 @@ pub struct Process {
     /// Latched when a stopped process is continued; cleared when a waiter
     /// observes it via WCONTINUED.
     pub continue_unwaited: AtomicBool,
+    pub has_execed: AtomicBool,
     /// File mode creation mask.
     pub umask: AtomicU32,
 }
@@ -231,6 +232,7 @@ impl Process {
             signal_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
+            has_execed: AtomicBool::new(false),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
             nice: AtomicI8::new(self.nice.load(Ordering::Relaxed)),
         });
@@ -318,6 +320,7 @@ impl Process {
             signal_event: Event::new(),
             stop_unwaited: AtomicBool::new(false),
             continue_unwaited: AtomicBool::new(false),
+            has_execed: AtomicBool::new(false),
             umask: AtomicU32::new(0o022),
             nice: AtomicI8::new(0),
         })
@@ -402,6 +405,7 @@ impl Process {
             drop(closed);
             self.signal_actions.lock().reset_on_exec();
             self.posix_timers.lock().clear();
+            self.has_execed.store(true, Ordering::Release);
 
             if is_current_process {
                 unsafe { new_table.set_active() };
@@ -632,6 +636,16 @@ static KERNEL_PROCESS: Once<Arc<Process>> = Once::new();
 /// Used to iterate processes for signal delivery to process groups.
 pub static PROCESS_TABLE: SpinMutex<BTreeMap<uapi::pid_t, Weak<Process>>> =
     SpinMutex::new(BTreeMap::new());
+
+pub fn pgrp_in_session(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
+    let all: Vec<Arc<Process>> = PROCESS_TABLE
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect();
+    all.iter()
+        .any(|p| *p.pgrp.lock() == pgrp && *p.session.lock() == session)
+}
 
 #[task(
     name = "generic.process",
