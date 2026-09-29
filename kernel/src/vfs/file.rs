@@ -413,9 +413,10 @@ impl File {
                     x.truncate(inode, 0)?;
                 }
 
+                let abs_path = file_path.absolute_path(root).ok();
                 let result = File {
                     path: Some(file_path),
-                    abs_path: None,
+                    abs_path,
                     ops: x.clone(),
                     inode: inode.clone(),
                     flags: SpinMutex::new(flags),
