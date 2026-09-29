@@ -154,6 +154,31 @@ impl Process {
         self.nice.load(Ordering::Relaxed)
     }
 
+    pub fn lookup(pid: uapi::pid_t) -> EResult<Arc<Self>> {
+        PROCESS_TABLE
+            .lock()
+            .get(&pid)
+            .and_then(Weak::upgrade)
+            .ok_or(Errno::ESRCH)
+    }
+
+    pub fn lookup_or_self(pid: uapi::pid_t) -> EResult<Arc<Self>> {
+        if pid == 0 {
+            Ok(Scheduler::get_current().get_process())
+        } else {
+            Self::lookup(pid)
+        }
+    }
+
+    pub fn find_thread(&self, tid: usize) -> EResult<Arc<Task>> {
+        self.threads
+            .lock()
+            .iter()
+            .find(|t| t.get_id() == tid)
+            .cloned()
+            .ok_or(Errno::ESRCH)
+    }
+
     pub fn new(name: String, parent: Option<Arc<Self>>) -> EResult<Self> {
         Self::new_with_space(name, parent, AddressSpace::new())
     }
@@ -449,9 +474,6 @@ impl Process {
 
         let (cld_code, cld_status) = match *proc.status.lock() {
             State::Exited(code) => (uapi::signal::CLD_EXITED as i32, code as i32),
-            State::Signaled(sig) if sig.default_action() == signal::DefaultAction::CoreDump => {
-                (uapi::signal::CLD_DUMPED as i32, sig as i32)
-            }
             State::Signaled(sig) => (uapi::signal::CLD_KILLED as i32, sig as i32),
             _ => (uapi::signal::CLD_EXITED as i32, 0),
         };

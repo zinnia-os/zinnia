@@ -163,6 +163,7 @@ pub(crate) fn dispatch(frame: &mut Context) {
             return;
         }
         numbers::KILL => signal::kill,
+        numbers::SIGQUEUE => signal::sigqueue,
         numbers::GETTID => process::gettid,
         numbers::GETPID => process::getpid,
         numbers::GETPPID => process::getppid,

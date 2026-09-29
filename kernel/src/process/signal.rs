@@ -10,7 +10,7 @@ use crate::{
         uid_t,
     },
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::{ops, sync::atomic::Ordering};
 use num_enum::TryFromPrimitive;
 
@@ -206,15 +206,52 @@ impl ops::BitAndAssign for SignalSet {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    Default,
+    Ignore,
+    Handler(usize),
+}
+
+impl Disposition {
+    pub fn from_user(handler: usize) -> Self {
+        match handler {
+            SIG_DFL => Self::Default,
+            SIG_IGN => Self::Ignore,
+            addr => Self::Handler(addr),
+        }
+    }
+
+    pub fn to_user(self) -> usize {
+        match self {
+            Self::Default => SIG_DFL,
+            Self::Ignore => SIG_IGN,
+            Self::Handler(addr) => addr,
+        }
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SaFlags: u32 {
+        const NoCldStop = signal::SA_NOCLDSTOP;
+        const OnStack = signal::SA_ONSTACK;
+        const ResetHand = signal::SA_RESETHAND;
+        const Restart = signal::SA_RESTART;
+        const SigInfo = signal::SA_SIGINFO;
+        const NoCldWait = signal::SA_NOCLDWAIT;
+        const NoDefer = signal::SA_NODEFER;
+    }
+}
+
 /// A kernel-internal representation of a signal action.
 #[derive(Clone, Copy, Debug)]
 pub struct SigAction {
-    /// The handler address: SIG_DFL (0), SIG_IGN (1), or a user function pointer.
-    pub handler: usize,
+    pub disposition: Disposition,
     /// Signal mask to apply during handler execution.
     pub mask: SignalSet,
     /// SA_* flags.
-    pub flags: u32,
+    pub flags: SaFlags,
     /// The restorer function address (used for sigreturn trampoline).
     pub restorer: usize,
 }
@@ -222,27 +259,31 @@ pub struct SigAction {
 impl SigAction {
     pub const fn default() -> Self {
         Self {
-            handler: SIG_DFL,
+            disposition: Disposition::Default,
             mask: SignalSet::new(),
-            flags: 0,
+            flags: SaFlags::empty(),
             restorer: 0,
         }
     }
 
     pub fn is_default(&self) -> bool {
-        self.handler == SIG_DFL
+        matches!(self.disposition, Disposition::Default)
     }
 
     pub fn is_ignore(&self) -> bool {
-        self.handler == SIG_IGN
+        matches!(self.disposition, Disposition::Ignore)
+    }
+
+    pub fn ignores(&self, sig: Signal) -> bool {
+        self.is_ignore() || (self.is_default() && sig.default_action() == DefaultAction::Ignore)
     }
 
     /// Convert from the userspace ABI structure.
     pub fn from_user(u: &sigaction) -> Self {
         Self {
-            handler: u.sa_handler,
+            disposition: Disposition::from_user(u.sa_handler),
             mask: SignalSet::from_raw(u.sa_mask),
-            flags: u.sa_flags as u32,
+            flags: SaFlags::from_bits_retain(u.sa_flags as u32),
             restorer: u.sa_restorer,
         }
     }
@@ -250,9 +291,9 @@ impl SigAction {
     /// Convert to the userspace ABI structure.
     pub fn to_user(&self) -> sigaction {
         sigaction {
-            sa_handler: self.handler,
+            sa_handler: self.disposition.to_user(),
             sa_mask: self.mask.as_raw(),
-            sa_flags: self.flags as u64,
+            sa_flags: self.flags.bits() as u64,
             sa_restorer: self.restorer,
         }
     }
@@ -283,9 +324,9 @@ impl SignalState {
     /// Reset all caught signal handlers to SIG_DFL (for execve).
     /// SIG_IGN dispositions are preserved per POSIX.
     pub fn reset_on_exec(&mut self) {
-        for i in 1..=MAX_SIGNAL as usize {
-            if self.actions[i].handler != SIG_IGN {
-                self.actions[i] = SigAction::default();
+        for action in &mut self.actions[1..] {
+            if !action.is_ignore() {
+                *action = SigAction::default();
             }
         }
     }
@@ -300,6 +341,7 @@ pub struct SigInfoData {
     pub uid: uid_t,
     pub addr: usize,
     pub status: i32,
+    pub value: usize,
 }
 
 impl SigInfoData {
@@ -321,6 +363,24 @@ impl SigInfoData {
         }
     }
 
+    pub fn timer(value: usize) -> Self {
+        Self {
+            code: signal::SI_TIMER as i32,
+            value,
+            ..Default::default()
+        }
+    }
+
+    pub fn queued(sender: pid_t, uid: uid_t, value: usize) -> Self {
+        Self {
+            code: signal::SI_QUEUE as i32,
+            pid: sender,
+            uid,
+            value,
+            ..Default::default()
+        }
+    }
+
     /// Convert to the userspace [`siginfo_t`] for a given signal number.
     pub fn to_user(self, sig: Signal) -> siginfo_t {
         siginfo_t {
@@ -331,37 +391,59 @@ impl SigInfoData {
             si_uid: self.uid,
             si_addr: UserPtr::new(VirtAddr::new(self.addr)),
             si_status: self.status,
-            si_value: sigval { sival_int: 0 },
+            si_value: sigval {
+                sival_ptr: UserPtr::new(VirtAddr::new(self.value)),
+            },
         }
     }
 }
 
 /// The alternate signal stack registered via `sigaltstack`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct AltStack {
     pub sp: usize,
     pub size: usize,
-    pub flags: i32,
+    pub disabled: bool,
 }
 
 impl AltStack {
     /// Whether an alternate stack is registered and usable.
     pub fn is_enabled(&self) -> bool {
-        self.flags & signal::SS_DISABLE as i32 == 0 && self.size != 0
+        !self.disabled && self.size != 0
     }
 
     /// Whether the given stack pointer currently points inside this stack.
     pub fn contains(&self, sp: usize) -> bool {
-        self.is_enabled() && sp > self.sp && sp <= self.sp + self.size
+        self.is_enabled() && sp > self.sp && sp - self.sp <= self.size
+    }
+
+    pub fn ss_flags(&self, sp: usize) -> i32 {
+        if self.contains(sp) {
+            signal::SS_ONSTACK as i32
+        } else if !self.is_enabled() {
+            signal::SS_DISABLE as i32
+        } else {
+            0
+        }
+    }
+}
+
+impl Default for AltStack {
+    fn default() -> Self {
+        Self {
+            sp: 0,
+            size: 0,
+            disabled: true,
+        }
     }
 }
 
 pub struct SignalDelivery {
     pub handler: usize,
-    pub signal: u32,
+    pub signal: Signal,
     pub info: siginfo_t,
     pub old_mask: SignalSet,
-    pub flags: u32,
+    pub flags: SaFlags,
     pub restorer: usize,
     pub altstack: AltStack,
 }
@@ -385,6 +467,9 @@ impl SigQueue {
     }
 
     pub fn queue(&mut self, sig: Signal, info: SigInfoData) {
+        if self.pending.is_set(sig) {
+            return;
+        }
         self.pending.set(sig, true);
         self.info[sig as usize] = info;
     }
@@ -438,9 +523,7 @@ pub fn send_signal_to_thread(task: &Arc<Task>, sig: Signal) {
 /// Discards all pending `sig` (shared + thread queues) when `action` ignores
 /// it, as POSIX requires when a disposition becomes SIG_IGN (or ignoring DFL).
 pub fn flush_if_ignored(proc: &Arc<Process>, sig: Signal, action: &SigAction) {
-    let ignored = action.is_ignore()
-        || (action.is_default() && sig.default_action() == DefaultAction::Ignore);
-    if !ignored {
+    if !action.ignores(sig) {
         return;
     }
     for thread in proc.threads.lock().iter() {
@@ -466,7 +549,7 @@ fn prepare_signal(proc: &Arc<Process>, sig: Signal, blocked: bool) -> bool {
             proc.cont_event.wake_all();
             if sig == Signal::SigCont {
                 notify_parent_of_child_state_change(
-                    &proc,
+                    proc,
                     signal::CLD_CONTINUED as i32,
                     Signal::SigCont as i32,
                 );
@@ -477,29 +560,30 @@ fn prepare_signal(proc: &Arc<Process>, sig: Signal, blocked: bool) -> bool {
     // SIGCONT discards pending stop signals and vice versa, in every queue of the process.
     let is_stop = STOP_SIGNALS.contains(&sig);
     if sig == Signal::SigCont || is_stop {
-        let discard = |queue: &mut SigQueue| {
+        for thread in proc.threads.lock().iter() {
+            let mut state = thread.signal.lock();
             if is_stop {
-                queue.discard(Signal::SigCont);
+                state.queue.discard(Signal::SigCont);
             } else {
                 for s in STOP_SIGNALS {
-                    queue.discard(s);
+                    state.queue.discard(s);
                 }
             }
-        };
-        for thread in proc.threads.lock().iter() {
-            discard(&mut thread.signal.lock().queue);
         }
-        discard(&mut proc.shared_pending.lock());
+        let mut queue = proc.shared_pending.lock();
+        if is_stop {
+            queue.discard(Signal::SigCont);
+        } else {
+            for s in STOP_SIGNALS {
+                queue.discard(s);
+            }
+        }
     }
 
     // Drop ignored signals at send time, unless they are blocked.
-    if !sig.is_uncatchable() && !blocked {
-        let action = *proc.signal_actions.lock().get_action(sig);
-        if action.is_ignore()
-            || (action.is_default() && sig.default_action() == DefaultAction::Ignore)
-        {
-            return false;
-        }
+    if !sig.is_uncatchable() && !blocked && proc.signal_actions.lock().get_action(sig).ignores(sig)
+    {
+        return false;
     }
 
     true
@@ -570,9 +654,9 @@ pub fn notify_parent_of_child_state_change(proc: &Arc<Process>, code: i32, statu
 
     parent.child_event.wake_all();
 
-    if code == signal::CLD_STOPPED as i32 {
+    if code == signal::CLD_STOPPED as i32 || code == signal::CLD_CONTINUED as i32 {
         let action = *parent.signal_actions.lock().get_action(Signal::SigChld);
-        if action.flags & signal::SA_NOCLDSTOP != 0 {
+        if action.flags.contains(SaFlags::NoCldStop) {
             return;
         }
     }
@@ -645,126 +729,140 @@ pub fn send_signal_to_pgrp(pgrp: pid_t, sig: Signal) -> usize {
 
 /// Send a signal with the given info to every process in a process group.
 pub fn send_signal_info_to_pgrp(pgrp: pid_t, sig: Signal, info: SigInfoData) -> usize {
-    let table = crate::process::PROCESS_TABLE.lock();
-    let mut delivered = 0;
+    // Delivery can notify parents and wake tasks. Release the global table lock first.
+    let processes: Vec<_> = crate::process::PROCESS_TABLE
+        .lock()
+        .values()
+        .filter_map(alloc::sync::Weak::upgrade)
+        .collect();
+    processes
+        .iter()
+        .filter(|proc| *proc.pgrp.lock() == pgrp)
+        .filter(|proc| send_signal_info_to_process(proc, sig, info))
+        .count()
+}
 
-    for proc in table.values() {
-        let Some(proc) = proc.upgrade() else { continue }; // TODO: Should entries be removed?
-        if *proc.pgrp.lock() == pgrp && send_signal_info_to_process(&proc, sig, info) {
-            delivered += 1;
-        }
+enum SignalDecision {
+    Fatal(Signal),
+    Retry,
+    None,
+    Deliver(SignalDelivery),
+}
+
+fn prepare_next_signal(task: &Task, proc: &Arc<Process>) -> SignalDecision {
+    // If the process was stopped, wait here until SIGCONT/SIGKILL.
+    if matches!(*proc.status.lock(), State::Stopped(_)) {
+        wait_while_stopped(proc);
+        return SignalDecision::Retry;
     }
 
-    delivered
+    // Dequeue the lowest deliverable signal: thread queue first, then shared.
+    let dequeued = {
+        let mut state = task.signal.lock();
+        let unblocked = !state.mask;
+        let dequeued = state
+            .queue
+            .dequeue(unblocked)
+            .or_else(|| proc.shared_pending.lock().dequeue(unblocked));
+        if dequeued.is_none() {
+            // Restore the sigsuspend/pselect mask once nothing is deliverable.
+            if let Some(mask) = state.restore_mask.take() {
+                state.mask = mask;
+                // Restoring the mask may unblock a signal that was blocked temporarily.
+                return SignalDecision::Retry;
+            }
+        }
+        dequeued
+    };
+
+    let Some((sig, info)) = dequeued else {
+        return SignalDecision::None;
+    };
+
+    // Apply SA_RESETHAND under the actions lock so it can't fire twice.
+    let action = {
+        let mut actions = proc.signal_actions.lock();
+        let action = *actions.get_action(sig);
+        if matches!(action.disposition, Disposition::Handler(_))
+            && action.flags.contains(SaFlags::ResetHand)
+        {
+            actions.set_action(sig, SigAction::default());
+        }
+        action
+    };
+
+    let handler = match action.disposition {
+        Disposition::Ignore => return SignalDecision::Retry,
+        Disposition::Default => {
+            return match sig.default_action() {
+                DefaultAction::Ignore | DefaultAction::Continue => SignalDecision::Retry,
+                DefaultAction::Terminate | DefaultAction::CoreDump => SignalDecision::Fatal(sig),
+                DefaultAction::Stop => {
+                    enter_stopped_state(proc, sig);
+                    SignalDecision::Retry
+                }
+            };
+        }
+        Disposition::Handler(handler) => handler,
+    };
+
+    // Stage the mask sigreturn restores, then apply the handler-entry mask.
+    let (old_mask, altstack) = {
+        let mut state = task.signal.lock();
+        let old_mask = state.restore_mask.take().unwrap_or(state.mask);
+        let altstack = state.altstack;
+        if !action.flags.contains(SaFlags::NoDefer) {
+            state.mask.set(sig, true);
+        }
+        state.mask |= action.mask;
+        state.mask.sanitize_mask();
+        (old_mask, altstack)
+    };
+
+    SignalDecision::Deliver(SignalDelivery {
+        handler,
+        signal: sig,
+        info: info.to_user(sig),
+        old_mask,
+        flags: action.flags,
+        restorer: action.restorer,
+        altstack,
+    })
 }
 
 pub fn deliver_pending_signals(context: &mut Context, syscall: Option<SyscallRestart>) {
-    let restartable =
-        syscall.is_some() && context.syscall_error() == uapi::errno::ERESTART as usize;
+    let restart = syscall.filter(|_| context.syscall_error() == uapi::errno::ERESTART as usize);
 
     loop {
-        let task = Scheduler::get_current();
-        let proc = task.get_process();
-
-        // If the process was stopped, park here until SIGCONT/SIGKILL.
-        if matches!(*proc.status.lock(), State::Stopped(_)) {
-            wait_while_stopped(&proc);
-            continue;
-        }
-
-        // Dequeue the lowest deliverable signal: thread queue first, then shared.
-        let dequeued = {
-            let mut state = task.signal.lock();
-            let unblocked = !state.mask;
-            let dequeued = state
-                .queue
-                .dequeue(unblocked)
-                .or_else(|| proc.shared_pending.lock().dequeue(unblocked));
-            if dequeued.is_none() {
-                // Restore the sigsuspend/pselect mask once nothing is deliverable.
-                if let Some(mask) = state.restore_mask.take() {
-                    state.mask = mask;
-                }
-            }
-            dequeued
+        let decision = {
+            let task = Scheduler::get_current();
+            let proc = task.get_process();
+            // Drop task/process references before a fatal decision calls the non-returning exit.
+            prepare_next_signal(&task, &proc)
         };
 
-        let Some((sig, info)) = dequeued else {
-            // If a syscall was interrupted by such a signal, restart it transparently.
-            if let Some(sc) = syscall.as_ref().filter(|_| restartable) {
-                context.restart_syscall(sc);
-            }
-            return;
-        };
-
-        // Apply SA_RESETHAND under the actions lock so it can't fire twice.
-        let action = {
-            let mut actions = proc.signal_actions.lock();
-            let action = *actions.get_action(sig);
-            if !action.is_ignore()
-                && !action.is_default()
-                && action.flags & signal::SA_RESETHAND != 0
-            {
-                actions.set_action(sig, SigAction::default());
-            }
-            action
-        };
-
-        if action.is_ignore() {
-            continue;
-        }
-
-        if action.is_default() {
-            match sig.default_action() {
-                DefaultAction::Ignore | DefaultAction::Continue => continue,
-                DefaultAction::Terminate | DefaultAction::CoreDump => {
-                    // exit() never returns; drop our Arcs so they aren't stranded.
-                    drop(task);
-                    drop(proc);
-                    Process::exit(State::Signaled(sig));
-                }
-                DefaultAction::Stop => {
-                    enter_stopped_state(&proc, sig);
-                    continue;
-                }
-            }
-        }
-
-        if restartable {
-            if let Some(sc) = syscall.as_ref() {
-                if action.flags & signal::SA_RESTART != 0 {
+        match decision {
+            SignalDecision::Fatal(sig) => Process::exit(State::Signaled(sig)),
+            SignalDecision::Retry => continue,
+            SignalDecision::None => {
+                // If a syscall was interrupted by such a signal, restart it transparently.
+                if let Some(sc) = restart.as_ref() {
                     context.restart_syscall(sc);
-                } else {
-                    context.set_return(0, Errno::EINTR as usize);
                 }
+                return;
+            }
+            SignalDecision::Deliver(delivery) => {
+                if let Some(sc) = restart.as_ref() {
+                    if delivery.flags.contains(SaFlags::Restart) {
+                        context.restart_syscall(sc);
+                    } else {
+                        context.set_return(0, Errno::EINTR as usize);
+                    }
+                }
+                crate::arch::sched::setup_signal_frame(context, &delivery);
+                return;
             }
         }
-
-        // Stage the mask sigreturn restores, then apply the handler-entry mask.
-        let (old_mask, altstack) = {
-            let mut state = task.signal.lock();
-            let old_mask = state.restore_mask.take().unwrap_or(state.mask);
-            let altstack = state.altstack;
-            if action.flags & signal::SA_NODEFER == 0 {
-                state.mask.set(sig, true);
-            }
-            state.mask |= action.mask;
-            state.mask.sanitize_mask();
-            (old_mask, altstack)
-        };
-
-        let delivery = SignalDelivery {
-            handler: action.handler,
-            signal: sig as u32,
-            info: info.to_user(sig),
-            old_mask,
-            flags: action.flags,
-            restorer: action.restorer,
-            altstack,
-        };
-        crate::arch::sched::setup_signal_frame(context, &delivery);
-
-        return;
     }
 }
 

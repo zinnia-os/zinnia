@@ -12,6 +12,13 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 
+fn signal_from_num(sig: usize) -> EResult<Option<Signal>> {
+    match u32::try_from(sig).map_err(|_| Errno::EINVAL)? {
+        0 => Ok(None),
+        num => Signal::try_from(num).map(Some).map_err(|_| Errno::EINVAL),
+    }
+}
+
 #[wrap_syscall]
 pub fn sigaction(sig: u32, act_ptr: VirtAddr, oact_ptr: VirtAddr) -> EResult<usize> {
     let sig = Signal::try_from(sig).map_err(|_| Errno::EINVAL)?;
@@ -86,110 +93,69 @@ pub fn sigprocmask(how: usize, set_ptr: VirtAddr, old_ptr: VirtAddr) -> EResult<
 
 #[wrap_syscall]
 pub fn kill(pid: pid_t, sig: usize) -> EResult<pid_t> {
-    if sig > uapi::signal::MAX_SIGNAL as usize {
-        return Err(Errno::EINVAL);
-    }
-    let sig_num = sig as u32;
-
-    // Signal 0 is used to check permissions / process existence without sending.
-    if sig_num != 0 {
-        let _ = Signal::try_from(sig_num).map_err(|_| Errno::EINVAL)?;
-    }
-
+    let sig = signal_from_num(sig)?;
     let sender = Scheduler::get_current().get_process();
     let info = SigInfoData::user(sender.get_pid(), sender.identity.lock().user_id);
 
-    match pid {
-        _ if pid > 0 => {
-            let target = find_process_by_pid(pid).ok_or(Errno::ESRCH)?;
+    let targets: Vec<Arc<Process>> = if pid > 0 {
+        alloc::vec![Process::lookup(pid)?]
+    } else {
+        let pgrp = match pid {
+            0 => Some(*sender.pgrp.lock()),
+            -1 => None,
+            _ => Some(pid.checked_neg().ok_or(Errno::ESRCH)?),
+        };
+        // Snapshot first so target selection and delivery never hold the global table lock.
+        let processes: Vec<_> = PROCESS_TABLE
+            .lock()
+            .values()
+            .filter_map(alloc::sync::Weak::upgrade)
+            .collect();
+        processes
+            .into_iter()
+            .filter(|proc| match pgrp {
+                Some(pgrp) => *proc.pgrp.lock() == pgrp,
+                // Broadcast excludes the kernel, init, and the caller.
+                None => proc.get_pid() > 1 && proc.get_pid() != sender.get_pid(),
+            })
+            .collect()
+    };
 
-            if sig_num == 0 {
-                return Ok(0);
-            }
-
-            let sig = Signal::try_from(sig_num).unwrap();
-            if !signal::send_signal_info_to_process(&target, sig, info) {
-                return Err(Errno::ESRCH);
-            }
-
-            Ok(0)
-        }
-        0 => {
-            // Send to every process in the caller's process group.
-            let pgrp = *Scheduler::get_current().get_process().pgrp.lock();
-
-            if sig_num == 0 {
-                return Ok(0);
-            }
-
-            let sig = Signal::try_from(sig_num).unwrap();
-            if signal::send_signal_info_to_pgrp(pgrp, sig, info) == 0 {
-                return Err(Errno::ESRCH);
-            }
-            Ok(0)
-        }
-        -1 => {
-            // Send to every process except PID 1 (init), PID 0 (kernel) and the calling process itself.
-            if sig_num == 0 {
-                return Ok(0);
-            }
-
-            let sender_pid = sender.get_pid();
-            let sig = Signal::try_from(sig_num).unwrap();
-            let targets = {
-                let table = PROCESS_TABLE.lock();
-                table
-                    .iter()
-                    .filter_map(|(&target_pid, proc)| {
-                        if target_pid <= 1 || target_pid == sender_pid {
-                            return None;
-                        }
-                        proc.upgrade()
-                    })
-                    .collect::<Vec<_>>()
-            };
-
-            let mut delivered = 0;
-            for proc in targets {
-                if signal::send_signal_info_to_process(&proc, sig, info) {
-                    delivered += 1;
-                }
-            }
-
-            if delivered == 0 {
-                return Err(Errno::ESRCH);
-            }
-
-            Ok(0)
-        }
-        _ => {
-            // pid < -1: send to every process in process group |pid|.
-            let pgrp = -pid;
-
-            if sig_num == 0 {
-                // Check if any process exists in this group.
-                let table = PROCESS_TABLE.lock();
-                let exists = table.values().any(|p| {
-                    let Some(p) = p.upgrade() else { return false };
-                    *p.pgrp.lock() == pgrp
-                });
-                if !exists {
-                    return Err(Errno::ESRCH);
-                }
-                return Ok(0);
-            }
-
-            let sig = Signal::try_from(sig_num).unwrap();
-            if signal::send_signal_info_to_pgrp(pgrp, sig, info) == 0 {
-                return Err(Errno::ESRCH);
-            }
-            Ok(0)
-        }
+    let mut found = false;
+    for target in targets {
+        found |= match sig {
+            Some(sig) => signal::send_signal_info_to_process(&target, sig, info),
+            None => true,
+        };
     }
+    if !found {
+        return Err(Errno::ESRCH);
+    }
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn sigqueue(pid: pid_t, sig: usize, value: usize) -> EResult<usize> {
+    let sig = signal_from_num(sig)?;
+
+    let target = Process::lookup(pid)?;
+
+    let Some(sig) = sig else { return Ok(0) };
+
+    let sender = Scheduler::get_current().get_process();
+    let info = SigInfoData::queued(sender.get_pid(), sender.identity.lock().user_id, value);
+
+    if !signal::send_signal_info_to_process(&target, sig, info) {
+        return Err(Errno::ESRCH);
+    }
+
+    Ok(0)
 }
 
 pub fn sigreturn(frame: &mut Context) -> ! {
     crate::arch::sched::restore_signal_frame(frame);
+
+    crate::process::signal::deliver_pending_signals(frame, None);
 
     unsafe { jump_to_context(frame) };
     unreachable!();
@@ -294,17 +260,10 @@ pub fn sigaltstack(frame: &mut Context) -> EResult<usize> {
     let on_stack = current.contains(user_sp);
 
     if !oss_ptr.is_null() {
-        let flags = if on_stack {
-            uapi::signal::SS_ONSTACK as i32
-        } else if !current.is_enabled() {
-            uapi::signal::SS_DISABLE as i32
-        } else {
-            0
-        };
         let oss = uapi::signal::stack_t {
             ss_sp: UserPtr::new(VirtAddr::new(current.sp)),
             ss_size: current.size,
-            ss_flags: flags,
+            ss_flags: current.ss_flags(user_sp),
         };
         UserPtr::<uapi::signal::stack_t>::new(oss_ptr)
             .write(oss)
@@ -321,23 +280,28 @@ pub fn sigaltstack(frame: &mut Context) -> EResult<usize> {
             .read()
             .ok_or(Errno::EFAULT)?;
 
-        let new = if ss.ss_flags & uapi::signal::SS_DISABLE as i32 != 0 {
-            AltStack {
-                sp: 0,
-                size: 0,
-                flags: uapi::signal::SS_DISABLE as i32,
-            }
+        if ss.ss_flags != 0
+            && ss.ss_flags != uapi::signal::SS_ONSTACK as i32
+            && ss.ss_flags != uapi::signal::SS_DISABLE as i32
+        {
+            return Err(Errno::EINVAL);
+        }
+
+        let new = if ss.ss_flags == uapi::signal::SS_DISABLE as i32 {
+            AltStack::default()
         } else {
-            if ss.ss_flags & !(uapi::signal::SS_ONSTACK as i32) != 0 {
-                return Err(Errno::EINVAL);
-            }
             if ss.ss_size < uapi::signal::MINSIGSTKSZ as usize {
                 return Err(Errno::ENOMEM);
             }
+            ss.ss_sp
+                .addr()
+                .value()
+                .checked_add(ss.ss_size)
+                .ok_or(Errno::EINVAL)?;
             AltStack {
                 sp: ss.ss_sp.addr().value(),
                 size: ss.ss_size,
-                flags: 0,
+                disabled: false,
             }
         };
 
@@ -345,10 +309,4 @@ pub fn sigaltstack(frame: &mut Context) -> EResult<usize> {
     }
 
     Ok(0)
-}
-
-/// Find a process by PID using the global process table.
-fn find_process_by_pid(pid: pid_t) -> Option<Arc<Process>> {
-    let table = PROCESS_TABLE.lock();
-    table.get(&pid)?.upgrade()
 }

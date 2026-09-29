@@ -14,11 +14,11 @@ use crate::{
     posix::errno::EResult,
     process::{
         Process, State,
-        signal::{Signal, SignalDelivery, SignalSet},
+        signal::{SaFlags, Signal, SignalDelivery, SignalSet},
         task::Task,
     },
     sched::Scheduler,
-    uapi::signal::{SA_ONSTACK, siginfo_t},
+    uapi::signal::siginfo_t,
 };
 use core::{
     arch::{asm, naked_asm},
@@ -475,22 +475,28 @@ struct Ucontext {
 pub(in crate::arch) fn setup_signal_frame(context: &mut Context, delivery: &SignalDelivery) {
     let altstack = delivery.altstack;
     let on_altstack = altstack.contains(context.rsp as usize);
-    let use_altstack = delivery.flags & SA_ONSTACK != 0 && altstack.is_enabled() && !on_altstack;
+    let use_altstack =
+        delivery.flags.contains(SaFlags::OnStack) && altstack.is_enabled() && !on_altstack;
 
     // Top of the alternate stack if requested, otherwise below the 128-byte red zone
     // of the interrupted stack (System V AMD64 ABI).
     let base = if use_altstack {
-        altstack.sp + altstack.size
+        altstack.sp.checked_add(altstack.size)
     } else {
-        context.rsp as usize - 128
+        (context.rsp as usize).checked_sub(128)
     };
 
     let align = |x: usize| x & !0xF;
-
-    let info_addr = align(base - size_of::<siginfo_t>());
-    let uc_addr = align(info_addr - size_of::<Ucontext>());
-    let sf_addr = align(uc_addr - size_of::<SignalFrame>());
-    let ret_addr = sf_addr - 8;
+    let addresses = base.and_then(|base| {
+        let info_addr = align(base.checked_sub(size_of::<siginfo_t>())?);
+        let uc_addr = align(info_addr.checked_sub(size_of::<Ucontext>())?);
+        let sf_addr = align(uc_addr.checked_sub(size_of::<SignalFrame>())?);
+        let ret_addr = sf_addr.checked_sub(8)?;
+        Some((info_addr, uc_addr, sf_addr, ret_addr))
+    });
+    let Some((info_addr, uc_addr, sf_addr, ret_addr)) = addresses else {
+        Process::exit(State::Signaled(Signal::SigSegv));
+    };
 
     let mut gregs = [0u64; 16];
     gregs[0] = context.rax;
@@ -515,7 +521,7 @@ pub(in crate::arch) fn setup_signal_frame(context: &mut Context, delivery: &Sign
         uc_stack: UserStack {
             ss_sp: altstack.sp as u64,
             ss_size: altstack.size as u64,
-            ss_flags: altstack.flags,
+            ss_flags: altstack.ss_flags(context.rsp as usize),
             _pad: 0,
         },
         uc_mcontext: Mcontext {
