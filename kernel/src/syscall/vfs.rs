@@ -187,12 +187,12 @@ pub fn seek(fd: i32, offset: usize, whence: i32) -> EResult<usize> {
 pub fn close(fd: i32) -> EResult<usize> {
     let proc = Scheduler::get_current().get_process();
 
-    let removed = proc.open_files.lock().close(fd);
-    let removed = removed.ok_or(Errno::EBADF)?;
+    {
+        let removed = proc.open_files.lock().close(fd);
+        let removed = removed.ok_or(Errno::EBADF)?;
+        removed.file.flush_on_close()?;
+    }
 
-    let result = removed.file.flush_on_close();
-    drop(removed);
-    result?;
     Ok(0)
 }
 
@@ -204,10 +204,11 @@ pub fn sync() -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn fsync(fd: i32) -> EResult<usize> {
-    let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
-    let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
-    drop(proc_inner);
+    let file = {
+        let proc = Scheduler::get_current().get_process();
+        let proc_inner = proc.open_files.lock();
+        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
 
     file.sync(false)?;
     Ok(0)
@@ -215,10 +216,11 @@ pub fn fsync(fd: i32) -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn fdatasync(fd: i32) -> EResult<usize> {
-    let proc = Scheduler::get_current().get_process();
-    let proc_inner = proc.open_files.lock();
-    let file = proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file;
-    drop(proc_inner);
+    let file = {
+        let proc = Scheduler::get_current().get_process();
+        let proc_inner = proc.open_files.lock();
+        proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
+    };
 
     file.sync(true)?;
     Ok(0)
@@ -226,8 +228,8 @@ pub fn fdatasync(fd: i32) -> EResult<usize> {
 
 #[wrap_syscall]
 pub fn ioctl(fd: i32, request: usize, arg: VirtAddr) -> EResult<usize> {
-    let proc = Scheduler::get_current().get_process();
     let file = {
+        let proc = Scheduler::get_current().get_process();
         let proc_inner = proc.open_files.lock();
         proc_inner.get_fd(fd).ok_or(Errno::EBADF)?.file
     };
@@ -249,11 +251,14 @@ pub fn ioctl(fd: i32, request: usize, arg: VirtAddr) -> EResult<usize> {
 #[wrap_syscall]
 pub fn getcwd(user_buf: VirtAddr, len: usize) -> EResult<usize> {
     let mut user_buf = UserPtr::new(user_buf);
-    let proc = Scheduler::get_current().get_process();
 
-    let cwd = proc.working_dir.lock().clone();
-    let root = proc.root_dir.lock().clone();
-    let path = cwd.absolute_path(&root)?;
+    let path = {
+        let proc = Scheduler::get_current().get_process();
+
+        let cwd = proc.working_dir.lock().clone();
+        let root = proc.root_dir.lock().clone();
+        cwd.absolute_path(&root)?
+    };
 
     let path_len = path.len();
     if path_len + 1 > len {
