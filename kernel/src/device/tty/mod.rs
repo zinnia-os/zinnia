@@ -16,7 +16,7 @@ use crate::{
         inode::Mode,
     },
 };
-use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec};
+use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::Duration,
@@ -41,8 +41,6 @@ pub struct LineDiscipline {
     read_buf: RingBuffer,
     canon_buf: Vec<u8>,
 }
-
-use alloc::vec::Vec;
 
 impl LineDiscipline {
     pub fn new() -> Self {
@@ -288,6 +286,27 @@ impl Tty {
         self.hangup.load(Ordering::Acquire)
     }
 
+    pub fn detach_session(self: &Arc<Self>) {
+        let Some(session) = self.session.lock().take() else {
+            return;
+        };
+        *self.foreground_pgrp.lock() = None;
+
+        // Iterate over all processes and detach from the sessions.
+        let procs = process::PROCESS_TABLE.lock();
+        let all = procs.values().filter_map(alloc::sync::Weak::upgrade);
+
+        for proc in all {
+            if *proc.session.lock() != session {
+                continue;
+            }
+            let mut ctty = proc.controlling_tty.lock();
+            if ctty.as_ref().is_some_and(|c| Arc::ptr_eq(c, self)) {
+                *ctty = None;
+            }
+        }
+    }
+
     /// Feed a byte from the hardware into the line discipline.
     /// Typically called from an IRQ handler.
     pub fn input_byte(&self, byte: u8) {
@@ -379,16 +398,6 @@ pub fn get_tty_by_name(name: &str) -> Option<Arc<Tty>> {
     TTYS.lock().values().find(|t| t.name == name).cloned()
 }
 
-fn pgrp_in_session(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
-    let all: Vec<Arc<process::Process>> = process::PROCESS_TABLE
-        .lock()
-        .values()
-        .filter_map(alloc::sync::Weak::upgrade)
-        .collect();
-    all.iter()
-        .any(|p| *p.pgrp.lock() == pgrp && *p.session.lock() == session)
-}
-
 fn pgrp_is_orphaned(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
     let all: Vec<Arc<process::Process>> = process::PROCESS_TABLE
         .lock()
@@ -411,6 +420,22 @@ fn pgrp_is_orphaned(pgrp: uapi::pid_t, session: uapi::pid_t) -> bool {
 
 pub struct TtyFileOps {
     pub tty: Arc<Tty>,
+}
+
+impl TtyFileOps {
+    fn require_ctty(&self) -> EResult<uapi::pid_t> {
+        let proc = Scheduler::get_current().get_process();
+        let session = *proc.session.lock();
+        let is_ctty = proc
+            .controlling_tty
+            .lock()
+            .as_ref()
+            .is_some_and(|c| Arc::ptr_eq(c, &self.tty));
+        if !is_ctty || *self.tty.session.lock() != Some(session) {
+            return Err(Errno::ENOTTY);
+        }
+        Ok(session)
+    }
 }
 
 impl FileOps for TtyFileOps {
@@ -664,41 +689,49 @@ impl FileOps for TtyFileOps {
                 }
             }
             uapi::ioctls::TIOCGPGRP => {
+                self.require_ctty()?;
                 let pgrp = self.tty.foreground_pgrp.lock().unwrap_or(0);
                 let mut ptr: UserPtr<i32> = UserPtr::new(arg);
                 ptr.write(pgrp as i32).ok_or(Errno::EFAULT)?;
             }
             uapi::ioctls::TIOCSPGRP => {
-                let proc = Scheduler::get_current().get_process();
-                let session = *proc.session.lock();
-                let is_ctty = proc
-                    .controlling_tty
-                    .lock()
-                    .as_ref()
-                    .is_some_and(|c| Arc::ptr_eq(c, &self.tty));
-                if !is_ctty || *self.tty.session.lock() != Some(session) {
-                    return Err(Errno::ENOTTY);
-                }
+                let session = self.require_ctty()?;
                 let ptr: UserPtr<i32> = UserPtr::new(arg);
                 let pgrp = ptr.read().ok_or(Errno::EFAULT)? as uapi::pid_t;
                 if pgrp <= 0 {
                     return Err(Errno::EINVAL);
                 }
                 self.tty.job_control_gate(false)?;
-                if !pgrp_in_session(pgrp, session) {
+                if !process::pgrp_in_session(pgrp, session) {
                     return Err(Errno::EPERM);
                 }
                 *self.tty.foreground_pgrp.lock() = Some(pgrp);
             }
             uapi::ioctls::TIOCSCTTY => {
                 let proc = Scheduler::get_current().get_process();
-                *self.tty.session.lock() = Some(proc.get_pid());
+                let session = *proc.session.lock();
+                if session != proc.get_pid() {
+                    return Err(Errno::EPERM);
+                }
+
+                let owner = *self.tty.session.lock();
+                if owner.is_some_and(|owner| owner != session) {
+                    self.tty.detach_session();
+                }
+
+                *self.tty.session.lock() = Some(session);
                 *self.tty.foreground_pgrp.lock() = Some(*proc.pgrp.lock());
                 *proc.controlling_tty.lock() = Some(self.tty.clone());
             }
             uapi::ioctls::TIOCNOTTY => {
                 let proc = Scheduler::get_current().get_process();
-                *proc.controlling_tty.lock() = None;
+                self.require_ctty()?;
+
+                if *proc.session.lock() == proc.get_pid() {
+                    self.tty.detach_session();
+                } else {
+                    *proc.controlling_tty.lock() = None;
+                }
             }
             uapi::ioctls::TIOCGNAME => {
                 let path = file.abs_path.as_deref().ok_or(Errno::ENOENT)?;
@@ -709,6 +742,7 @@ impl FileOps for TtyFileOps {
                 }
             }
             uapi::ioctls::TIOCGSID => {
+                self.require_ctty()?;
                 let sid = self.tty.session.lock().unwrap_or(0);
                 let mut ptr: UserPtr<i32> = UserPtr::new(arg);
                 ptr.write(sid as i32).ok_or(Errno::EFAULT)?;
@@ -726,6 +760,12 @@ impl FileOps for TtyFileOps {
 
     fn poll(&self, _file: &File, mask: PollFlags) -> EResult<PollFlags> {
         let mut revents = PollFlags::empty();
+
+        if self.tty.is_hung_up() {
+            return Ok((PollFlags::In | PollFlags::Err | PollFlags::Hup)
+                & (mask | PollFlags::Err | PollFlags::Hup));
+        }
+
         if mask.contains(PollFlags::In) {
             let ldisc = self.tty.ldisc.lock();
             if ldisc.read_available() > 0 {
