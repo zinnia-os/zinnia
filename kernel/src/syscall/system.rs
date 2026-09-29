@@ -7,8 +7,15 @@ use crate::{
         resource::Limits,
         utsname::UTSNAME,
     },
+    process::signal::Signal,
     sched::Scheduler,
-    uapi::{self, reboot::*, resource::*, time::*},
+    uapi::{
+        self,
+        reboot::*,
+        resource::*,
+        signal::{SIGEV_NONE, SIGEV_SIGNAL, sigevent},
+        time::*,
+    },
     util::{event::Event, mutex::spin::SpinMutex},
     wrap_syscall,
 };
@@ -175,6 +182,83 @@ pub fn futex_wake(pointer: VirtAddr, count: u32) -> EResult<usize> {
         queue.event.wake_n(count as usize)
     };
     Ok(woken)
+}
+
+#[wrap_syscall]
+pub fn timer_create(clockid: uapi::clockid_t, evp: VirtAddr, res: VirtAddr) -> EResult<usize> {
+    if !matches!(
+        clockid as usize,
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
+        return Err(Errno::EINVAL);
+    }
+
+    let (signo, value) = if evp.is_null() {
+        (Signal::SigAlrm, 0)
+    } else {
+        let evp: sigevent = UserPtr::new(evp).read().ok_or(Errno::EFAULT)?;
+
+        match evp.sigev_notify as u32 {
+            SIGEV_NONE => (Signal::SigAlrm, 0),
+            SIGEV_SIGNAL => {
+                let signo = u32::try_from(evp.sigev_signo).map_err(|_| Errno::EINVAL)?;
+                let signo = Signal::try_from(signo).map_err(|_| Errno::EINVAL)?;
+                (signo, unsafe { evp.sigev_value.sival_ptr }.addr().value())
+            }
+            _ => return Err(Errno::ENOTSUP),
+        }
+    };
+
+    let proc = Scheduler::get_current().get_process();
+    let id = proc.posix_timers.lock().create(signo, value);
+
+    UserPtr::<usize>::new(res).write(id).ok_or(Errno::EFAULT)?;
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn timer_set(id: usize, flags: i32, new: VirtAddr, old: VirtAddr) -> EResult<usize> {
+    let new_value: itimerspec = UserPtr::new(new).read().ok_or(Errno::EFAULT)?;
+    let absolute = flags & TFD_TIMER_ABSTIME != 0;
+
+    let proc = Scheduler::get_current().get_process();
+    let previous = proc
+        .posix_timers
+        .lock()
+        .set(id, clock::get_elapsed(), new_value, absolute)?;
+
+    if !old.is_null() {
+        UserPtr::new(old).write(previous).ok_or(Errno::EFAULT)?;
+    }
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn timer_get(id: usize, mut curr: UserPtr<itimerspec>) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    let current = proc.posix_timers.lock().get(id, clock::get_elapsed())?;
+
+    curr.write(current).ok_or(Errno::EFAULT)?;
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn timer_delete(id: usize) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    proc.posix_timers.lock().delete(id)?;
+
+    Ok(0)
+}
+
+#[wrap_syscall]
+pub fn timer_getoverrun(id: usize) -> EResult<usize> {
+    let proc = Scheduler::get_current().get_process();
+    let overrun = proc.posix_timers.lock().overrun(id)?;
+
+    Ok(overrun as usize)
 }
 
 #[wrap_syscall]

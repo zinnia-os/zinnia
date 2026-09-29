@@ -13,7 +13,7 @@ use crate::{
     percpu::CpuData,
     posix::errno::{EResult, Errno},
     process::{
-        itimer::IntervalTimerState,
+        itimer::{IntervalTimerState, PosixTimers},
         signal::{SigQueue, Signal, SignalState},
         task::Task,
     },
@@ -92,6 +92,7 @@ pub struct Process {
     pub controlling_tty: SpinMutex<Option<Arc<Tty>>>,
     /// Process-wide real-time interval timer.
     pub real_timer: SpinMutex<IntervalTimerState>,
+    pub posix_timers: SpinMutex<PosixTimers>,
     /// Event that is signalled when a child process changes state
     /// (exited, signaled, stopped, or continued).
     pub child_event: Event,
@@ -224,6 +225,7 @@ impl Process {
             session: SpinMutex::new(*self.session.lock()),
             controlling_tty: SpinMutex::new(self.controlling_tty.lock().clone()),
             real_timer: SpinMutex::new(IntervalTimerState::default()),
+            posix_timers: SpinMutex::new(PosixTimers::default()),
             child_event: Event::new(),
             cont_event: Event::new(),
             signal_event: Event::new(),
@@ -310,6 +312,7 @@ impl Process {
             session: SpinMutex::new(session),
             controlling_tty: SpinMutex::new(ctty),
             real_timer: SpinMutex::new(IntervalTimerState::default()),
+            posix_timers: SpinMutex::new(PosixTimers::default()),
             child_event: Event::new(),
             cont_event: Event::new(),
             signal_event: Event::new(),
@@ -323,6 +326,12 @@ impl Process {
     /// Returns the kernel process.
     pub fn get_kernel() -> &'static Arc<Self> {
         KERNEL_PROCESS.get()
+    }
+
+    fn unregister(&self) {
+        PROCESS_TABLE.lock().remove(&self.id);
+        self.real_timer.lock().disarm();
+        self.posix_timers.lock().clear();
     }
 
     /// Replaces a process with a new executable image, given some arguments and an environment.
@@ -392,6 +401,7 @@ impl Process {
             let closed = self.open_files.lock().close_exec();
             drop(closed);
             self.signal_actions.lock().reset_on_exec();
+            self.posix_timers.lock().clear();
 
             if is_current_process {
                 unsafe { new_table.set_active() };
@@ -424,8 +434,7 @@ impl Process {
             panic!("Attempted to kill init with process state {:?}", new_state);
         }
 
-        PROCESS_TABLE.lock().remove(&proc.get_pid());
-        proc.real_timer.lock().disarm();
+        proc.unregister();
 
         let old_space = proc.replace_address_space(Arc::new(Mutex::new(AddressSpace::new_kernel(
             KERNEL_PAGE_TABLE.get().clone(),

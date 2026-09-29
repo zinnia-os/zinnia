@@ -280,9 +280,11 @@ pub(crate) fn dispatch(frame: &mut Context) {
         numbers::FUTEX_WAKE => system::futex_wake,
 
         // Time
-        numbers::TIMER_CREATE => sys_unimpl!("timer_create", Ok(0)),
-        numbers::TIMER_SET => sys_unimpl!("timer_set", Err(Errno::ENOSYS)),
-        numbers::TIMER_DELETE => sys_unimpl!("timer_delete", Err(Errno::ENOSYS)),
+        numbers::TIMER_CREATE => system::timer_create,
+        numbers::TIMER_SET => system::timer_set,
+        numbers::TIMER_GET => system::timer_get,
+        numbers::TIMER_DELETE => system::timer_delete,
+        numbers::TIMER_GETOVERRUN => system::timer_getoverrun,
         numbers::ITIMER_GET => system::itimer_get,
         numbers::ITIMER_SET => system::itimer_set,
         numbers::CLOCK_GET => system::clock_get,
