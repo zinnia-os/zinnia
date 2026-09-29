@@ -38,22 +38,22 @@ unsafe extern "C" {
 
 // The AP trampoline.
 global_asm!("
-.global SMP_TRAMPOLINE_START
-.global SMP_TRAMPOLINE_ENTRY
-.global SMP_TRAMPOLINE_END
+.global {trampoline_start}
+.global {trampoline_data}
+.global {trampoline_end}
 
 .section .rodata
 .code16
 
-SMP_TRAMPOLINE_START:
+{trampoline_start}:
     cli
     cld
     jmp 1f
 
-SMP_TRAMPOLINE_DATA:
+{trampoline_data}:
     .skip {info_size}
 
-.set data_offset, (SMP_TRAMPOLINE_DATA - SMP_TRAMPOLINE_START)
+.set data_offset, ({trampoline_data} - {trampoline_start})
 .set gdtr_offset, (data_offset + {gdtr_offset})
 .set farjmp_offset, (data_offset + {farjmp_offset})
 .set temp_stack_offset, (data_offset + {temp_stack_offset})
@@ -65,11 +65,11 @@ SMP_TRAMPOLINE_DATA:
     mov bx, cs
     shl ebx, 4
 
-.set idtr_offset, (invalid_idtr - SMP_TRAMPOLINE_START)
+.set idtr_offset, (invalid_idtr - {trampoline_start})
     lidtd cs:idtr_offset
     lgdtd cs:gdtr_offset
 
-.set mode32_offset, (mode32 - SMP_TRAMPOLINE_START)
+.set mode32_offset, (mode32 - {trampoline_start})
     lea eax, [ebx + mode32_offset]
     mov dword ptr cs:farjmp_offset, eax
 
@@ -109,7 +109,7 @@ mode32:
     or  eax, {cr0_pg}
     mov cr0, eax
 
-.set mode64_offset, (mode64 - SMP_TRAMPOLINE_START)
+.set mode64_offset, (mode64 - {trampoline_start})
     lea eax, [ebx + mode64_offset]
     push {kernel64_cs}
     push eax
@@ -140,7 +140,10 @@ invalid_idtr:
     .word 0
     .quad 0
 
-SMP_TRAMPOLINE_END:",
+{trampoline_end}:",
+    trampoline_start = sym SMP_TRAMPOLINE_START,
+    trampoline_data = sym SMP_TRAMPOLINE_DATA,
+    trampoline_end = sym SMP_TRAMPOLINE_END,
     info_size = const INFO_SIZE,
 
     gdtr_offset = const GDTR_OFFSET,
