@@ -29,10 +29,14 @@ fn main() {
     .flag("-ffreestanding")
     .flag("-nostdlib");
 
-    match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    match arch.as_str() {
         "x86_64" => {
             b.flag("-mgeneral-regs-only");
             b.flag("-mno-red-zone");
+        }
+        "aarch64" => {
+            b.flag("-mgeneral-regs-only");
         }
         "riscv64" => {}
         _ => (),
