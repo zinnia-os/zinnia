@@ -33,9 +33,8 @@ impl IgcController {
         self.read(STATUS);
     }
 
-    pub fn poll(&self, timeout_us: usize, mut cond: impl FnMut() -> bool) -> bool {
-        let deadline =
-            clock::get_elapsed().saturating_add(Duration::from_micros(timeout_us as u64));
+    pub fn poll(&self, timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = clock::get_elapsed().saturating_add(timeout);
         loop {
             if cond() {
                 return true;
@@ -57,7 +56,7 @@ impl IgcController {
         _ = clock::block(Duration::from_millis(10));
 
         self.update(CTRL, |v| v.write_field(ctrl::GIO_MASTER_DISABLE, 1));
-        if !self.poll(800_000, || {
+        if !self.poll(Duration::from_millis(800), || {
             self.read(STATUS)
                 .read_field(status::GIO_MASTER_ENABLE)
                 .value()
@@ -69,7 +68,7 @@ impl IgcController {
         self.update(CTRL, |v| v.write_field(ctrl::RST, 1));
         _ = clock::block(Duration::from_millis(1));
 
-        if !self.poll(20_000, || {
+        if !self.poll(Duration::from_millis(20), || {
             self.read(EECD).read_field(eecd::AUTO_RD).value() != 0
         }) {
             warn!("NVM auto-read did not complete after reset");
@@ -117,15 +116,15 @@ impl IgcController {
 
     fn get_hw_semaphore(&self) -> EResult<()> {
         let smbi_free = || self.read(SWSM).read_field(swsm::SMBI).value() == 0;
-        if !self.poll(100_000, smbi_free) {
+        if !self.poll(Duration::from_millis(100), smbi_free) {
             warn!("SMBI stuck, force-releasing hardware semaphore");
             self.put_hw_semaphore();
-            if !self.poll(100_000, smbi_free) {
+            if !self.poll(Duration::from_millis(100), smbi_free) {
                 return Err(Errno::ETIMEDOUT);
             }
         }
 
-        let ok = self.poll(100_000, || {
+        let ok = self.poll(Duration::from_millis(100), || {
             self.update(SWSM, |v| v.write_field(swsm::SWESMBI, 1));
             self.read(SWSM).read_field(swsm::SWESMBI).value() != 0
         });
@@ -189,7 +188,7 @@ impl IgcController {
 
     fn mdic_wait(&self) -> EResult<u16> {
         let mut last = BitValue::new(0u32);
-        if !self.poll(100_000, || {
+        if !self.poll(Duration::from_millis(100), || {
             _ = clock::block(Duration::from_micros(50));
             last = self.read(MDIC);
             last.read_field(mdic::READY).value() != 0

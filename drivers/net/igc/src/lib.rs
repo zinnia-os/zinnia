@@ -1,6 +1,9 @@
 #![no_std]
 
-use core::ptr::{read_volatile, write_volatile};
+use core::{
+    ptr::{read_volatile, write_volatile},
+    time::Duration,
+};
 use zinnia::{
     alloc::{boxed::Box, sync::Arc},
     arch, clock,
@@ -324,7 +327,7 @@ fn probe(variant: &PciVariant, mut view: DeviceView<'static>) -> EResult<()> {
             .value(),
     );
 
-    if !hw.poll(10_000, || {
+    if !hw.poll(Duration::from_millis(10), || {
         hw.read(RXDCTL0).read_field(rxdctl0::QUEUE_ENABLE).value() != 0
     }) {
         warn!("{address}: RX queue 0 did not enable");
@@ -375,7 +378,7 @@ fn probe(variant: &PciVariant, mut view: DeviceView<'static>) -> EResult<()> {
             .write_field(txdctl0::QUEUE_ENABLE, 1)
             .value(),
     );
-    if !hw.poll(10_000, || {
+    if !hw.poll(Duration::from_millis(10), || {
         hw.read(TXDCTL0).read_field(txdctl0::QUEUE_ENABLE).value() != 0
     }) {
         warn!("{address}: TX queue 0 did not enable");
