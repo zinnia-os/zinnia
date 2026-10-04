@@ -26,7 +26,7 @@ pub const fn drm_iowr<T>(num: u8) -> u32 {
 
 /// For DRM driver specific ioctls.
 pub const fn drm_driver_iowr<T>(num: u8) -> u32 {
-    iowr::<T>(BASE + DRM_COMMAND_BASE, num)
+    iowr::<T>(BASE, DRM_COMMAND_BASE + num)
 }
 
 pub type drm_context_t = u32;
