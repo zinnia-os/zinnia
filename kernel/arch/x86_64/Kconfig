@@ -1,0 +1,18 @@
+menu "x86_64 Architecture options"
+
+config X86_64
+  bool
+  default y
+  select ACPI
+  select HAVE_EFISTUB
+  select HAVE_MMU
+  select HAVE_MMU_GENERIC
+  select HAVE_TLB_SHOOTDOWN_IPI
+  help
+    64-bit x86 CPU support for AMD and Intel CPUs.
+
+config TSC
+  bool "Invariant Timestamp Counter support"
+  default y
+
+endmenu

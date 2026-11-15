@@ -1,0 +1,6 @@
+executable('console', 'console.c', install: true)
+executable('devd', 'devd.c', install: true)
+executable('insertmod', 'insertmod.c', install: true)
+executable('kmsg', 'kmsg.c', install: true)
+executable('mount', 'mount.c', install: true)
+executable('umount', 'umount.c', install: true)

@@ -1,0 +1,19 @@
+[binaries]
+c = 'clang'
+cpp = 'clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+objcopy = 'llvm-objcopy'
+ld = 'ld.lld'
+
+[built-in options]
+c_args = ['--target=x86_64-unknown-elf']
+cpp_args = ['--target=x86_64-unknown-elf']
+c_link_args = ['--target=x86_64-unknown-elf', '-fuse-ld=lld', '-Wno-unused-command-line-argument']
+cpp_link_args = ['--target=x86_64-unknown-elf', '-fuse-ld=lld', '-Wno-unused-command-line-argument']
+
+[host_machine]
+system = 'none'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'

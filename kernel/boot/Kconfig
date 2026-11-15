@@ -1,0 +1,19 @@
+config HAVE_EFISTUB
+  bool
+
+menu "Boot loaders"
+
+config BOOT_EFISTUB
+  bool "EFI stub"
+  depends on HAVE_EFISTUB
+  default y
+  help
+    Kernel loader for UEFI systems.
+
+config BOOT_LIMINE
+  bool "Limine"
+  default n
+  help
+    ELF loader with the Limine protocol.
+
+endmenu

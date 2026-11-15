@@ -1,0 +1,9 @@
+menu "Video Drivers"
+
+config FBCON
+  bool "Framebuffer console"
+  default y
+  help
+    Adds a basic console that can draw on a framebuffer passed by firmware.
+
+endmenu

@@ -1,0 +1,6 @@
+version = 1
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "The Zinnia Project"
+SPDX-License-Identifier = "BSD-3-Clause"

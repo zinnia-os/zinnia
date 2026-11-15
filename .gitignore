@@ -1,0 +1,8 @@
+.config*
+build/
+.cache/
+.wraplock
+*.o
+*.a
+*.so
+__pycache__/

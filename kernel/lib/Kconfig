@@ -1,0 +1,16 @@
+menu "Scheduler options"
+
+choice SCHED_ALG
+  prompt "Scheduler algorithm"
+  default SCHED_DUMB
+  help
+    The algorithm to use for scheduling.
+
+config SCHED_DUMB
+  bool "Dumb Scheduler"
+  help
+    Very basic scheduler.
+
+endchoice
+
+endmenu

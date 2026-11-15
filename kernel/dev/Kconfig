@@ -1,0 +1,19 @@
+menu "Device Drivers"
+
+config OF
+  bool "Support for OpenFirmware"
+  default y
+  help
+    Adds support for flattened device trees and OF platform drivers.
+
+config ACPI
+  bool "Support for ACPI firmware"
+  default y
+  help
+    Adds support for ACPI firmware, tables and devices.
+
+source "kernel/dev/block/Kconfig"
+source "kernel/dev/pci/Kconfig"
+source "kernel/dev/video/Kconfig"
+
+endmenu

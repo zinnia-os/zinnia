@@ -1,0 +1,12 @@
+menu "Memory Management options"
+
+config HAVE_MMU
+  bool
+config HAVE_MMU_GENERIC
+  bool
+config HAVE_MMU_SPLIT_ROOT
+  bool
+config HAVE_TLB_SHOOTDOWN_IPI
+  bool
+
+endmenu

@@ -1,0 +1,5 @@
+menu "Block device drivers"
+
+source "kernel/dev/block/nvme/Kconfig"
+
+endmenu

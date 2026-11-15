@@ -1,0 +1,10 @@
+menu "Testing"
+
+config KTEST
+  bool "Kernel test suite"
+  depends on BOOT_EFISTUB
+  default n
+  help
+    Builds the kernel unit tests. To run them, add "ktest=1" to the cmdline.
+
+endmenu

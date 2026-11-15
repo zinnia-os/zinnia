@@ -1,0 +1,4 @@
+config NVME
+  tristate "NVMe block devices"
+  default y
+  depends on PCI

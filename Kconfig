@@ -1,0 +1,17 @@
+mainmenu "Zinnia Kernel Configuration"
+
+config KERNEL_FLAVOR
+  string "Kernel flavor name"
+  default "vanilla"
+
+config MODULES
+  bool "Loadable module support"
+  default y
+  option modules
+
+source "kernel/arch/$(ARCH)/Kconfig"
+source "kernel/boot/Kconfig"
+source "kernel/mem/Kconfig"
+source "kernel/lib/Kconfig"
+source "kernel/dev/Kconfig"
+source "tests/Kconfig"

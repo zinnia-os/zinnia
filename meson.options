@@ -1,0 +1,27 @@
+option(
+    'headers_only',
+    type: 'boolean',
+    value: false,
+    description: 'Only install headers',
+)
+
+option(
+    'tools_only',
+    type: 'boolean',
+    value: false,
+    description: 'Only build userspace tools',
+)
+
+option(
+    'config_path',
+    type: 'string',
+    value: '.config',
+    description: 'Relative path to the generated Kconfig file',
+)
+
+option(
+    'ovmf',
+    type: 'string',
+    value: '',
+    description: 'OVMF firmware image used to run the QEMU tests',
+)

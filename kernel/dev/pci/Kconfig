@@ -1,0 +1,7 @@
+menu "PCI bus drivers"
+
+config PCI
+  bool "PCI core drivers"
+  default y
+
+endmenu
