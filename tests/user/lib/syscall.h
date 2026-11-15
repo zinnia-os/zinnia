@@ -175,7 +175,13 @@ static inline struct sys_ret sys_getdents(int fd, void* buf, size_t len) {
 }
 
 static inline struct sys_ret sys_renameat(int old_dirfd, const char* old_path, int new_dirfd, const char* new_path) {
-    return syscall4(__NR_renameat, (uintptr_t)old_dirfd, (uintptr_t)old_path, (uintptr_t)new_dirfd, (uintptr_t)new_path);
+    return syscall4(
+        __NR_renameat,
+        (uintptr_t)old_dirfd,
+        (uintptr_t)old_path,
+        (uintptr_t)new_dirfd,
+        (uintptr_t)new_path
+    );
 }
 
 static inline struct sys_ret sys_linkat(

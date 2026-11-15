@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <arch/sched.h>
 #include <arch/x86_64/defs.h>
 #include <arch/x86_64/gdt.h>
-#include <arch/sched.h>
 #include <lib/compiler.h>
 #include <lib/percpu.h>
 #include <syscalls/syscall.h>
@@ -41,7 +41,7 @@ void arch_syscall_stub() {
         "    push r14\n"
         "    push r15\n"
         "    xor rbp, rbp\n"
-        "    mov rdi, rsp\n"          // SysV ABI first argument.
+        "    mov rdi, rsp\n" // SysV ABI first argument.
         "    sti\n"
         "    call syscall_dispatch\n" // Call syscall handler.
         "    cli\n"

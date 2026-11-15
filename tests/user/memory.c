@@ -2,11 +2,11 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <tests/user/lib/syscall.h>
+#include <tests/user/lib/utest.h>
 #include <zinnia/errno.h>
 #include <zinnia/fcntl.h>
 #include <zinnia/mman.h>
-#include <tests/user/lib/syscall.h>
-#include <tests/user/lib/utest.h>
 
 constexpr size_t PAGE_SIZE = 0x1000;
 constexpr uint32_t PROT_RW = __PROT_READ | __PROT_WRITE;

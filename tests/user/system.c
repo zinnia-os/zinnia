@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <string.h>
-#include <zinnia/errno.h>
-#include <zinnia/utsname.h>
 #include <tests/user/lib/syscall.h>
 #include <tests/user/lib/utest.h>
+#include <zinnia/errno.h>
+#include <zinnia/utsname.h>
 
 UTEST(syslog, writes_message) {
     const char msg[] = "utest: syslog test";
