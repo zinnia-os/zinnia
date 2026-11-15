@@ -1,0 +1,23 @@
+name: Format
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  clang-format:
+    name: Check formatting
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git clang
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run clang-format
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git ls-files -z -- '*.c' '*.h' ':!:subprojects' \
+            | xargs -0 clang-format --dry-run --Werror

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64]
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git tar clang lld llvm meson ninja \
+            python-pip qemu-system-x86 edk2-ovmf
+          pip install --break-system-packages kconfiglib
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          alldefconfig
+          if [ "$ARCH" = x86_64 ]; then
+            setconfig BOOT_EFISTUB=y KTEST=y
+          fi
+          meson setup build --cross-file="toolchain/$ARCH.cross-file"
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Test
+        if: matrix.arch == 'x86_64'
+        run: meson test -C build
+
+      - name: Upload test logs
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: testlog-${{ matrix.arch }}
+          path: build/meson-logs/
