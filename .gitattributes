@@ -1,1 +1,2 @@
 *.h diff=c
+*.inc diff=c
