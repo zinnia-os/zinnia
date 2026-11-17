@@ -154,6 +154,7 @@ enum : uint32_t {
     AT_RANDOM = 25,
     AT_EXECFN = 31,
     AT_SYSINFO_EHDR = 33,
+    AT_MINSIGSTKSZ = 51,
     AT_INIT_HANDLE = 0x1000,
 };
 
