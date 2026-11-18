@@ -36,6 +36,7 @@ struct epoch_cpu {
     struct spinlock lock;
     struct epoch_bucket buckets[EPOCH_BUCKETS];
     struct epoch_list ready;
+    struct timer kick;
 };
 
 [[__percpu]]
@@ -110,6 +111,10 @@ static void wake_reclaimer() {
         sched_wake(task);
 }
 
+static void kick_tick(struct timer*) {
+    wake_reclaimer();
+}
+
 void epoch_call(struct epoch_head* head, void (*func)(struct epoch_head* head)) {
     head->func = func;
     const size_t old = atomic_fetch_add(&pending, 1, ATOMIC_RELAXED);
@@ -132,12 +137,17 @@ void epoch_call(struct epoch_head* head, void (*func)(struct epoch_head* head)) 
         bucket->epoch = now;
     }
     list_push(&bucket->list, head);
-
     spin_unlock(&cpu->lock);
-    irq_unlock();
 
-    if (old == 0 || old % EPOCH_BATCH == 0)
-        wake_reclaimer();
+    // We arm a timer to wake the reclaimer instead of doing it directly to
+    // avoid a potential deadlock scenario when this function is called with
+    // locks held.
+    if ((old == 0 || old % EPOCH_BATCH == 0) && atomic_load(&reclaimer, ATOMIC_ACQUIRE)) {
+        if (!cpu->kick.func)
+            timer_init(&cpu->kick, kick_tick);
+        timer_arm(&cpu->kick, clock_get_elapsed_ns());
+    }
+    irq_unlock();
 }
 
 uint64_t epoch_current() {
