@@ -51,7 +51,7 @@ SpaceInEmptyBlock: false
 SpacesBeforeTrailingComments: 1
 IncludeBlocks: Merge
 IncludeCategories:
-- Regex: "^<(arch|boot|dev|fs|lib|mem|syscalls)/.*>"
+- Regex: "^<(arch|boot|dev|fs|lib|mem|net|syscalls)/.*>"
   Priority: 1
 - Regex: '^<.*\.h>'
   Priority: 2
