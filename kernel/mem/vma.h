@@ -85,6 +85,6 @@ struct vma_fault_info {
 };
 
 // Try to handle a page fault.
-bool vma_page_fault(struct vma* v, const struct vma_fault_info* info);
+errno_t vma_page_fault(struct vma* v, const struct vma_fault_info* info);
 
 extern struct vma kernel_vma;

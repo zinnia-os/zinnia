@@ -65,12 +65,12 @@ void interrupt_handler(arch_context_t* ctx) {
         if (irqs_were_on)
             irq_set_state(true);
 
-        const bool handled = current && current->space && vma_page_fault(current->space, &info);
+        const errno_t fault_status = current && current->space ? vma_page_fault(current->space, &info) : EFAULT;
 
         if (irqs_were_on)
             irq_set_state(false);
 
-        if (handled)
+        if (!fault_status)
             break;
 
         if (current && current->usercopy_region) {

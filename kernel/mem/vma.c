@@ -574,10 +574,10 @@ static errno_t fault(struct vma* v, size_t page, enum fault_kind kind, bool forc
     }
 }
 
-bool vma_page_fault(struct vma* v, const struct vma_fault_info* info) {
+errno_t vma_page_fault(struct vma* v, const struct vma_fault_info* info) {
     const enum fault_kind kind = info->caused_by_write ? FAULT_WRITE : info->caused_by_fetch ? FAULT_EXEC : FAULT_READ;
     phys_t phys;
-    return fault(v, info->addr / page_size(), kind, false, &phys) == 0;
+    return fault(v, info->addr / page_size(), kind, false, &phys);
 }
 
 static errno_t write_range(struct vma* v, uintptr_t addr, const void* buf, size_t len) {
