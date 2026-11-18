@@ -6,6 +6,7 @@ kernel_sources += files(
     'entry.c',
     'epoch.c',
     'event.c',
+    'futex.c',
     'guid.c',
     'initgraph.c',
     'iovec.c',

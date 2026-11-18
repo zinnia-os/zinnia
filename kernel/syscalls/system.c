@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <fs/ident.h>
+#include <lib/clock.h>
+#include <lib/futex.h>
+#include <lib/percpu.h>
 #include <lib/print.h>
+#include <lib/sched.h>
 #include <lib/spin.h>
+#include <lib/time.h>
 #include <mem/alloc.h>
 #include <mem/usercopy.h>
 #include <syscalls/private.h>
 #include <syscalls/syscall.h>
 #include <bits/archctl.h>
 #include <config.h>
+#include <stdckdint.h>
 #include <stdint.h>
 #include <string.h>
+#include <zinnia/time.h>
 #include <zinnia/utsname.h>
 
 enum syslog_kind : uintptr_t {
@@ -34,6 +41,24 @@ static struct __utsname uname_buf = {
     .machine = ZINNIA_ARCH,
     .domainname = "(none)",
 };
+
+static errno_t read_timespec_ns(const __user struct __timespec* user, uint64_t* out) {
+    struct __timespec ts;
+    if (!usercopy_read(&ts, user, sizeof(ts)))
+        return EFAULT;
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || (uint64_t)ts.tv_nsec >= SECS_TO_NS(1))
+        return EINVAL;
+    if (ckd_mul(out, (uint64_t)ts.tv_sec, SECS_TO_NS(1)) || ckd_add(out, *out, (uint64_t)ts.tv_nsec))
+        *out = UINT64_MAX;
+    return 0;
+}
+
+static uint64_t deadline_after(uint64_t ns) {
+    uint64_t deadline;
+    if (ckd_add(&deadline, clock_get_elapsed_ns(), ns))
+        return UINT64_MAX;
+    return deadline;
+}
 
 struct syscall_ret sys_archctl(uintptr_t op, uintptr_t arg) {
     return arch_archctl(op, arg);
@@ -141,5 +166,34 @@ struct syscall_ret sys_syslog(enum syslog_kind kind, __user char* message, size_
 
     mem_free(buf, buf_len);
 
+    return ret;
+}
+
+struct syscall_ret sys_futex_wait(__user int* pointer, int expected, const __user struct __timespec* timeout) {
+    struct syscall_ret ret = {};
+
+    uint64_t deadline = 0;
+    if (timeout) {
+        uint64_t ns;
+        ret.error = read_timespec_ns(timeout, &ns);
+        if (ret.error)
+            return ret;
+        deadline = deadline_after(ns);
+    }
+
+    struct task* task = percpu_get()->sched.current;
+    ret.error = futex_wait(task->space, (uintptr_t)pointer, expected, timeout ? &deadline : nullptr);
+    return ret;
+}
+
+struct syscall_ret sys_futex_wake(__user int* pointer, uint32_t count) {
+    struct syscall_ret ret = {};
+
+    if ((uintptr_t)pointer % sizeof(int)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+    struct task* task = percpu_get()->sched.current;
+    ret.value = futex_wake(task->space, (uintptr_t)pointer, count);
     return ret;
 }
