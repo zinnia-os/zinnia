@@ -94,3 +94,38 @@ errno_t ringbuf_read_iter(struct ringbuf* rb, iovec_iter_t* iter, size_t len, si
     *out_read = done;
     return done ? 0 : status;
 }
+
+size_t ringbuf_peek(const struct ringbuf* rb, size_t offset, void* dst, size_t len) {
+    if (offset >= rb->len)
+        return 0;
+    len = MIN(len, rb->len - offset);
+    size_t done = 0;
+    while (done < len) {
+        const size_t pos = (rb->head + offset + done) % rb->capacity;
+        const size_t chunk = MIN(len - done, rb->capacity - pos);
+        memcpy((uint8_t*)dst + done, rb->data + pos, chunk);
+        done += chunk;
+    }
+    return done;
+}
+
+errno_t ringbuf_peek_iter(const struct ringbuf* rb, size_t offset, iovec_iter_t* iter, size_t len, size_t* out_read) {
+    size_t done = 0;
+    errno_t status = 0;
+    len = offset < rb->len ? MIN(len, rb->len - offset) : 0;
+    while (!status && done < len) {
+        const size_t pos = (rb->head + offset + done) % rb->capacity;
+        const size_t chunk = MIN(len - done, rb->capacity - pos);
+        size_t copied;
+        status = iovec_iter_copy_to(iter, rb->data + pos, chunk, &copied);
+        done += copied;
+        if (copied < chunk)
+            break;
+    }
+    *out_read = done;
+    return done ? 0 : status;
+}
+
+void ringbuf_discard(struct ringbuf* rb, size_t len) {
+    advance_read(rb, MIN(len, rb->len));
+}
