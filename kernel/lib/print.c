@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <fs/poll.h>
 #include <lib/clock.h>
 #include <lib/console.h>
 #include <lib/panic.h>
@@ -381,14 +382,22 @@ struct log_record {
     uint8_t level;
 };
 
-#define LOG_BUFFER_SIZE (64 * 1024)
-#define LOG_MESSAGE_MAX 255
+constexpr size_t LOG_BUFFER_SIZE = 64 * 1024;
 
 static uint8_t log_buffer[LOG_BUFFER_SIZE];
 
 // Protected by print_lock.
 static size_t log_head = 0;
 static size_t log_tail = 0;
+static uint64_t log_first_seq = 0;
+static uint64_t log_end_seq = 0;
+
+static struct poll_event log_event = {
+    .waiters = {
+        .tqh_first = nullptr,
+        .tqh_last = &log_event.waiters.tqh_first,
+    },
+};
 
 static void log_ring_copy_in(const void* src, size_t len) {
     for (size_t i = 0; i < len; i++)
@@ -409,10 +418,12 @@ static void log_store(const struct log_record* rec, const char* msg) {
         struct log_record old;
         log_ring_peek(log_tail, &old, sizeof(old));
         log_tail += sizeof(old) + old.len;
+        log_first_seq++;
     }
 
     log_ring_copy_in(rec, sizeof(*rec));
     log_ring_copy_in(msg, rec->len);
+    log_end_seq++;
 }
 
 struct log_line {
@@ -493,6 +504,51 @@ void log_vwrite_prefixed(enum log_level level, const char* prefix, const char* m
     log_store(&rec, line.buf);
     log_emit(printf_console, nullptr, &rec, line.buf);
     spin_unlock(&print_lock);
+
+    if (level != LOG_PANIC)
+        poll_event_notify(&log_event);
+}
+
+errno_t log_read(uint64_t* seq, struct log_entry* out) {
+    spin_lock(&print_lock);
+    if (*seq < log_first_seq) {
+        *seq = log_first_seq;
+        spin_unlock(&print_lock);
+        return EPIPE;
+    }
+    if (*seq >= log_end_seq) {
+        spin_unlock(&print_lock);
+        return EAGAIN;
+    }
+
+    size_t offset = log_tail;
+    struct log_record rec;
+    for (uint64_t cur = log_first_seq;; cur++) {
+        log_ring_peek(offset, &rec, sizeof(rec));
+        if (cur == *seq)
+            break;
+        offset += sizeof(rec) + rec.len;
+    }
+
+    out->seq = *seq;
+    out->time_ns = rec.time_ns;
+    out->tid = rec.tid;
+    out->level = rec.level;
+    out->len = rec.len;
+    log_ring_peek(offset + sizeof(rec), out->msg, rec.len);
+    spin_unlock(&print_lock);
+    return 0;
+}
+
+uint64_t log_next_seq() {
+    spin_lock(&print_lock);
+    const uint64_t seq = log_end_seq;
+    spin_unlock(&print_lock);
+    return seq;
+}
+
+struct poll_event* log_poll_event() {
+    return &log_event;
 }
 
 void log_write(enum log_level level, const char* message, ...) {

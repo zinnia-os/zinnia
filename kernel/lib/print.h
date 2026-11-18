@@ -3,8 +3,10 @@
 #pragma once
 
 #include <lib/compiler.h>
+#include <lib/errno.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 
 [[__format(printf, 1, 2)]]
 void kprintf(const char* message, ...);
@@ -38,6 +40,23 @@ void log_vwrite_prefixed(enum log_level level, const char* prefix, const char* m
 
 // Passes every record currently in the log buffer to `callback`.
 void log_replay(log_fn_t callback, void* ctx);
+
+constexpr size_t LOG_MESSAGE_MAX = 255;
+
+struct log_entry {
+    uint64_t seq;
+    uint64_t time_ns;
+    uint32_t tid;
+    enum log_level level;
+    size_t len;
+    char msg[LOG_MESSAGE_MAX];
+};
+
+struct poll_event;
+
+errno_t log_read(uint64_t* seq, struct log_entry* out);
+uint64_t log_next_seq();
+struct poll_event* log_poll_event();
 
 #ifndef LOG_FMT
 #define LOG_FMT(fmt) fmt
