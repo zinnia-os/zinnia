@@ -4,25 +4,10 @@
 #define __ZINNIA_NET_H
 
 #include <zinnia/socket.h>
+#include <zinnia/sockios.h>
 #include <zinnia/types.h>
 
 #define __IFNAMSIZ 16
-
-#define __SIOCADDRT      0x890B
-#define __SIOCDELRT      0x890C
-#define __SIOCGIFCONF    0x8912
-#define __SIOCGIFFLAGS   0x8913
-#define __SIOCSIFFLAGS   0x8914
-#define __SIOCGIFADDR    0x8915
-#define __SIOCSIFADDR    0x8916
-#define __SIOCGIFBRDADDR 0x8919
-#define __SIOCSIFBRDADDR 0x891A
-#define __SIOCGIFNETMASK 0x891B
-#define __SIOCSIFNETMASK 0x891C
-#define __SIOCGIFMTU     0x8921
-#define __SIOCSIFMTU     0x8922
-#define __SIOCGIFHWADDR  0x8927
-#define __SIOCGIFINDEX   0x8933
 
 #define __IFF_UP        0x1
 #define __IFF_BROADCAST 0x2

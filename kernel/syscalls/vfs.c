@@ -509,7 +509,7 @@ struct syscall_ret sys_ioctl(int fd, uintptr_t request, uintptr_t arg) {
         return ret;
 
     uintptr_t value = 0;
-    if ((uint32_t)request == __FIONBIO) {
+    if ((uint32_t)request == FIONBIO) {
         uint32_t nonblock;
         if (usercopy_read(&nonblock, (const __user void*)arg, sizeof(nonblock)))
             set_status_flags(file, O_NONBLOCK, nonblock ? O_NONBLOCK : 0);

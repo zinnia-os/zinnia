@@ -18,7 +18,12 @@
 #define __IOC_NUM(req)                ((req) & 0xFF)
 #define __IOC_LEN(req)                (((req) >> 16) & 0x3FFF)
 
-#define __FIONREAD __IO('T', 0x1B)
-#define __FIONBIO  __IO('T', 0x21)
+#define FIONREAD __IO('T', 0x1B)
+#define TIOCINQ  FIONREAD
+#define FIONBIO  __IO('T', 0x21)
+#define FIONCLEX __IO('T', 0x50)
+#define FIOCLEX  __IO('T', 0x51)
+#define FIOASYNC __IO('T', 0x52)
+#define FIOQSIZE __IO('T', 0x60)
 
 #endif

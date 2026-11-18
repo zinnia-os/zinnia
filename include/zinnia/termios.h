@@ -95,31 +95,78 @@ struct __winsize {
     unsigned short ws_ypixel;
 };
 
-#define __TCGETS     __IO('T', 0x01)
-#define __TCSETS     __IO('T', 0x02)
-#define __TCSETSW    __IO('T', 0x03)
-#define __TCSETSF    __IO('T', 0x04)
-#define __TCFLSH     __IO('T', 0x0B)
-#define __TIOCSCTTY  __IO('T', 0x0E)
-#define __TIOCGPGRP  __IO('T', 0x0F)
-#define __TIOCSPGRP  __IO('T', 0x10)
-#define __TIOCGWINSZ __IO('T', 0x13)
-#define __TIOCSWINSZ __IO('T', 0x14)
-#define __TIOCCONS   __IO('T', 0x1D)
-#define __TIOCPKT    __IO('T', 0x20)
-#define __TIOCNOTTY  __IO('T', 0x22)
-#define __TIOCGSID   __IO('T', 0x29)
-#define __TIOCSIG    __IO('T', 0x36)
-#define __TIOCGPKT   __IO('T', 0x38)
-#define __TIOCGNAME  __IO('T', 0x70)
-#define __TIOCGPTN   __IOR('T', 0x30, int)
-#define __TIOCSPTLCK __IOW('T', 0x31, int)
-#define __TIOCGPTLCK 3
+#define TCGETS          __IO('T', 0x01)
+#define TCSETS          __IO('T', 0x02)
+#define TCSETSW         __IO('T', 0x03)
+#define TCSETSF         __IO('T', 0x04)
+#define TCGETA          __IO('T', 0x05)
+#define TCSETA          __IO('T', 0x06)
+#define TCSETAW         __IO('T', 0x07)
+#define TCSETAF         __IO('T', 0x08)
+#define TCSBRK          __IO('T', 0x09)
+#define TCXONC          __IO('T', 0x0A)
+#define TCFLSH          __IO('T', 0x0B)
+#define TIOCEXCL        __IO('T', 0x0C)
+#define TIOCNXCL        __IO('T', 0x0D)
+#define TIOCSCTTY       __IO('T', 0x0E)
+#define TIOCGPGRP       __IO('T', 0x0F)
+#define TIOCSPGRP       __IO('T', 0x10)
+#define TIOCOUTQ        __IO('T', 0x11)
+#define TIOCSTI         __IO('T', 0x12)
+#define TIOCGWINSZ      __IO('T', 0x13)
+#define TIOCSWINSZ      __IO('T', 0x14)
+#define TIOCMGET        __IO('T', 0x15)
+#define TIOCMBIS        __IO('T', 0x16)
+#define TIOCMBIC        __IO('T', 0x17)
+#define TIOCMSET        __IO('T', 0x18)
+#define TIOCGSOFTCAR    __IO('T', 0x19)
+#define TIOCSSOFTCAR    __IO('T', 0x1A)
+#define TIOCLINUX       __IO('T', 0x1C)
+#define TIOCCONS        __IO('T', 0x1D)
+#define TIOCGSERIAL     __IO('T', 0x1E)
+#define TIOCSSERIAL     __IO('T', 0x1F)
+#define TIOCPKT         __IO('T', 0x20)
+#define TIOCNOTTY       __IO('T', 0x22)
+#define TIOCSETD        __IO('T', 0x23)
+#define TIOCGETD        __IO('T', 0x24)
+#define TCSBRKP         __IO('T', 0x25)
+#define TIOCSBRK        __IO('T', 0x27)
+#define TIOCCBRK        __IO('T', 0x28)
+#define TIOCGSID        __IO('T', 0x29)
+#define TIOCGRS485      __IO('T', 0x2E)
+#define TIOCSRS485      __IO('T', 0x2F)
+#define TIOCGPTN        __IOR('T', 0x30, int)
+#define TIOCSPTLCK      __IOW('T', 0x31, int)
+#define TCGETX          __IO('T', 0x32)
+#define TCSETX          __IO('T', 0x33)
+#define TCSETXF         __IO('T', 0x34)
+#define TCSETXW         __IO('T', 0x35)
+#define TIOCSIG         __IO('T', 0x36)
+#define TIOCVHANGUP     __IO('T', 0x37)
+#define TIOCGPKT        __IO('T', 0x38)
+#define TIOCGPTLCK      __IOR('T', 0x39, int)
+#define TIOCSERCONFIG   __IO('T', 0x53)
+#define TIOCSERGWILD    __IO('T', 0x54)
+#define TIOCSERSWILD    __IO('T', 0x55)
+#define TIOCGLCKTRMIOS  __IO('T', 0x56)
+#define TIOCSLCKTRMIOS  __IO('T', 0x57)
+#define TIOCSERGSTRUCT  __IO('T', 0x58)
+#define TIOCSERGETLSR   __IO('T', 0x59)
+#define TIOCSERGETMULTI __IO('T', 0x5A)
+#define TIOCSERSETMULTI __IO('T', 0x5B)
+#define TIOCMIWAIT      __IO('T', 0x5C)
+#define TIOCGICOUNT     __IO('T', 0x5D)
+#define TIOCGNAME       __IO('T', 0x70)
 
-#define __TIOCPKT_DATA       0
-#define __TIOCPKT_FLUSHREAD  1
-#define __TIOCPKT_FLUSHWRITE 2
-#define __TIOCPKT_STOP       4
-#define __TIOCPKT_START      8
+#define TIOCPKT_DATA       0
+#define TIOCPKT_FLUSHREAD  1
+#define TIOCPKT_FLUSHWRITE 2
+#define TIOCPKT_STOP       4
+#define TIOCPKT_START      8
+#define TIOCPKT_NOSTOP     16
+#define TIOCPKT_DOSTOP     32
+#define TIOCPKT_IOCTL      64
+
+#define TIOCSER_TEMT 0x01
 
 #endif

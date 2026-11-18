@@ -186,7 +186,7 @@ static errno_t pipe_ioctl(struct vfs_file* file, uintptr_t request, uintptr_t ar
     struct pipe* pipe = file->priv;
 
     switch ((uint32_t)request) {
-    case __FIONREAD: {
+    case FIONREAD: {
         mutex_lock(&pipe->lock);
         int len = ringbuf_len(&pipe->buffer);
         mutex_unlock(&pipe->lock);
