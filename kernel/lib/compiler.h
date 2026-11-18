@@ -2,12 +2,13 @@
 
 #pragma once
 
+#include <lib/utils.h>
+
 // Attributes that affect data layout.
 #define __section(x) gnu::section(x)
 #define __aligned(x) gnu::aligned(x)
 #define __packed     gnu::packed
 #define __may_alias  gnu::may_alias
-#define __naked      gnu::naked
 
 // These hints may improve code generation.
 #define __cold              gnu::cold
@@ -31,3 +32,24 @@
 
 #define __likely(x)   __builtin_expect(!!(x), 1)
 #define __unlikely(x) __builtin_expect(!!(x), 0)
+
+// Defines global inline assembly.
+// Some compilers don't allow using input parameters with `asm` directly, so
+// this macro creates an empty function and puts regular assembly inside.
+#define DEFINE_ASM(section, flags, body, ...) \
+    [[__used]] \
+    static void UNIQUE_IDENT(__asm_)() { \
+        asm volatile(".pushsection " section ", \"" flags "\", @progbits\n" body \
+                     ".popsection\n" __VA_OPT__(::__VA_ARGS__)); \
+    } \
+    static_assert(true)
+
+#define DEFINE_ASM_FUNC_SECTION(name, section, body, ...) \
+    DEFINE_ASM( \
+        section, \
+        "ax", \
+        ".global " #name "\n.type " #name ", @function\n" #name ":\n" body ".size " #name ", . - " #name \
+        "\n" __VA_OPT__(, ) __VA_ARGS__ \
+    )
+
+#define DEFINE_ASM_FUNC(name, body, ...) DEFINE_ASM_FUNC_SECTION(name, ".text." #name, body __VA_OPT__(, ) __VA_ARGS__)

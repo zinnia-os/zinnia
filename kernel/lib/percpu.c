@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/percpu.h>
 #include <lib/atomic.h>
 #include <lib/cmdline.h>
 #include <lib/compiler.h>
 #include <lib/percpu.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 
@@ -26,7 +26,7 @@ struct percpu percpu_bsp = {
 };
 
 struct percpu* percpu_new() {
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const size_t stride = percpu_stride();
     const size_t id = atomic_load(&num_cpus, ATOMIC_RELAXED);
     if (id >= (UINTPTR_MAX - (uintptr_t)__ld_percpu_start) / stride)
@@ -62,10 +62,6 @@ size_t percpu_max_cpus() {
 
 size_t percpu_count() {
     return atomic_load(&num_cpus, ATOMIC_RELAXED);
-}
-
-struct percpu* percpu_get() {
-    return arch_percpu_get();
 }
 
 void percpu_bsp_init() {

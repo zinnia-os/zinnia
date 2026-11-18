@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
-#include <arch/mem.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
 #include <lib/compiler.h>
+#include <lib/cpu.h>
 #include <lib/mutex.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
@@ -15,6 +14,7 @@
 #include <lib/utils.h>
 #include <lib/workqueue.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <stdcountof.h>
 #include <stdint.h>
@@ -78,15 +78,15 @@ static struct mem_magtype mem_magtypes[] = {
 };
 
 struct mem_cpu_cache {
-    alignas(ARCH_CACHE_LINE_SIZE) mutex_t lock;
+    alignas(CPU_CACHE_LINE_SIZE) mutex_t lock;
     struct mem_magazine* loaded;
     struct mem_magazine* loaded_prev;
     int16_t rounds;
     int16_t rounds_prev;
     int16_t num_rounds;
 };
-static_assert(sizeof(struct mem_cpu_cache) == ARCH_CACHE_LINE_SIZE);
-static_assert(alignof(struct mem_cpu_cache) == ARCH_CACHE_LINE_SIZE);
+static_assert(sizeof(struct mem_cpu_cache) == CPU_CACHE_LINE_SIZE);
+static_assert(alignof(struct mem_cpu_cache) == CPU_CACHE_LINE_SIZE);
 
 struct mem_cache {
     char name[MEM_CACHE_NAME_MAX];
@@ -120,14 +120,21 @@ static struct mem_cpu_cache mem_cpu_caches[MEM_MAX_CACHES];
 
 // Gets the slab struct from the end of a slab page.
 static inline struct mem_slab* slab_trailer(void* page) {
-    return (struct mem_slab*)((uintptr_t)page + arch_mem_page_size() - sizeof(struct mem_slab));
+    return (struct mem_slab*)((uintptr_t)page + page_size() - sizeof(struct mem_slab));
 }
 
 // Finds the slab a buffer belongs to.
 static inline struct mem_slab* slab_of(struct mem_cache* cache, void* buf) {
     if (!cache->is_inline)
         return page_from_addr((uintptr_t)buf - mem_hhdm_base)->obj.owner;
-    return slab_trailer((void*)ROUND_DOWN((uintptr_t)buf, arch_mem_page_size()));
+    return slab_trailer((void*)ROUND_DOWN((uintptr_t)buf, page_size()));
+}
+
+static bool alloc_lock(mutex_t* mutex, enum alloc_flags flags) {
+    if (flags & ALLOC_NOSLEEP)
+        return mutex_trylock(mutex);
+    mutex_lock(mutex);
+    return true;
 }
 
 static struct mem_slab* slab_create(struct mem_cache* cache, enum alloc_flags flags) {
@@ -147,7 +154,7 @@ static struct mem_slab* slab_create(struct mem_cache* cache, enum alloc_flags fl
             return nullptr;
         }
         for (size_t i = 0; i < cache->slab_pages; i++)
-            page_from_addr(phys + i * arch_mem_page_size())->obj.owner = slab;
+            page_from_addr(phys + i * page_size())->obj.owner = slab;
     }
 
     slab->cache = cache;
@@ -170,7 +177,7 @@ static void slab_destroy(struct mem_cache* cache, struct mem_slab* slab) {
     const size_t num_pages = slab->num_pages;
     if (!cache->is_inline) {
         for (size_t i = 0; i < num_pages; i++)
-            page_from_addr(phys + i * arch_mem_page_size())->obj.owner = nullptr;
+            page_from_addr(phys + i * page_size())->obj.owner = nullptr;
         mem_cache_free(mem_slab_cache, slab);
     }
     mem_phys_free(phys, num_pages);
@@ -180,13 +187,18 @@ static void slab_destroy(struct mem_cache* cache, struct mem_slab* slab) {
 // Returns the amount of objects allocated, and the start of the objects array in `*bufs`.
 static size_t slab_alloc_batch(struct mem_cache* cache, void** bufs, size_t max, enum alloc_flags flags) {
     size_t count = 0;
-    mutex_lock(&cache->lock);
+    if (!alloc_lock(&cache->lock, flags))
+        return 0;
     while (count < max) {
         struct mem_slab* slab = tailq_first(&cache->partial);
         if (!slab) {
-            mutex_unlock(&cache->lock);
-            slab = slab_create(cache, flags);
-            mutex_lock(&cache->lock);
+            if (flags & ALLOC_NOSLEEP) {
+                slab = slab_create(cache, flags);
+            } else {
+                mutex_unlock(&cache->lock);
+                slab = slab_create(cache, flags);
+                mutex_lock(&cache->lock);
+            }
             if (!slab)
                 break;
             cache->num_slabs++;
@@ -234,15 +246,28 @@ static void slab_free(struct mem_cache* cache, void* buf) {
     mutex_unlock(&cache->lock);
 }
 
-static struct mem_magazine* depot_alloc(struct mem_cache* cache, struct mem_magazine** list) {
+static struct mem_magazine* depot_alloc(
+    struct mem_cache* cache,
+    struct mem_magazine** list,
+    struct mem_magazine** spare_list,
+    struct mem_magazine* spare,
+    enum alloc_flags flags
+) {
     if (!mutex_trylock(&cache->depot_lock)) {
+        if (flags & ALLOC_NOSLEEP)
+            return nullptr;
         mutex_lock(&cache->depot_lock);
         cache->depot_contention++;
     }
 
     struct mem_magazine* mag = *list;
-    if (mag)
+    if (mag) {
         *list = mag->next;
+        if (spare) {
+            spare->next = *spare_list;
+            *spare_list = spare;
+        }
+    }
     mutex_unlock(&cache->depot_lock);
     return mag;
 }
@@ -261,10 +286,9 @@ static inline void mem_cpu_reload(struct mem_cpu_cache* ccp, struct mem_magazine
     ccp->rounds = rounds;
 }
 
-static inline struct mem_cpu_cache* mem_cpu_cache_enter(struct mem_cache* cache) {
+static inline struct mem_cpu_cache* mem_cpu_cache_enter(struct mem_cache* cache, enum alloc_flags flags) {
     struct mem_cpu_cache* ccp = &(*percpu_ref(mem_cpu_caches))[cache->id];
-    mutex_lock(&ccp->lock);
-    return ccp;
+    return alloc_lock(&ccp->lock, flags) ? ccp : nullptr;
 }
 
 static inline void mem_cpu_cache_arm(struct mem_cache* cache, struct mem_cpu_cache* ccp) {
@@ -279,10 +303,10 @@ static inline void mem_cpu_cache_arm(struct mem_cache* cache, struct mem_cpu_cac
 }
 
 void* mem_cache_alloc(struct mem_cache* cache, enum alloc_flags flags) {
-    struct mem_cpu_cache* ccp = mem_cpu_cache_enter(cache);
+    struct mem_cpu_cache* ccp = mem_cpu_cache_enter(cache, flags);
     void* buf = nullptr;
 
-    while (true) {
+    while (ccp) {
         if (__likely(ccp->rounds > 0)) {
             buf = ccp->loaded->rounds[--ccp->rounds];
             break;
@@ -300,7 +324,8 @@ void* mem_cache_alloc(struct mem_cache* cache, enum alloc_flags flags) {
         }
 
         // Both magazines are empty.
-        struct mem_magazine* full = depot_alloc(cache, &cache->depot_full);
+        struct mem_magazine* full =
+            depot_alloc(cache, &cache->depot_full, &cache->depot_empty, ccp->loaded_prev, flags);
         if (!full) {
             if (ccp->rounds == 0) {
                 ccp->rounds = slab_alloc_batch(cache, ccp->loaded->rounds, ccp->num_rounds, flags);
@@ -309,11 +334,10 @@ void* mem_cache_alloc(struct mem_cache* cache, enum alloc_flags flags) {
             }
             break;
         }
-        if (ccp->loaded_prev)
-            depot_free(cache, &cache->depot_empty, ccp->loaded_prev);
         mem_cpu_reload(ccp, full, ccp->num_rounds);
     }
-    mutex_unlock(&ccp->lock);
+    if (ccp)
+        mutex_unlock(&ccp->lock);
 
     // If we get here and don't have a buffer, no magazine was able to get an object.
     // In that case just allocate it directly.
@@ -329,7 +353,7 @@ void* mem_cache_alloc(struct mem_cache* cache, enum alloc_flags flags) {
 }
 
 static bool mem_cpu_magazine_alloc(struct mem_cache* cache, struct mem_cpu_cache* ccp) {
-    struct mem_magazine* empty = depot_alloc(cache, &cache->depot_empty);
+    struct mem_magazine* empty = depot_alloc(cache, &cache->depot_empty, nullptr, nullptr, 0);
     if (empty) {
         if (ccp->loaded_prev)
             depot_free(cache, &cache->depot_full, ccp->loaded_prev);
@@ -359,7 +383,7 @@ static bool mem_cpu_magazine_alloc(struct mem_cache* cache, struct mem_cpu_cache
 }
 
 void mem_cache_free(struct mem_cache* cache, void* buf) {
-    struct mem_cpu_cache* ccp = mem_cpu_cache_enter(cache);
+    struct mem_cpu_cache* ccp = mem_cpu_cache_enter(cache, 0);
 
     while (true) {
         mem_cpu_cache_arm(cache, ccp);
@@ -420,9 +444,9 @@ static void mem_cache_magazine_purge(struct mem_cache* cache, struct mem_magtype
     }
 
     struct mem_magazine* mag;
-    while ((mag = depot_alloc(cache, &cache->depot_full)))
+    while ((mag = depot_alloc(cache, &cache->depot_full, nullptr, nullptr, 0)))
         magazine_destroy(cache, magtype, mag, magtype->num_rounds);
-    while ((mag = depot_alloc(cache, &cache->depot_empty)))
+    while ((mag = depot_alloc(cache, &cache->depot_empty, nullptr, nullptr, 0)))
         magazine_destroy(cache, magtype, mag, 0);
 }
 
@@ -455,7 +479,7 @@ size_t mem_cache_magsize(struct mem_cache* cache) {
 }
 
 struct mem_cache* mem_cache_create(const char* name, size_t size, size_t align, enum mem_cache_flags flags) {
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = page_size();
     align = MAX(align, MEM_ALIGN); // Align to at least MEM_ALIGN.
     const size_t chunk_size = ROUND_UP(MAX(size, MEM_ALIGN), align);
 
@@ -543,7 +567,7 @@ void* mem_alloc(size_t size, enum alloc_flags flags) {
     // This is going to be the case for allocations the size of a page or above.
     if (__unlikely(size > MEM_MAXBUF)) {
         phys_t phys;
-        if (mem_phys_alloc(DIV_CEIL(size, arch_mem_page_size()), flags, &phys))
+        if (mem_phys_alloc(DIV_CEIL(size, page_size()), flags, &phys))
             return nullptr;
         return HHDM_PTR(phys);
     }
@@ -561,7 +585,7 @@ void mem_free(void* buf, size_t size) {
 
     // See above.
     if (__unlikely(size > MEM_MAXBUF)) {
-        mem_phys_free((uintptr_t)buf - mem_hhdm_base, DIV_CEIL(size, arch_mem_page_size()));
+        mem_phys_free((uintptr_t)buf - mem_hhdm_base, DIV_CEIL(size, page_size()));
         return;
     }
 
@@ -571,7 +595,7 @@ void mem_free(void* buf, size_t size) {
 
 [[__init]]
 void mem_cache_init(struct boot_info*) {
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = page_size();
     mutex_init(&mem_cache_lock);
 
     // Create a cache for slab headers.
@@ -585,7 +609,7 @@ void mem_cache_init(struct boot_info*) {
         char name[MEM_CACHE_NAME_MAX];
         ksnprintf(name, sizeof(name), "mem_magazine_%i", (int)magtype->num_rounds);
         const size_t size = sizeof(struct mem_magazine) + magtype->num_rounds * sizeof(void*);
-        magtype->cache = mem_cache_create(name, size, MIN(size, ARCH_CACHE_LINE_SIZE), MEM_CACHE_NOMAGAZINE);
+        magtype->cache = mem_cache_create(name, size, MIN(size, CPU_CACHE_LINE_SIZE), MEM_CACHE_NOMAGAZINE);
         assert(magtype->cache, "Unable to create a magazine cache");
     }
 
@@ -596,8 +620,8 @@ void mem_cache_init(struct boot_info*) {
 
         // Find the best alignment for the size.
         size_t align = MEM_ALIGN;
-        if (size % ARCH_CACHE_LINE_SIZE == 0)
-            align = ARCH_CACHE_LINE_SIZE;
+        if (size % CPU_CACHE_LINE_SIZE == 0)
+            align = CPU_CACHE_LINE_SIZE;
         if (size % pgsz == 0)
             align = pgsz;
 
@@ -663,8 +687,8 @@ INIT_DEPENDS(mem_cache_timers_stage, workqueue_stage);
 static _Atomic(size_t) mapping_offset = 0;
 
 uintptr_t vm_alloc(size_t length) {
-    uintptr_t base = arch_mem_mapping_addr();
-    size_t offset = atomic_fetch_add(&mapping_offset, ROUND_UP(length, arch_mem_page_size()), ATOMIC_ACQUIRE);
+    uintptr_t base = mem_mapping_addr();
+    size_t offset = atomic_fetch_add(&mapping_offset, ROUND_UP(length, page_size()), ATOMIC_ACQUIRE);
 
     return base + offset;
 }

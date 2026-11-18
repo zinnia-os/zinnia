@@ -2,7 +2,6 @@
 
 #define LOG_FMT(fmt) "nvme: " fmt
 
-#include <arch/mem.h>
 #include <dev/block/nvme/nvme.h>
 #include <dev/pci/pci.h>
 #include <lib/atomic.h>
@@ -12,6 +11,7 @@
 #include <lib/print.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <stdcountof.h>
@@ -31,17 +31,17 @@ static void nvme_irq_thread(struct irq_handler* self) {
 }
 
 static errno_t map_bar(struct pci_bar* bar, void** out) {
-    const size_t page_size = arch_mem_page_size();
-    const size_t len = ROUND_UP(bar->size, page_size);
+    const size_t pgsz = page_size();
+    const size_t len = ROUND_UP(bar->size, pgsz);
     uintptr_t vaddr = vm_alloc(len);
     if (!vaddr)
         return ENOMEM;
 
-    for (size_t i = 0; i < len; i += page_size) {
+    for (size_t i = 0; i < len; i += pgsz) {
         errno_t status = pmap_map(&kernel_vma.pmap, vaddr + i, bar->address + i, PTE_READ | PTE_WRITE, CACHE_MMIO);
         if (status) {
             while (i) {
-                i -= page_size;
+                i -= pgsz;
                 pmap_unmap(&kernel_vma.pmap, vaddr + i);
             }
             vm_free(vaddr, len);

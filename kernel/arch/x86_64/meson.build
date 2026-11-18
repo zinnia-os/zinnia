@@ -12,7 +12,6 @@ kernel_sources += files(
     'idt.c',
     'ioapic.c',
     'irq.c',
-    'mem.c',
     'percpu.c',
     'pmap.c',
     'random.c',

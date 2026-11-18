@@ -2,7 +2,6 @@
 
 #define LOG_FMT(fmt) "module: " fmt
 
-#include <arch/elf.h>
 #include <lib/assert.h>
 #include <lib/cmdline.h>
 #include <lib/elf.h>
@@ -13,6 +12,7 @@
 #include <lib/spin.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <stdckdint.h>
@@ -96,7 +96,7 @@ static errno_t resolve_symbol(struct module* mod, uint32_t index, uintptr_t* out
     if (ksym_find(name, out))
         return 0;
 
-    if (ARCH_ELF_ST_BIND(sym->st_info) == STB_WEAK) {
+    if (ELF_ST_BIND(sym->st_info) == STB_WEAK) {
         *out = 0;
         return 0;
     }
@@ -137,21 +137,21 @@ static errno_t apply_rela(struct module* mod, uint64_t addr, uint64_t size, uint
 
         errno_t status = 0;
         uintptr_t value;
-        switch (ARCH_ELF_R_TYPE(rela.r_info)) {
-        case ARCH_R_NONE:
+        switch (ELF_R_TYPE(rela.r_info)) {
+        case ELF_R_NONE:
             break;
-        case ARCH_R_64:
-        case ARCH_R_GLOB_DAT:
-        case ARCH_R_JUMP_SLOT:
-            status = resolve_symbol(mod, ARCH_ELF_R_SYM(rela.r_info), &value);
+        case ELF_R_64:
+        case ELF_R_GLOB_DAT:
+        case ELF_R_JUMP_SLOT:
+            status = resolve_symbol(mod, ELF_R_SYM(rela.r_info), &value);
             if (status == 0)
                 status = store_word(mod, rela.r_offset, value + rela.r_addend);
             break;
-        case ARCH_R_RELATIVE:
+        case ELF_R_RELATIVE:
             status = store_word(mod, rela.r_offset, mod->bias + rela.r_addend);
             break;
         default:
-            log_err("%s: Unsupported relocation type %u\n", mod->name, ARCH_ELF_R_TYPE(rela.r_info));
+            log_err("%s: Unsupported relocation type %u\n", mod->name, ELF_R_TYPE(rela.r_info));
             status = ENOEXEC;
             break;
         }
@@ -195,19 +195,19 @@ static errno_t apply_relr(struct module* mod, uint64_t addr, uint64_t size, uint
 }
 
 static void module_free(struct module* mod) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
 
     mem_free(mod->cmdline, mod->cmdline_size);
 
     for (size_t i = 0; i < mod->num_segments; i++) {
         const struct module_segment* seg = &mod->segments[i];
-        for (size_t off = 0; off < seg->size; off += page_size)
+        for (size_t off = 0; off < seg->size; off += pgsz)
             pmap_unmap(&kernel_vma.pmap, seg->virt + off);
     }
     pmap_shootdown(&kernel_vma.pmap);
     for (size_t i = 0; i < mod->num_segments; i++) {
         const struct module_segment* seg = &mod->segments[i];
-        mem_phys_free(seg->phys, seg->size / page_size);
+        mem_phys_free(seg->phys, seg->size / pgsz);
     }
     mem_free(mod->segments, mod->max_segments * sizeof(struct module_segment));
 
@@ -237,8 +237,8 @@ static errno_t read_headers(const void* data, size_t length, elf_ehdr_t* ehdr, e
     memcpy(ehdr, file, sizeof(*ehdr));
 
     if (memcmp(ehdr->e_ident, ELF_MAG, sizeof(ELF_MAG)) != 0 || ehdr->e_ident[EI_VERSION] != EV_CURRENT ||
-        ehdr->e_ident[EI_CLASS] != ARCH_ELF_CLASS || ehdr->e_ident[EI_DATA] != ARCH_ELF_DATA ||
-        ehdr->e_machine != ARCH_ELF_MACHINE || ehdr->e_type != ET_DYN)
+        ehdr->e_ident[EI_CLASS] != ELF_CLASS || ehdr->e_ident[EI_DATA] != ELF_DATA || ehdr->e_machine != ELF_MACHINE ||
+        ehdr->e_type != ET_DYN)
         return ENOEXEC;
 
     if (ehdr->e_phentsize < sizeof(elf_phdr_t) || ehdr->e_phnum == 0 ||
@@ -257,7 +257,7 @@ static errno_t read_headers(const void* data, size_t length, elf_ehdr_t* ehdr, e
 
 errno_t module_load(const void* data, size_t length, const char* cmdline, struct module** out) {
     const uint8_t* file = data;
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
 
     elf_ehdr_t ehdr;
     elf_phdr_t* phdrs;
@@ -289,15 +289,15 @@ errno_t module_load(const void* data, size_t length, const char* cmdline, struct
             goto fail;
 
         uintptr_t end;
-        if (ckd_add(&end, phdr->p_vaddr, phdr->p_memsz) || end > UINTPTR_MAX - page_size)
+        if (ckd_add(&end, phdr->p_vaddr, phdr->p_memsz) || end > UINTPTR_MAX - pgsz)
             goto fail;
 
-        const uintptr_t start = ROUND_DOWN(phdr->p_vaddr, page_size);
+        const uintptr_t start = ROUND_DOWN(phdr->p_vaddr, pgsz);
         if (start < load_end)
             goto fail;
         if (load_min == UINTPTR_MAX)
             load_min = start;
-        load_end = ROUND_UP(end, page_size);
+        load_end = ROUND_UP(end, pgsz);
         num_loads++;
     }
 
@@ -321,18 +321,18 @@ errno_t module_load(const void* data, size_t length, const char* cmdline, struct
         if (phdr->p_type != PT_LOAD || phdr->p_memsz == 0)
             continue;
 
-        const uintptr_t start = ROUND_DOWN(phdr->p_vaddr, page_size);
-        const size_t size = ROUND_UP(phdr->p_vaddr + phdr->p_memsz, page_size) - start;
+        const uintptr_t start = ROUND_DOWN(phdr->p_vaddr, pgsz);
+        const size_t size = ROUND_UP(phdr->p_vaddr + phdr->p_memsz, pgsz) - start;
 
         phys_t phys;
-        status = mem_phys_alloc(size / page_size, 0, &phys);
+        status = mem_phys_alloc(size / pgsz, 0, &phys);
         if (status)
             goto fail;
 
         struct module_segment* seg = &mod->segments[mod->num_segments++];
         *seg = (struct module_segment){.phys = phys, .virt = mod->bias + start, .size = size};
 
-        for (size_t off = 0; off < size; off += page_size) {
+        for (size_t off = 0; off < size; off += pgsz) {
             status = pmap_map(&kernel_vma.pmap, seg->virt + off, phys + off, PTE_READ | PTE_WRITE, CACHE_WRITE_BACK);
             if (status)
                 goto fail;
@@ -538,7 +538,7 @@ errno_t module_load(const void* data, size_t length, const char* cmdline, struct
 
         const struct module_segment* seg = &mod->segments[seg_idx++];
         const enum pte_flags prot = prot_from_phdr(phdr);
-        for (size_t off = 0; off < seg->size; off += page_size) {
+        for (size_t off = 0; off < seg->size; off += pgsz) {
             pmap_unmap(&kernel_vma.pmap, seg->virt + off);
             status = pmap_map(&kernel_vma.pmap, seg->virt + off, seg->phys + off, prot, CACHE_WRITE_BACK);
             if (status)

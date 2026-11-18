@@ -7,7 +7,6 @@
 #include <lib/types.h>
 #include <lib/utils.h>
 #include <config.h>
-#include <stddef.h>
 #include <stdint.h>
 
 #define __init                  __used, __section(".init.text"), __cold

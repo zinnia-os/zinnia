@@ -3,6 +3,7 @@
 #include <dev/block/blockdev.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 
 struct bio* bio_alloc(enum bio_op op, size_t num_segs) {
     struct bio* bio = mem_alloc(sizeof(struct bio) + num_segs * sizeof(struct bio_seg), 0);
@@ -96,7 +97,7 @@ void bio_submit(struct blockdev* dev, struct bio* bio) {
     }
 
     const size_t lba_size = dev->lba_size;
-    const size_t lbas_per_page = MAX(arch_mem_page_size() / lba_size, 1);
+    const size_t lbas_per_page = MAX(page_size() / lba_size, 1);
     size_t max_lbas = dev->limits.max_lbas ? dev->limits.max_lbas : SIZE_MAX;
     if (max_lbas > lbas_per_page)
         max_lbas -= max_lbas % lbas_per_page;

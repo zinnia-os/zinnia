@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/irq.h>
-#include <arch/mem.h>
 #include <dev/acpi/acpi.h>
 #include <dev/pci/pci.h>
 #include <lib/clock.h>
@@ -17,6 +15,7 @@
 #include <lib/utils.h>
 #include <lib/workqueue.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <stdarg.h>
@@ -30,15 +29,15 @@ uacpi_status uacpi_kernel_get_rsdp(uacpi_phys_addr* out_rsdp_address) {
 }
 
 void* uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
-    uintptr_t aligned_addr = ROUND_DOWN(addr, arch_mem_page_size());
+    uintptr_t aligned_addr = ROUND_DOWN(addr, page_size());
     uintptr_t difference = addr - aligned_addr;
-    size_t aligned_len = ROUND_UP(len + difference, arch_mem_page_size());
+    size_t aligned_len = ROUND_UP(len + difference, page_size());
 
     uintptr_t vaddr = vm_alloc(aligned_len);
     if (!vaddr)
         return nullptr;
 
-    for (size_t i = 0; i < aligned_len; i += arch_mem_page_size()) {
+    for (size_t i = 0; i < aligned_len; i += page_size()) {
         pmap_map(&kernel_vma.pmap, vaddr + i, aligned_addr + i, PTE_READ | PTE_WRITE, CACHE_ANY);
     }
 
@@ -46,11 +45,11 @@ void* uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
 }
 
 void uacpi_kernel_unmap(void* addr, uacpi_size len) {
-    uintptr_t aligned_addr = ROUND_DOWN((uintptr_t)addr, arch_mem_page_size());
+    uintptr_t aligned_addr = ROUND_DOWN((uintptr_t)addr, page_size());
     uintptr_t difference = (uintptr_t)addr - aligned_addr;
-    size_t aligned_len = ROUND_UP(len + difference, arch_mem_page_size());
+    size_t aligned_len = ROUND_UP(len + difference, page_size());
 
-    for (size_t i = 0; i < aligned_len; i += arch_mem_page_size())
+    for (size_t i = 0; i < aligned_len; i += page_size())
         pmap_unmap(&kernel_vma.pmap, aligned_addr + i);
     vm_free(aligned_addr, aligned_len);
 }
@@ -238,10 +237,10 @@ uacpi_status uacpi_kernel_install_interrupt_handler(
     enum irq_trigger_mode trigger = IRQ_TRIGGER_LEVEL;
     enum irq_polarity polarity = IRQ_POLARITY_LOW;
     if (irq <= UINT8_MAX)
-        arch_irq_isa_override(irq, &gsi, &trigger, &polarity);
+        irq_isa_override(irq, &gsi, &trigger, &polarity);
 
     struct irq_line* line;
-    errno_t status = arch_irq_get_gsi(gsi, &line);
+    errno_t status = irq_get_gsi(gsi, &line);
     if (status) {
         log_err("acpi: Unable to get GSI %u for IRQ %u (%i)\n", gsi, irq, status);
         return UACPI_STATUS_UNIMPLEMENTED;

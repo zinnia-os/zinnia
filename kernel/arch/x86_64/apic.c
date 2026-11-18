@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
-#include <arch/timer.h>
 #include <arch/x86_64/apic.h>
 #include <arch/x86_64/asm.h>
 #include <arch/x86_64/defs.h>
 #include <arch/x86_64/percpu.h>
 #include <lib/assert.h>
 #include <lib/clock.h>
+#include <lib/cpu.h>
 #include <lib/mmio.h>
 #include <lib/percpu.h>
+#include <lib/timer.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/pmap.h>

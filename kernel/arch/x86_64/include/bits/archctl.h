@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <lib/errno.h>
+#include <syscalls/syscall.h>
 #include <stdint.h>
 
 struct syscall_ret arch_archctl(uintptr_t op, uintptr_t value);

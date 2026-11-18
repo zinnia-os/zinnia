@@ -15,12 +15,6 @@
 #include <config.h>
 #include <stddef.h>
 
-struct percpu* arch_percpu_get() {
-    struct percpu* result;
-    asm volatile("mov %0, gs:0" : "=r"(result)::"memory");
-    return result;
-}
-
 void arch_percpu_bsp_init() {
     asm_wrmsr(MSR_GS_BASE, (uint64_t)&percpu_bsp);
     asm_wrmsr(MSR_FS_BASE, 0);

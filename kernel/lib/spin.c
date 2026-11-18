@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <lib/atomic.h>
+#include <lib/cpu.h>
 #include <lib/irq.h>
 #include <lib/spin.h>
 
@@ -15,7 +15,7 @@ void spin_lock(struct spinlock* spin) {
     uint32_t my = atomic_fetch_add(&spin->next, 1, ATOMIC_RELAXED);
 
     while (atomic_load(&spin->owner, ATOMIC_ACQUIRE) != my) {
-        arch_cpu_pause();
+        cpu_pause();
     }
 }
 

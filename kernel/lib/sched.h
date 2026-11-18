@@ -2,7 +2,6 @@
 
 #pragma once
 
-#include <arch/sched.h>
 #include <lib/atomic.h>
 #include <lib/errno.h>
 #include <lib/init.h>
@@ -12,6 +11,7 @@
 #include <lib/timer.h>
 #include <lib/types.h>
 #include <mem/stack.h>
+#include <bits/sched.h>
 #include <stddef.h>
 #include <stdint.h>
 

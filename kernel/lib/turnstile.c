@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
+#include <lib/cpu.h>
 #include <lib/irq.h>
 #include <lib/percpu.h>
 #include <lib/sched.h>
@@ -17,7 +17,7 @@ constexpr size_t TURNSTILE_CHAINS = (1 << TURNSTILE_CHAIN_BITS);
 
 struct turnstile_chain {
     // Aligned to cache line to avoid false sharing.
-    alignas(ARCH_CACHE_LINE_SIZE) struct spinlock lock;
+    alignas(CPU_CACHE_LINE_SIZE) struct spinlock lock;
     struct turnstile* head;
 };
 

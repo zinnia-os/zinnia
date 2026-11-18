@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
+#include <lib/cpu.h>
 #include <lib/percpu.h>
 #include <lib/rwlock.h>
 #include <lib/sched.h>
@@ -85,14 +85,14 @@ static void lock_slow(struct rwlock* rw, bool write) {
         uintptr_t owner = writer_of(word);
         if (owner && spins < RW_SPIN_MAX && writer_running(owner)) {
             spins++;
-            arch_cpu_pause();
+            cpu_pause();
             word = atomic_load(&rw->word, ATOMIC_RELAXED);
             continue;
         }
 
         if (self == RW_ANON_OWNER || owner == RW_ANON_OWNER) {
             spins = 0;
-            arch_cpu_pause();
+            cpu_pause();
             word = atomic_load(&rw->word, ATOMIC_RELAXED);
             continue;
         }

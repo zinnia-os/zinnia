@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/archctl.h>
-#include <arch/mem.h>
 #include <arch/x86_64/asm.h>
 #include <arch/x86_64/defs.h>
 #include <lib/errno.h>
+#include <mem/layout.h>
 #include <syscalls/syscall.h>
+#include <bits/archctl.h>
 #include <zinnia/archctl.h>
 
 struct syscall_ret arch_archctl(uintptr_t op, uintptr_t arg) {

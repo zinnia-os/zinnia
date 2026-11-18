@@ -27,6 +27,7 @@ common_link_args = [
 common_includes = [
     include_directories('.'),
     include_directories('include'),
+    include_directories('arch' / target_machine.cpu_family() / 'include'),
     uapi_includes,
 ]
 

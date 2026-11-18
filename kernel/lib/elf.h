@@ -362,3 +362,59 @@ static inline uint32_t ELF64_R_SYM(uint64_t info) {
 static inline uint32_t ELF64_R_TYPE(uint64_t info) {
     return info & 0xFFFFFFFF;
 }
+
+#include <bits/elf.h>
+
+#if ARCH_ELF_BITS == 64
+typedef elf64_ehdr_t elf_ehdr_t;
+typedef elf64_phdr_t elf_phdr_t;
+typedef elf64_dyn_t elf_dyn_t;
+typedef elf64_addr_t elf_addr_t;
+typedef elf64_off_t elf_off_t;
+typedef elf64_nhdr_t elf_nhdr_t;
+typedef elf64_auxv_t elf_auxv_t;
+typedef elf64_sym_t elf_sym_t;
+typedef elf64_rela_t elf_rela_t;
+typedef elf64_rel_t elf_rel_t;
+typedef elf64_relr_t elf_relr_t;
+
+#define ELF_R_SYM   ELF64_R_SYM
+#define ELF_R_TYPE  ELF64_R_TYPE
+#define ELF_ST_BIND ELF64_ST_BIND
+#define ELF_ST_TYPE ELF64_ST_TYPE
+#elif ARCH_ELF_BITS == 32
+typedef elf32_ehdr_t elf_ehdr_t;
+typedef elf32_phdr_t elf_phdr_t;
+typedef elf32_dyn_t elf_dyn_t;
+typedef elf32_addr_t elf_addr_t;
+typedef elf32_off_t elf_off_t;
+typedef elf32_nhdr_t elf_nhdr_t;
+typedef elf32_auxv_t elf_auxv_t;
+typedef elf32_sym_t elf_sym_t;
+typedef elf32_rela_t elf_rela_t;
+typedef elf32_rel_t elf_rel_t;
+typedef elf32_relr_t elf_relr_t;
+
+#define ELF_R_SYM   ELF32_R_SYM
+#define ELF_R_TYPE  ELF32_R_TYPE
+#define ELF_ST_BIND ELF32_ST_BIND
+#define ELF_ST_TYPE ELF32_ST_TYPE
+#else
+#error "Unsupported ELF word size"
+#endif
+
+enum {
+    ELF_CLASS = ARCH_ELF_BITS == 64 ? ELFCLASS64 : ELFCLASS32,
+    ELF_DATA = ARCH_ELF_DATA,
+    ELF_MACHINE = ARCH_ELF_MACHINE,
+};
+
+enum {
+    ELF_R_NONE = ARCH_R_NONE,
+    ELF_R_64 = ARCH_R_64,
+    ELF_R_COPY = ARCH_R_COPY,
+    ELF_R_GLOB_DAT = ARCH_R_GLOB_DAT,
+    ELF_R_JUMP_SLOT = ARCH_R_JUMP_SLOT,
+    ELF_R_RELATIVE = ARCH_R_RELATIVE,
+    ELF_R_IRELATIVE = ARCH_R_IRELATIVE,
+};

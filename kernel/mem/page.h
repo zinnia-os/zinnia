@@ -7,8 +7,13 @@
 #include <lib/hashmap.h>
 #include <lib/types.h>
 #include <mem/alloc.h>
+#include <bits/mem.h>
 #include <stddef.h>
 #include <stdint.h>
+
+static inline size_t page_size() {
+    return arch_page_size();
+}
 
 enum page_type : uint8_t {
     PAGE_PHYS = 0, // Regular physical memory.

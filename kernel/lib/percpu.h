@@ -6,6 +6,7 @@
 #include <lib/initgraph.h>
 #include <lib/sched.h>
 #include <mem/usercopy.h>
+#include <bits/percpu.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -54,7 +55,9 @@ static inline struct percpu* percpu_cpu(size_t id) {
 struct percpu* percpu_new();
 size_t percpu_max_cpus();
 size_t percpu_count();
-struct percpu* percpu_get();
+static inline struct percpu* percpu_get() {
+    return arch_percpu_get();
+}
 void percpu_bsp_init();
 void percpu_init(struct boot_info* info);
 

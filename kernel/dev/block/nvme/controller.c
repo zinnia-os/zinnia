@@ -2,13 +2,13 @@
 
 #define LOG_FMT(fmt) "nvme: " fmt
 
-#include <arch/mem.h>
 #include <dev/block/nvme/nvme.h>
 #include <lib/clock.h>
 #include <lib/mmio.h>
 #include <lib/print.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <string.h>
 
 constexpr size_t ADMIN_QUEUE_SIZE = 32;
@@ -25,7 +25,7 @@ constexpr mmio_reg32 ID_LBAF0 = {128, MMIO_LE};
 constexpr mmio_field32 ID_LBADS = {ID_LBAF0, 16, 8};
 
 size_t nvme_ctrl_max_transfer_bytes(struct nvme_ctrl* ctrl) {
-    const size_t cap = 512 * arch_mem_page_size();
+    const size_t cap = 512 * page_size();
     if (ctrl->mdts != 0)
         return MIN(ctrl->mdts, cap);
     return cap;
@@ -44,8 +44,8 @@ errno_t nvme_ctrl_new_pci(void* regs, struct dma_tag* dma_tag, struct nvme_ctrl*
     // Check if our host page size is supported.
     const size_t mps_max = (size_t)1 << (mmio_field_get(NVME_CAP_MPSMAX, cap) + 12);
     const size_t mps_min = (size_t)1 << (mmio_field_get(NVME_CAP_MPSMIN, cap) + 12);
-    const size_t page_size = arch_mem_page_size();
-    if (page_size < mps_min || page_size > mps_max) {
+    const size_t pgsz = page_size();
+    if (pgsz < mps_min || pgsz > mps_max) {
         log_err("Host page size is not supported on this NVMe!\n");
         return ENOTSUP;
     }
@@ -58,7 +58,7 @@ errno_t nvme_ctrl_new_pci(void* regs, struct dma_tag* dma_tag, struct nvme_ctrl*
     ctrl->dma_tag = dma_tag;
     ctrl->doorbell_stride = (size_t)4 << mmio_field_get(NVME_CAP_DSTRD, cap);
     ctrl->mps_min = mps_min;
-    ctrl->mps = __builtin_ctzl(page_size) - 12;
+    ctrl->mps = __builtin_ctzl(pgsz) - 12;
     mutex_init(&ctrl->admin_lock);
     spin_init(&ctrl->io_lock);
     atomic_init(&ctrl->ns_count, 0);

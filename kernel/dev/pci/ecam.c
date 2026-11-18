@@ -2,12 +2,12 @@
 
 #define LOG_FMT(fmt) "pci: " fmt
 
-#include <arch/mem.h>
 #include <dev/pci/pci.h>
 #include <lib/mmio.h>
 #include <lib/print.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 
@@ -42,11 +42,11 @@ errno_t pci_ecam_register(phys_t base, uint16_t domain, uint8_t start_bus, uint8
     if (!vaddr)
         return ENOMEM;
 
-    for (size_t i = 0; i < length; i += arch_mem_page_size()) {
+    for (size_t i = 0; i < length; i += page_size()) {
         errno_t status = pmap_map(&kernel_vma.pmap, vaddr + i, phys + i, PTE_READ | PTE_WRITE, CACHE_MMIO);
         if (status != 0) {
             while (i) {
-                i -= arch_mem_page_size();
+                i -= page_size();
                 pmap_unmap(&kernel_vma.pmap, vaddr + i);
             }
             vm_free(vaddr, length);

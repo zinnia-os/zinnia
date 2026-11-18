@@ -10,6 +10,7 @@
 #include <lib/print.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
@@ -33,7 +34,7 @@ void mem_bootstrap(struct boot_info* info) {
     phys_t kernel_phys = info->phys_base;
     uintptr_t tmp_hhdm = info->hhdm_base;
 
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = page_size();
 
     log("Memory map:\n");
     for (size_t i = 0; i < map_len; i++) {
@@ -114,7 +115,7 @@ void mem_bootstrap(struct boot_info* info) {
     // Kernel   FFFF'FFFF'8000'0000
 
     // Map all physical memory to the HHDM address.
-    tmp_hhdm = arch_mem_hhdm_addr();
+    tmp_hhdm = mem_hhdm_addr();
     for (size_t i = 0; i < map_len; i++) {
         if (map[i].usage != PHYS_USABLE && map[i].usage != PHYS_STATIC && map[i].usage != PHYS_RECLAIMABLE)
             continue;
@@ -141,7 +142,7 @@ void mem_bootstrap(struct boot_info* info) {
         const size_t num_pages = (map[i].length + pgsz - 1) / pgsz;
         pfndb_pages = MAX(pfndb_pages, map[i].address / pgsz + num_pages);
         const size_t metadata_size = num_pages * sizeof(struct page);
-        const uintptr_t metadata_start_vaddr = arch_mem_pfndb_addr() + (map[i].address / pgsz * sizeof(struct page));
+        const uintptr_t metadata_start_vaddr = mem_pfndb_addr() + (map[i].address / pgsz * sizeof(struct page));
         const uintptr_t metadata_end_vaddr = metadata_start_vaddr + metadata_size;
 
         // Find the page-aligned boundaries that contain this metadata.
@@ -159,7 +160,7 @@ void mem_bootstrap(struct boot_info* info) {
             );
         }
     }
-    vm_pfndb = (struct page*)arch_mem_pfndb_addr();
+    vm_pfndb = (struct page*)mem_pfndb_addr();
     vm_pfndb_end = vm_pfndb + pfndb_pages;
 }
 INIT_TASK(mem_init_stage, "mem.bootstrap", mem_bootstrap);

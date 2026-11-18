@@ -31,133 +31,128 @@ extern uint8_t smp_trampoline_start[];
 extern uint8_t smp_trampoline_data[];
 extern uint8_t smp_trampoline_end[];
 
-[[__naked, __used]]
-static void smp_trampoline() {
-    asm volatile(
-        ".pushsection .rodata\n"
-        ".code16\n"
-        ".global smp_trampoline_start\n"
-        "smp_trampoline_start:\n"
-        "    cli\n"
-        "    cld\n"
-        "    jmp .Lmode16\n"
+DEFINE_ASM(
+    ".text.smp_trampoline",
+    "ax",
+    ".code16\n"
+    ".global smp_trampoline_start\n"
+    "smp_trampoline_start:\n"
+    "    cli\n"
+    "    cld\n"
+    "    jmp .Lmode16\n"
 
-        ".org smp_trampoline_start + %c[data_off]\n"
-        ".global smp_trampoline_data\n"
-        "smp_trampoline_data:\n"
-        "    .skip %c[info_size]\n"
+    ".org smp_trampoline_start + %c[data_off]\n"
+    ".global smp_trampoline_data\n"
+    "smp_trampoline_data:\n"
+    "    .skip %c[info_size]\n"
 
-        ".set .Ldata_offset, %c[data_off]\n"
-        ".set .Lgdtr_offset, (.Ldata_offset + %c[gdtr])\n"
-        ".set .Lfarjmp_offset, (.Ldata_offset + %c[farjmp])\n"
-        ".set .Ltemp_stack_offset, (.Ldata_offset + %c[temp_stack])\n"
-        ".set .Ltemp_cr3_offset, (.Ldata_offset + %c[temp_cr3])\n"
-        ".set .Lentry_offset, (.Ldata_offset + %c[entry])\n"
-        ".set .Lhhdm_offset, (.Ldata_offset + %c[hhdm])\n"
-        ".set .Linvalid_idtr_offset, (.Linvalid_idtr - smp_trampoline_start)\n"
-        ".set .Lmode32_offset, (.Lmode32 - smp_trampoline_start)\n"
-        ".set .Lmode64_offset, (.Lmode64 - smp_trampoline_start)\n"
+    ".set .Ldata_offset, %c[data_off]\n"
+    ".set .Lgdtr_offset, (.Ldata_offset + %c[gdtr])\n"
+    ".set .Lfarjmp_offset, (.Ldata_offset + %c[farjmp])\n"
+    ".set .Ltemp_stack_offset, (.Ldata_offset + %c[temp_stack])\n"
+    ".set .Ltemp_cr3_offset, (.Ldata_offset + %c[temp_cr3])\n"
+    ".set .Lentry_offset, (.Ldata_offset + %c[entry])\n"
+    ".set .Lhhdm_offset, (.Ldata_offset + %c[hhdm])\n"
+    ".set .Linvalid_idtr_offset, (.Linvalid_idtr - smp_trampoline_start)\n"
+    ".set .Lmode32_offset, (.Lmode32 - smp_trampoline_start)\n"
+    ".set .Lmode64_offset, (.Lmode64 - smp_trampoline_start)\n"
 
-        ".Lmode16:\n"
-        "    mov bx, cs\n"
-        "    shl ebx, 4\n"
+    ".Lmode16:\n"
+    "    mov bx, cs\n"
+    "    shl ebx, 4\n"
 
-        "    lidtd cs:.Linvalid_idtr_offset\n"
-        "    lgdtd cs:.Lgdtr_offset\n"
+    "    lidtd cs:.Linvalid_idtr_offset\n"
+    "    lgdtd cs:.Lgdtr_offset\n"
 
-        "    lea eax, [ebx + .Lmode32_offset]\n"
-        "    mov dword ptr cs:.Lfarjmp_offset, eax\n"
+    "    lea eax, [ebx + .Lmode32_offset]\n"
+    "    mov dword ptr cs:.Lfarjmp_offset, eax\n"
 
-        "    mov eax, %c[cr0]\n"
-        "    mov cr0, eax\n"
-        "    jmp fword ptr cs:.Lfarjmp_offset\n"
+    "    mov eax, %c[cr0]\n"
+    "    mov cr0, eax\n"
+    "    jmp fword ptr cs:.Lfarjmp_offset\n"
 
-        ".code32\n"
-        ".Lmode32:\n"
-        "    mov ax, %c[kernel32_ds]\n"
-        "    mov ds, ax\n"
-        "    mov es, ax\n"
-        "    mov fs, ax\n"
-        "    mov gs, ax\n"
-        "    mov ss, ax\n"
+    ".code32\n"
+    ".Lmode32:\n"
+    "    mov ax, %c[kernel32_ds]\n"
+    "    mov ds, ax\n"
+    "    mov es, ax\n"
+    "    mov fs, ax\n"
+    "    mov gs, ax\n"
+    "    mov ss, ax\n"
 
-        "    xor eax, eax\n"
-        "    lldt ax\n"
+    "    xor eax, eax\n"
+    "    lldt ax\n"
 
-        "    mov esp, dword ptr [ebx + .Ltemp_stack_offset]\n"
+    "    mov esp, dword ptr [ebx + .Ltemp_stack_offset]\n"
 
-        "    xor eax, eax\n"
-        "    mov cr4, eax\n"
+    "    xor eax, eax\n"
+    "    mov cr4, eax\n"
 
-        "    or eax, %c[cr4_pae]\n"
-        "    mov cr4, eax\n"
+    "    or eax, %c[cr4_pae]\n"
+    "    mov cr4, eax\n"
 
-        "    mov ecx, %c[msr_efer]\n"
-        "    mov eax, %c[efer_lme]\n"
-        "    xor edx, edx\n"
-        "    wrmsr\n"
+    "    mov ecx, %c[msr_efer]\n"
+    "    mov eax, %c[efer_lme]\n"
+    "    xor edx, edx\n"
+    "    wrmsr\n"
 
-        "    mov eax, dword ptr [ebx + .Ltemp_cr3_offset]\n"
-        "    mov cr3, eax\n"
+    "    mov eax, dword ptr [ebx + .Ltemp_cr3_offset]\n"
+    "    mov cr3, eax\n"
 
-        "    mov eax, cr0\n"
-        "    or eax, %c[cr0_pg]\n"
-        "    mov cr0, eax\n"
+    "    mov eax, cr0\n"
+    "    or eax, %c[cr0_pg]\n"
+    "    mov cr0, eax\n"
 
-        "    lea eax, [ebx + .Lmode64_offset]\n"
-        "    push %c[kernel64_cs]\n"
-        "    push eax\n"
-        "    retf\n"
+    "    lea eax, [ebx + .Lmode64_offset]\n"
+    "    push %c[kernel64_cs]\n"
+    "    push eax\n"
+    "    retf\n"
 
-        ".code64\n"
-        ".Lmode64:\n"
-        "    mov ax, %c[kernel64_ds]\n"
-        "    mov ds, ax\n"
-        "    mov es, ax\n"
-        "    mov fs, ax\n"
-        "    mov gs, ax\n"
-        "    mov ss, ax\n"
+    ".code64\n"
+    ".Lmode64:\n"
+    "    mov ax, %c[kernel64_ds]\n"
+    "    mov ds, ax\n"
+    "    mov es, ax\n"
+    "    mov fs, ax\n"
+    "    mov gs, ax\n"
+    "    mov ss, ax\n"
 
-        "    mov ecx, %c[msr_efer]\n"
-        "    rdmsr\n"
-        "    or eax, %c[efer_nxe]\n"
-        "    wrmsr\n"
+    "    mov ecx, %c[msr_efer]\n"
+    "    rdmsr\n"
+    "    or eax, %c[efer_nxe]\n"
+    "    wrmsr\n"
 
-        "    xor ebp, ebp\n"
+    "    xor ebp, ebp\n"
 
-        "    lea rdi, [rbx + .Ldata_offset]\n"
-        "    mov rax, [rbx + .Lentry_offset]\n"
-        "    add rsp, [rbx + .Lhhdm_offset]\n"
-        "    jmp rax\n"
+    "    lea rdi, [rbx + .Ldata_offset]\n"
+    "    mov rax, [rbx + .Lentry_offset]\n"
+    "    add rsp, [rbx + .Lhhdm_offset]\n"
+    "    jmp rax\n"
 
-        ".Linvalid_idtr:\n"
-        "    .word 0\n"
-        "    .quad 0\n"
+    ".Linvalid_idtr:\n"
+    "    .word 0\n"
+    "    .quad 0\n"
 
-        ".global smp_trampoline_end\n"
-        "smp_trampoline_end:\n"
-        ".popsection\n"
-        "    ud2\n"
-        :
-        : [data_off] "i"(8),
-          [info_size] "i"(sizeof(struct smp_info)),
-          [gdtr] "i"(offsetof(struct smp_info, gdtr)),
-          [farjmp] "i"(offsetof(struct smp_info, farjmp_offset)),
-          [temp_stack] "i"(offsetof(struct smp_info, temp_stack)),
-          [temp_cr3] "i"(offsetof(struct smp_info, temp_cr3)),
-          [entry] "i"(offsetof(struct smp_info, entry)),
-          [hhdm] "i"(offsetof(struct smp_info, hhdm_offset)),
-          [kernel32_ds] "i"(offsetof(struct gdt, kernel_data32)),
-          [kernel64_cs] "i"(offsetof(struct gdt, kernel_code64)),
-          [kernel64_ds] "i"(offsetof(struct gdt, kernel_data64)),
-          [cr0] "i"(CR0_PE | CR0_ET),
-          [cr0_pg] "i"((uint32_t)CR0_PG),
-          [cr4_pae] "i"(CR4_PAE),
-          [msr_efer] "i"(MSR_EFER),
-          [efer_lme] "i"(MSR_EFER_LME),
-          [efer_nxe] "i"(MSR_EFER_NXE)
-    );
-}
+    ".global smp_trampoline_end\n"
+    "smp_trampoline_end:\n",
+    [data_off] "i"(8),
+    [info_size] "i"(sizeof(struct smp_info)),
+    [gdtr] "i"(offsetof(struct smp_info, gdtr)),
+    [farjmp] "i"(offsetof(struct smp_info, farjmp_offset)),
+    [temp_stack] "i"(offsetof(struct smp_info, temp_stack)),
+    [temp_cr3] "i"(offsetof(struct smp_info, temp_cr3)),
+    [entry] "i"(offsetof(struct smp_info, entry)),
+    [hhdm] "i"(offsetof(struct smp_info, hhdm_offset)),
+    [kernel32_ds] "i"(offsetof(struct gdt, kernel_data32)),
+    [kernel64_cs] "i"(offsetof(struct gdt, kernel_code64)),
+    [kernel64_ds] "i"(offsetof(struct gdt, kernel_data64)),
+    [cr0] "i"(CR0_PE | CR0_ET),
+    [cr0_pg] "i"((uint32_t)CR0_PG),
+    [cr4_pae] "i"(CR4_PAE),
+    [msr_efer] "i"(MSR_EFER),
+    [efer_lme] "i"(MSR_EFER_LME),
+    [efer_nxe] "i"(MSR_EFER_NXE)
+);
 
 constexpr size_t AP_BOOT_STACK_SIZE = 0x8000;
 constexpr uint64_t AP_BOOT_TIMEOUT_NS = 1'000'000'000;
@@ -190,7 +185,7 @@ static bool start_ap(phys_t trampoline, uint32_t temp_cr3, uint32_t lapic_id) {
     const size_t trampoline_size = smp_trampoline_end - smp_trampoline_start;
 
     phys_t stack;
-    if (mem_phys_alloc(AP_BOOT_STACK_SIZE / arch_mem_page_size(), ALLOC_MEM32 | ALLOC_NOZERO, &stack)) {
+    if (mem_phys_alloc(AP_BOOT_STACK_SIZE / arch_page_size(), ALLOC_MEM32 | ALLOC_NOZERO, &stack)) {
         log_err("Failed to allocate a boot stack for LAPIC %u\n", lapic_id);
         return false;
     }
@@ -198,7 +193,7 @@ static bool start_ap(phys_t trampoline, uint32_t temp_cr3, uint32_t lapic_id) {
     struct percpu* cpu = percpu_new();
     if (!cpu) {
         log_err("Failed to allocate per-CPU data for LAPIC %u\n", lapic_id);
-        mem_phys_free(stack, AP_BOOT_STACK_SIZE / arch_mem_page_size());
+        mem_phys_free(stack, AP_BOOT_STACK_SIZE / arch_page_size());
         return false;
     }
 
@@ -250,7 +245,7 @@ static bool start_ap(phys_t trampoline, uint32_t temp_cr3, uint32_t lapic_id) {
 }
 
 static errno_t build_temp_table(phys_t* out) {
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = arch_page_size();
 
     phys_t mem;
     errno_t status = mem_phys_alloc(6, ALLOC_MEM32, &mem);
@@ -281,7 +276,7 @@ static errno_t build_temp_table(phys_t* out) {
 
 void x86_64_smp_init() {
     const size_t trampoline_size = smp_trampoline_end - smp_trampoline_start;
-    assert(trampoline_size <= arch_mem_page_size(), "SMP trampoline doesn't fit in a page");
+    assert(trampoline_size <= arch_page_size(), "SMP trampoline doesn't fit in a page");
 
     const size_t max_cpus = percpu_max_cpus();
     if (max_cpus <= 1)

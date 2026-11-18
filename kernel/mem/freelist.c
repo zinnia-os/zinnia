@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <lib/assert.h>
 #include <lib/compiler.h>
 #include <lib/initgraph.h>
@@ -8,6 +7,7 @@
 #include <lib/print.h>
 #include <lib/spin.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <stdint.h>
 
@@ -27,7 +27,7 @@ static struct spinlock pmm_lock = {0};
 static size_t pmm_total_free = 0;
 
 static errno_t freelist_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const size_t bytes = num_pages * pgsz;
 
     spin_lock(&pmm_lock);
@@ -136,7 +136,7 @@ static void freelist_insert(struct page* page, size_t num_pages) {
 static errno_t freelist_free(phys_t addr, size_t num_pages) {
     spin_lock(&pmm_lock);
 
-    freelist_insert(&vm_pfndb[addr / arch_mem_page_size()], num_pages);
+    freelist_insert(&vm_pfndb[addr / page_size()], num_pages);
     pmm_total_free += num_pages;
 
     spin_unlock(&pmm_lock);
@@ -147,7 +147,7 @@ static struct phys_mem bump_mem = {0};
 static struct phys_mem* bump_region = nullptr;
 
 static errno_t bump_alloc(size_t num_pages, enum alloc_flags flags, phys_t* out) {
-    const size_t bytes = num_pages * arch_mem_page_size();
+    const size_t bytes = num_pages * page_size();
     if (bytes > bump_mem.length)
         return ENOMEM;
 
@@ -178,15 +178,15 @@ void mem_phys_init(struct boot_info* info) {
 
     for (size_t i = 0; i < length; i++) {
         // Regions smaller than a page are useless.
-        if (map[i].length < arch_mem_page_size() || map[i].usage != PHYS_USABLE)
+        if (map[i].length < page_size() || map[i].usage != PHYS_USABLE)
             continue;
 
-        const size_t num_pages = map[i].length / arch_mem_page_size();
-        freelist_insert(&vm_pfndb[map[i].address / arch_mem_page_size()], num_pages);
+        const size_t num_pages = map[i].length / page_size();
+        freelist_insert(&vm_pfndb[map[i].address / page_size()], num_pages);
         pmm_total_free += num_pages;
     }
 
-    const size_t free_bytes = (pmm_total_free * arch_mem_page_size());
+    const size_t free_bytes = (pmm_total_free * page_size());
     log("freelist: Total available memory: %zu MiB\n", free_bytes / 1024 / 1024);
 }
 INIT_TASK(mem_phys_stage, "mem.phys_init", mem_phys_init);
@@ -205,7 +205,7 @@ static void mem_phys_bootstrap(struct boot_info* info) {
         if (map[i].usage == PHYS_USABLE && (!largest || map[i].length > largest->length))
             largest = &map[i];
     }
-    assert(largest && largest->length >= arch_mem_page_size(), "No usable memory for bootstrap allocator");
+    assert(largest && largest->length >= page_size(), "No usable memory for bootstrap allocator");
 
     log("Using region [%p - %p] for bootstrap allocator\n",
         (void*)largest->address,

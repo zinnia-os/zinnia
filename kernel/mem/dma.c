@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <dev/block/blockdev.h>
 #include <lib/atomic.h>
 #include <lib/percpu.h>
@@ -8,6 +7,7 @@
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/dma.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
@@ -57,13 +57,13 @@ errno_t dma_buffer_alloc(struct dma_tag* tag, size_t len, struct dma_buffer* out
     if (status)
         return status;
 
-    const size_t num_pages = DIV_CEIL(len, arch_mem_page_size());
+    const size_t num_pages = DIV_CEIL(len, page_size());
     phys_t phys;
     status = mem_phys_alloc(num_pages, flags, &phys);
     if (status)
         return status;
 
-    const size_t size = num_pages * arch_mem_page_size();
+    const size_t size = num_pages * page_size();
     dma_addr_t addr;
     status = tag->ops->map(tag, phys, size, &addr);
     if (status) {
@@ -90,8 +90,8 @@ void dma_buffer_free(struct dma_buffer* buf) {
     if (buf->virt == nullptr)
         return;
 
-    const size_t num_pages = DIV_CEIL(buf->len, arch_mem_page_size());
-    buf->tag->ops->unmap(buf->tag, buf->addr, num_pages * arch_mem_page_size());
+    const size_t num_pages = DIV_CEIL(buf->len, page_size());
+    buf->tag->ops->unmap(buf->tag, buf->addr, num_pages * page_size());
     mem_phys_free(buf->phys, num_pages);
     *buf = (struct dma_buffer){0};
 }
@@ -169,10 +169,10 @@ static errno_t map_add_range(struct dma_map* map, phys_t phys, size_t len) {
 }
 
 static errno_t map_add_virt(struct dma_map* map, struct pmap* pmap, uintptr_t vaddr, size_t len) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     while (len > 0) {
-        const size_t offset = vaddr % page_size;
-        const size_t chunk = MIN(len, page_size - offset);
+        const size_t offset = vaddr % pgsz;
+        const size_t chunk = MIN(len, pgsz - offset);
 
         phys_t phys;
         if (pmap_extract(pmap, vaddr - offset, &phys))
@@ -241,7 +241,7 @@ errno_t dma_map_load_iter(struct dma_map* map, const iovec_iter_t* iter) {
         const size_t len = iov_len - offset;
         offset = 0;
 
-        if (iter->user && (!arch_mem_addr_is_user(base) || !arch_mem_addr_is_user(base + len - 1))) {
+        if (iter->user && (!mem_addr_is_user(base) || !mem_addr_is_user(base + len - 1))) {
             status = EFAULT;
             break;
         }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/elf.h>
 #include <boot/loader/loader.h>
+#include <lib/elf.h>
 #include <string.h>
 
 static bool in_image(const struct kernel_image* image, uint64_t vaddr, uint64_t len) {
@@ -41,9 +41,9 @@ static bool apply_relocations(const struct kernel_image* image, uint64_t dynamic
     for (uint64_t off = 0; off + rela_ent <= rela_size; off += rela_ent) {
         const elf64_rela_t* r = kernel_ptr(image, rela + off);
         const uint32_t type = ELF64_R_TYPE(r->r_info);
-        if (type == ARCH_R_NONE)
+        if (type == ELF_R_NONE)
             continue;
-        if (type != ARCH_R_RELATIVE)
+        if (type != ELF_R_RELATIVE)
             return false;
         if (!in_image(image, r->r_offset, sizeof(uint64_t)))
             return false;
@@ -59,10 +59,10 @@ bool elf_load(const uint8_t* elf, size_t size, struct kernel_image* out) {
         return false;
     memcpy(&ehdr, elf, sizeof(ehdr));
 
-    if (memcmp(ehdr.e_ident, ELF_MAG, sizeof(ELF_MAG)) || ehdr.e_ident[EI_CLASS] != ARCH_ELF_CLASS ||
-        ehdr.e_ident[EI_DATA] != ARCH_ELF_DATA)
+    if (memcmp(ehdr.e_ident, ELF_MAG, sizeof(ELF_MAG)) || ehdr.e_ident[EI_CLASS] != ELF_CLASS ||
+        ehdr.e_ident[EI_DATA] != ELF_DATA)
         return false;
-    if (ehdr.e_machine != ARCH_ELF_MACHINE)
+    if (ehdr.e_machine != ELF_MACHINE)
         return false;
     if (ehdr.e_phentsize != sizeof(elf64_phdr_t) || ehdr.e_phoff > size ||
         (size - ehdr.e_phoff) / sizeof(elf64_phdr_t) < ehdr.e_phnum)

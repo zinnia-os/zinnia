@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/sched.h>
 #include <lib/compiler.h>
 #include <lib/errno.h>
 #include <lib/panic.h>

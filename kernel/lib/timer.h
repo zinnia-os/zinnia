@@ -4,6 +4,7 @@
 
 #include <lib/atomic.h>
 #include <lib/tailq.h>
+#include <bits/timer.h>
 #include <stdint.h>
 
 struct timer_queue;

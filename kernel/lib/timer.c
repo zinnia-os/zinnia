@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
-#include <arch/timer.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
+#include <lib/cpu.h>
 #include <lib/irq.h>
 #include <lib/percpu.h>
 #include <lib/spin.h>
@@ -90,7 +89,7 @@ void timer_arm(struct timer* timer, uint64_t deadline_ns) {
 bool timer_cancel(struct timer* timer) {
     bool removed = dequeue(timer);
     while (atomic_load(&timer->running, ATOMIC_ACQUIRE))
-        arch_cpu_pause();
+        cpu_pause();
     return removed;
 }
 

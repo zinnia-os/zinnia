@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <arch/types.h>
+#include <lib/types.h>
 #include <stddef.h>
 #include <stdint.h>
 

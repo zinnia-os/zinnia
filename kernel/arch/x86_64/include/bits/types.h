@@ -4,4 +4,4 @@
 
 #include <stdint.h>
 
-typedef uint64_t __arch_phys_t;
+typedef uint64_t phys_t;

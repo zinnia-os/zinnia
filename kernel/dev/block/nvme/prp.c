@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <dev/block/nvme/nvme.h>
 #include <lib/utils.h>
+#include <mem/page.h>
 
 static size_t count_pages(struct dma_map* map, size_t page_size) {
     size_t count = 0;
@@ -41,7 +41,7 @@ errno_t nvme_build_prps(
     uint64_t* prp1,
     uint64_t* prp2
 ) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     slot->map = nullptr;
     slot->prps = (struct dma_buffer){};
 
@@ -65,7 +65,7 @@ errno_t nvme_build_prps(
     *prp1 = slot->map->segs[0].addr;
 
     // Enumerate the base of every page the transfer touches in order.
-    const size_t pages = count_pages(slot->map, page_size);
+    const size_t pages = count_pages(slot->map, pgsz);
     const size_t rest_pages = pages ? pages - 1 : 0;
 
     if (rest_pages == 0) {
@@ -75,23 +75,23 @@ errno_t nvme_build_prps(
 
     if (rest_pages == 1) {
         uint64_t second;
-        fill_pages(slot->map, page_size, &second);
+        fill_pages(slot->map, pgsz, &second);
         *prp2 = second;
         return 0;
     }
 
     // We don't want to chain across pages.
-    const size_t entries_per_page = page_size / sizeof(uint64_t);
+    const size_t entries_per_page = pgsz / sizeof(uint64_t);
     if (rest_pages > entries_per_page) {
         status = ENOMEM;
         goto fail;
     }
 
-    status = dma_buffer_alloc(tag, page_size, &slot->prps);
+    status = dma_buffer_alloc(tag, pgsz, &slot->prps);
     if (status)
         goto fail;
 
-    fill_pages(slot->map, page_size, slot->prps.virt);
+    fill_pages(slot->map, pgsz, slot->prps.virt);
     dma_buffer_sync(&slot->prps, 0, rest_pages * sizeof(uint64_t), DMA_SYNC_PREWRITE);
 
     *prp2 = slot->prps.addr;

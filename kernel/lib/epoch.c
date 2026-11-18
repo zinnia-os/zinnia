@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
+#include <lib/cpu.h>
 #include <lib/epoch.h>
 #include <lib/irq.h>
 #include <lib/mutex.h>
@@ -208,7 +208,7 @@ void epoch_synchronize() {
         if (epoch_try_advance())
             continue;
         if (spins < EPOCH_SYNC_SPINS)
-            arch_cpu_pause();
+            cpu_pause();
         else
             sched_sleep_until(clock_get_elapsed_ns() + EPOCH_SYNC_POLL_NS);
     }

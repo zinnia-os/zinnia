@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/sched.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/errno.h>
@@ -16,6 +15,7 @@
 #include <mem/alloc.h>
 #include <mem/stack.h>
 #include <mem/vma.h>
+#include <bits/preempt.h>
 #include <stdint.h>
 #include <string.h>
 

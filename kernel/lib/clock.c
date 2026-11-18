@@ -2,10 +2,10 @@
 
 #define LOG_FMT(fmt) "clock: " fmt
 
-#include <arch/cpu.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
 #include <lib/compiler.h>
+#include <lib/cpu.h>
 #include <lib/print.h>
 #include <stdint.h>
 
@@ -61,6 +61,6 @@ void clock_spin_ns(uint64_t ns) {
 
     uint64_t target = clock_get_elapsed_ns() + ns;
     while (clock_get_elapsed_ns() < target) {
-        arch_cpu_pause();
+        cpu_pause();
     }
 }

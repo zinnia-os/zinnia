@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <lib/atomic.h>
+#include <lib/cpu.h>
 #include <lib/irq.h>
 #include <lib/percpu.h>
 #include <mem/pmap.h>
@@ -42,7 +42,7 @@ void pmap_shootdown(struct pmap* pt) {
         const size_t req = atomic_load(percpu_ref_on(cpu, shootdown_req), ATOMIC_RELAXED);
         while ((ptrdiff_t)(req - atomic_load(percpu_ref_on(cpu, shootdown_ack), ATOMIC_ACQUIRE)) > 0) {
             pmap_shootdown_handle();
-            arch_cpu_pause();
+            cpu_pause();
         }
     }
     irq_unlock();

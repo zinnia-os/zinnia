@@ -11,6 +11,9 @@ struct condvar {
 };
 
 void condvar_init(struct condvar* cv);
+
 void condvar_wait(struct condvar* cv, mutex_t* mutex);
+
 void condvar_signal(struct condvar* cv);
+
 void condvar_broadcast(struct condvar* cv);

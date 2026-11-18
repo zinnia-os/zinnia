@@ -2,11 +2,11 @@
 
 #define LOG_FMT(fmt) "x86_64/rtc: " fmt
 
-#include <arch/cpu.h>
 #include <arch/x86_64/asm.h>
 #include <fs/vfs.h>
 #include <lib/clock.h>
 #include <lib/compiler.h>
+#include <lib/cpu.h>
 #include <lib/initgraph.h>
 #include <lib/percpu.h>
 #include <lib/print.h>

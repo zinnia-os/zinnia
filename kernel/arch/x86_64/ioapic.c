@@ -2,8 +2,6 @@
 
 #define LOG_FMT(fmt) "ioapic: " fmt
 
-#include <arch/irq.h>
-#include <arch/mem.h>
 #include <arch/x86_64/apic.h>
 #include <arch/x86_64/percpu.h>
 #include <dev/acpi/acpi.h>
@@ -15,6 +13,7 @@
 #include <lib/spin.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <uacpi/acpi.h>
@@ -209,7 +208,7 @@ static uacpi_iteration_decision parse_madt_entry(uacpi_handle, struct acpi_entry
     case ACPI_MADT_ENTRY_TYPE_IOAPIC: {
         // Map the IOAPIC and mask all of its pins.
         const struct acpi_madt_ioapic* entry = (const struct acpi_madt_ioapic*)hdr;
-        uintptr_t vaddr = vm_alloc(arch_mem_page_size());
+        uintptr_t vaddr = vm_alloc(arch_page_size());
         if (!vaddr)
             return UACPI_ITERATION_DECISION_CONTINUE;
         pmap_map(&kernel_vma.pmap, vaddr, entry->address, PTE_READ | PTE_WRITE, CACHE_MMIO);
@@ -222,7 +221,7 @@ static uacpi_iteration_decision parse_madt_entry(uacpi_handle, struct acpi_entry
         ioapic->lines = mem_alloc(ioapic->num_pins * sizeof(*ioapic->lines), 0);
         if (!ioapic->lines) {
             pmap_unmap(&kernel_vma.pmap, vaddr);
-            vm_free(vaddr, arch_mem_page_size());
+            vm_free(vaddr, arch_page_size());
             return UACPI_ITERATION_DECISION_CONTINUE;
         }
 

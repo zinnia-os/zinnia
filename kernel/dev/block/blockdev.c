@@ -18,12 +18,12 @@
 #include <zinnia/block.h>
 
 static size_t lbas_per_page(struct blockdev* dev) {
-    return arch_mem_page_size() / dev->lba_size;
+    return page_size() / dev->lba_size;
 }
 
 static errno_t cache_get_pages(struct vmo* vmo, uint64_t index, struct page** pages, size_t count, size_t* out_valid) {
     struct blockdev* dev = containerof(vmo, struct blockdev, cache);
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const size_t per_page = lbas_per_page(dev);
     const uint64_t lba = index * per_page;
 
@@ -41,7 +41,7 @@ static errno_t cache_get_pages(struct vmo* vmo, uint64_t index, struct page** pa
     const size_t valid = done / per_page + (done % per_page != 0);
     if (done % per_page != 0) {
         const size_t tail = (done % per_page) * dev->lba_size;
-        memset((uint8_t*)HHDM_PTR(page_addr(pages[valid - 1])) + tail, 0, page_size - tail);
+        memset((uint8_t*)HHDM_PTR(page_addr(pages[valid - 1])) + tail, 0, pgsz - tail);
     }
     *out_valid = valid;
     return valid == 0 && num_lbas > 0 ? EIO : 0;
@@ -129,9 +129,9 @@ errno_t blockdev_rw_pages(
     size_t count,
     size_t* out_lbas
 ) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     size_t bytes = num_lbas * dev->lba_size;
-    if (bytes > count * page_size)
+    if (bytes > count * pgsz)
         return EINVAL;
 
     struct bio* bio = bio_alloc(op, count);
@@ -140,7 +140,7 @@ errno_t blockdev_rw_pages(
 
     size_t num_segs = 0;
     for (size_t i = 0; i < count && bytes > 0; i++) {
-        const size_t len = MIN(bytes, page_size);
+        const size_t len = MIN(bytes, pgsz);
         bio->segs[num_segs++] = (struct bio_seg){.addr = page_addr(pages[i]), .len = len};
         bytes -= len;
     }

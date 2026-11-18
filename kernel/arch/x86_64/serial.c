@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <arch/x86_64/asm.h>
 #include <lib/console.h>
+#include <lib/cpu.h>
 #include <lib/init.h>
 #include <lib/initgraph.h>
 #include <stdint.h>

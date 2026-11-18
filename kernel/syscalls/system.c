@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/archctl.h>
 #include <fs/ident.h>
 #include <lib/print.h>
 #include <lib/spin.h>
@@ -8,6 +7,7 @@
 #include <mem/usercopy.h>
 #include <syscalls/private.h>
 #include <syscalls/syscall.h>
+#include <bits/archctl.h>
 #include <config.h>
 #include <stdint.h>
 #include <string.h>

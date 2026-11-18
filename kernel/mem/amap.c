@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/amap.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <stdcountof.h>
 #include <string.h>
@@ -21,7 +21,7 @@ errno_t anon_new(struct page* src, struct vm_anon** out) {
     }
 
     if (src)
-        memcpy(HHDM_PTR(page_addr(page)), HHDM_PTR(page_addr(src)), arch_mem_page_size());
+        memcpy(HHDM_PTR(page_addr(page)), HHDM_PTR(page_addr(src)), page_size());
 
     atomic_fetch_or(&page->flags, PAGE_ANON, ATOMIC_RELAXED);
     page->obj.owner = anon;

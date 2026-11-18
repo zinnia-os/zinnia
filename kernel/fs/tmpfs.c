@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <fs/vfs.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
 #include <lib/initgraph.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <mem/vma.h>
 #include <mem/vmo.h>
@@ -35,13 +35,13 @@ static errno_t tmpfs_file_get_pages(
     size_t* out_valid
 ) {
     struct tmpfs_file* file = containerof(vmo, struct tmpfs_file, vmo);
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const uint64_t size = atomic_load(&file->size, ATOMIC_ACQUIRE);
-    const uint64_t limit = size / page_size + (size % page_size != 0);
+    const uint64_t limit = size / pgsz + (size % pgsz != 0);
 
     const size_t valid = index >= limit ? 0 : MIN(count, limit - index);
     for (size_t i = 0; i < valid; i++)
-        memset(HHDM_PTR(page_addr(pages[i])), 0, page_size);
+        memset(HHDM_PTR(page_addr(pages[i])), 0, pgsz);
     *out_valid = valid;
     return 0;
 }

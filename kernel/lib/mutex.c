@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
+#include <lib/cpu.h>
 #include <lib/mutex.h>
 #include <lib/percpu.h>
 #include <lib/sched.h>
@@ -64,7 +64,7 @@ static void mutex_lock_slow(mutex_t* mutex, uintptr_t self) {
         // The owner is running and will probably release the lock soon, so just wait for it do so.
         if (spins < MUTEX_SPIN_MAX && owner_is_running(owner)) {
             spins++;
-            arch_cpu_pause();
+            cpu_pause();
             word = atomic_load(mutex, ATOMIC_RELAXED);
             continue;
         }
@@ -72,7 +72,7 @@ static void mutex_lock_slow(mutex_t* mutex, uintptr_t self) {
         // Before the scheduler is up, nobody can be preempted while holding a lock. Just keep spinning.
         if (self == MUTEX_ANON_OWNER || owner == MUTEX_ANON_OWNER) {
             spins = 0;
-            arch_cpu_pause();
+            cpu_pause();
             word = atomic_load(mutex, ATOMIC_RELAXED);
             continue;
         }

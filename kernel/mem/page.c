@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <lib/atomic.h>
 #include <lib/park.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/page.h>
 #include <stddef.h>
 
@@ -75,9 +75,9 @@ void page_wait(struct page* page) {
 }
 
 uintptr_t page_addr(struct page* page) {
-    return (((uintptr_t)page - (uintptr_t)vm_pfndb) / sizeof(struct page)) * arch_mem_page_size();
+    return (((uintptr_t)page - (uintptr_t)vm_pfndb) / sizeof(struct page)) * page_size();
 }
 
 struct page* page_from_addr(phys_t addr) {
-    return &vm_pfndb[addr / arch_mem_page_size()];
+    return &vm_pfndb[addr / page_size()];
 }

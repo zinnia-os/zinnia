@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
-#include <arch/usercopy.h>
 #include <lib/percpu.h>
+#include <mem/layout.h>
 #include <mem/usercopy.h>
 
 static bool is_user_range(uintptr_t addr, size_t len) {
     if (len == 0)
-        return arch_mem_addr_is_user(addr);
-    return addr + len > addr && arch_mem_addr_is_user(addr) && arch_mem_addr_is_user(addr + len - 1);
+        return mem_addr_is_user(addr);
+    return addr + len > addr && mem_addr_is_user(addr) && mem_addr_is_user(addr + len - 1);
 }
 
 bool usercopy_read(void* dst, const __user void* src, size_t len) {
@@ -32,7 +31,7 @@ bool usercopy_write(__user void* dst, const void* src, size_t len) {
 }
 
 bool usercopy_strlen(const __user char* str, size_t max, size_t* len) {
-    if (!arch_mem_addr_is_user((uintptr_t)str))
+    if (!mem_addr_is_user((uintptr_t)str))
         return false;
 
     size_t unused;

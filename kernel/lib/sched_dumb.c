@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
-#include <arch/sched.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
+#include <lib/cpu.h>
 #include <lib/irq.h>
 #include <lib/list.h>
 #include <lib/percpu.h>
@@ -238,7 +237,7 @@ static void do_reschedule(struct scheduler* sched, uint64_t now) {
 
     // A task that was woken by another CPU might not have finished switching away on its old CPU yet.
     while (atomic_load(&to->on_cpu, ATOMIC_ACQUIRE))
-        arch_cpu_pause();
+        cpu_pause();
     atomic_store(&to->on_cpu, true, ATOMIC_RELAXED);
 
     sched->current = to;

@@ -21,7 +21,7 @@ errno_t pmap_new_kernel(struct pmap* pt, enum alloc_flags flags) {
 
 #if !CONFIG_HAVE_MMU_SPLIT_ROOT
     pte_t* root = HHDM_PTR(addr);
-    const size_t num_entries = (size_t)1 << arch_mem_level_bits();
+    const size_t num_entries = (size_t)1 << arch_pmap_level_bits();
     for (size_t i = num_entries / 2; i < num_entries; i++) {
         phys_t dir;
         status = mem_phys_alloc(1, flags, &dir);
@@ -58,7 +58,7 @@ errno_t pmap_new_user(struct pmap* pt, enum alloc_flags flags) {
 
     void* user_l1_ptr = HHDM_PTR(user_l1);
     void* kernel_l1_ptr = HHDM_PTR(kernel_vma.pmap.root);
-    memcpy(user_l1_ptr, kernel_l1_ptr, arch_mem_page_size());
+    memcpy(user_l1_ptr, kernel_l1_ptr, page_size());
 #endif
 
     struct pmap result = {
@@ -79,9 +79,9 @@ static pte_t* get_pte(struct pmap* pt, uintptr_t vaddr, bool is_user, bool check
     pte_t* current_head = HHDM_PTR(pt->root);
     size_t index = 0;
 
-    for (int8_t level = arch_mem_num_levels() - 1; level >= 0; level--) {
-        const size_t addr_mask = (1 << arch_mem_level_bits()) - 1;
-        const size_t addr_shift = arch_mem_page_bits() + (arch_mem_level_bits() * level);
+    for (int8_t level = arch_pmap_num_levels() - 1; level >= 0; level--) {
+        const size_t addr_mask = (1 << arch_pmap_level_bits()) - 1;
+        const size_t addr_shift = arch_pmap_page_bits() + (arch_pmap_level_bits() * level);
         const enum pte_flags level_flags = PTE_DIR | (is_user ? PTE_USER : 0);
 
         index = (vaddr >> addr_shift) & addr_mask;
@@ -95,7 +95,7 @@ static pte_t* get_pte(struct pmap* pt, uintptr_t vaddr, bool is_user, bool check
 
         if (pte_is_present(pte)) {
             // Get the next level.
-            const pte_t upgraded = *pte | pte_build(0, level_flags, CACHE_ANY);
+            const pte_t upgraded = pte_upgrade(*pte, level_flags);
             if (upgraded != *pte)
                 pte_write(pte, upgraded);
             current_head = HHDM_PTR(pte_address(pte));
@@ -190,7 +190,7 @@ fail:
 static void free_table(phys_t table, int8_t level) {
     if (level > 0) {
         pte_t* entries = HHDM_PTR(table);
-        const size_t num_entries = (size_t)1 << arch_mem_level_bits();
+        const size_t num_entries = (size_t)1 << arch_pmap_level_bits();
         for (size_t i = 0; i < num_entries; i++) {
             if (pte_is_present(&entries[i]))
                 free_table(pte_address(&entries[i]), level - 1);
@@ -204,7 +204,7 @@ void pmap_destroy(struct pmap* pt) {
         return;
 
     pte_t* root = HHDM_PTR(pt->root);
-    const size_t num_entries = (size_t)1 << arch_mem_level_bits();
+    const size_t num_entries = (size_t)1 << arch_pmap_level_bits();
 #if CONFIG_HAVE_MMU_SPLIT_ROOT
     const size_t user_entries = num_entries;
 #else
@@ -212,7 +212,7 @@ void pmap_destroy(struct pmap* pt) {
 #endif
     for (size_t i = 0; i < user_entries; i++) {
         if (pte_is_present(&root[i]))
-            free_table(pte_address(&root[i]), arch_mem_num_levels() - 2);
+            free_table(pte_address(&root[i]), arch_pmap_num_levels() - 2);
     }
     mem_phys_free(pt->root, 1);
     pt->root = 0;

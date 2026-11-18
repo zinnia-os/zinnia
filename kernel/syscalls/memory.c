@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <fs/vfs.h>
 #include <lib/atomic.h>
+#include <mem/layout.h>
 #include <mem/mman.h>
+#include <mem/page.h>
 #include <mem/vma.h>
 #include <mem/vmo.h>
 #include <syscalls/private.h>
@@ -20,7 +21,7 @@ static bool is_user_range(uintptr_t addr, size_t len) {
     uintptr_t last;
     if (len == 0 || ckd_add(&last, addr, len - 1))
         return false;
-    return arch_mem_addr_is_user(addr) && arch_mem_addr_is_user(last);
+    return mem_addr_is_user(addr) && mem_addr_is_user(last);
 }
 
 static errno_t map_anon(struct vma* vma, uintptr_t addr, size_t len, uint32_t prot, uint32_t flags) {
@@ -52,18 +53,18 @@ static errno_t get_map_file(int fd, uint32_t prot, uint32_t flags, struct vfs_fi
 struct syscall_ret sys_mmap(uintptr_t addr, size_t len, uint32_t prot, uint32_t flags, int fd, off_t offset) {
     struct syscall_ret ret = {};
 
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const uint32_t kind = flags & (MAP_SHARED | MAP_PRIVATE);
 
     if (len == 0 || (prot & ~PROT_MASK) || (kind != MAP_SHARED && kind != MAP_PRIVATE)) {
         ret.error = EINVAL;
         return ret;
     }
-    if (offset < 0 || (uint64_t)offset % page_size != 0) {
+    if (offset < 0 || (uint64_t)offset % pgsz != 0) {
         ret.error = EINVAL;
         return ret;
     }
-    if ((flags & MAP_FIXED) && (addr % page_size != 0 || !is_user_range(addr, len))) {
+    if ((flags & MAP_FIXED) && (addr % pgsz != 0 || !is_user_range(addr, len))) {
         ret.error = EINVAL;
         return ret;
     }
@@ -129,7 +130,7 @@ struct syscall_ret sys_munmap(uintptr_t addr, size_t len) {
 struct syscall_ret sys_madvise(uintptr_t addr, size_t len, int advice) {
     struct syscall_ret ret = {};
 
-    if (addr % arch_mem_page_size() != 0)
+    if (addr % page_size() != 0)
         ret.error = EINVAL;
     return ret;
 }
@@ -145,7 +146,7 @@ struct syscall_ret sys_msync(uintptr_t addr, size_t len, int flags) {
         ret.error = EINVAL;
         return ret;
     }
-    if (addr % arch_mem_page_size() != 0 || !is_user_range(addr, len)) {
+    if (addr % page_size() != 0 || !is_user_range(addr, len)) {
         ret.error = EINVAL;
         return ret;
     }

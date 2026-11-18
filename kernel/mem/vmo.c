@@ -208,14 +208,14 @@ static errno_t copy_data(
     iovec_iter_t* iter,
     size_t* out
 ) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     size_t progress = 0;
     errno_t status = 0;
 
     while (progress < len) {
-        const size_t misalign = (offset + progress) % page_size;
-        const uint64_t index = (offset + progress) / page_size;
-        const size_t chunk = MIN(page_size - misalign, len - progress);
+        const size_t misalign = (offset + progress) % pgsz;
+        const uint64_t index = (offset + progress) / pgsz;
+        const size_t chunk = MIN(pgsz - misalign, len - progress);
 
         struct page* page = nullptr;
         phys_t phys;
@@ -276,22 +276,22 @@ errno_t vmo_copy(
     size_t len,
     size_t* actual_copied
 ) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     size_t progress = 0;
     errno_t status = 0;
 
     while (progress < len) {
-        const size_t target_misalign = (progress + target_offset) % page_size;
-        const size_t src_misalign = (progress + src_offset) % page_size;
-        const size_t copy_size = MIN(MIN(page_size - target_misalign, page_size - src_misalign), len - progress);
+        const size_t target_misalign = (progress + target_offset) % pgsz;
+        const size_t src_misalign = (progress + src_offset) % pgsz;
+        const size_t copy_size = MIN(MIN(pgsz - target_misalign, pgsz - src_misalign), len - progress);
 
         struct page* tpage;
-        status = vmo_get_page(target, (progress + target_offset) / page_size, VMO_WRITE, &tpage);
+        status = vmo_get_page(target, (progress + target_offset) / pgsz, VMO_WRITE, &tpage);
         if (status)
             break;
 
         struct page* spage;
-        status = vmo_get_page(src, (progress + src_offset) / page_size, VMO_READ, &spage);
+        status = vmo_get_page(src, (progress + src_offset) / pgsz, VMO_READ, &spage);
         if (status) {
             vmo_put_page(tpage);
             break;
@@ -370,8 +370,8 @@ errno_t vmo_sync(struct vmo* vmo, uint64_t first, uint64_t end) {
 }
 
 void vmo_truncate(struct vmo* vmo, uint64_t length) {
-    const size_t page_size = arch_mem_page_size();
-    uint64_t first = length / page_size + (length % page_size != 0);
+    const size_t pgsz = page_size();
+    uint64_t first = length / pgsz + (length % pgsz != 0);
 
     mutex_lock(&vmo->lock);
     while (true) {
@@ -390,17 +390,17 @@ void vmo_truncate(struct vmo* vmo, uint64_t length) {
         first = index + 1;
     }
 
-    if (length % page_size != 0) {
+    if (length % pgsz != 0) {
         while (true) {
-            struct page* tail = radix_lookup(&vmo->pages, length / page_size);
+            struct page* tail = radix_lookup(&vmo->pages, length / pgsz);
             if (!tail)
                 break;
             if (atomic_load(&tail->flags, ATOMIC_ACQUIRE) & PAGE_BUSY) {
                 wait_busy(vmo, tail);
                 continue;
             }
-            memset((uint8_t*)HHDM_PTR(page_addr(tail)) + length % page_size, 0, page_size - length % page_size);
-            mark_dirty(vmo, tail, length / page_size);
+            memset((uint8_t*)HHDM_PTR(page_addr(tail)) + length % pgsz, 0, pgsz - length % pgsz);
+            mark_dirty(vmo, tail, length / pgsz);
             break;
         }
     }

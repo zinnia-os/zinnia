@@ -78,6 +78,34 @@ void irq_lock();
 void irq_unlock();
 
 // Hints to stop execution on this CPU until an interrupt happens.
-void irq_wait();
-bool irq_get_state();
-bool irq_set_state(bool state);
+
+#include <bits/irq.h>
+
+static inline void irq_wait() {
+    arch_irq_wait();
+}
+
+static inline bool irq_get_state() {
+    return arch_irq_get_state();
+}
+
+static inline bool irq_set_state(bool state) {
+    return arch_irq_set_state(state);
+}
+
+static inline errno_t irq_alloc_msi(struct msi_line** out) {
+    return arch_irq_alloc_msi(out);
+}
+
+static inline errno_t irq_get_gsi(uint32_t gsi, struct irq_line** out) {
+    return arch_irq_get_gsi(gsi, out);
+}
+
+static inline bool irq_isa_override(
+    uint8_t isa_irq,
+    uint32_t* out_gsi,
+    enum irq_trigger_mode* out_trigger,
+    enum irq_polarity* out_polarity
+) {
+    return arch_irq_isa_override(isa_irq, out_gsi, out_trigger, out_polarity);
+}

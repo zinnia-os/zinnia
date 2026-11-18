@@ -41,7 +41,7 @@
         size_t _new_cap = (vec)->capacity == 0 ? 8 : (vec)->capacity; \
         while (_new_cap < (needed)) \
             _new_cap *= 2; \
-        typeof((vec)->data) _new = mem_alloc(_new_cap * sizeof(*(vec)->data), ALLOC_NOZERO); \
+        typeof((vec)->data) _new = mem_alloc(_new_cap * sizeof(*(vec)->data), ALLOC_NOZERO | ALLOC_NOSLEEP); \
         if (_new == nullptr) { \
             _grow_status = ENOMEM; \
         } else { \

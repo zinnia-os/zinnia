@@ -187,7 +187,7 @@ void fbcon_init(struct boot_info* info) {
 
     fbcon.fb = *fb;
 
-    const size_t pgsz = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const phys_t start = ROUND_DOWN(fb->base, pgsz);
     const phys_t end = ROUND_UP(fb->base + fb->pitch * fb->height, pgsz);
 

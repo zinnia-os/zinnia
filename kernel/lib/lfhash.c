@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
+#include <lib/cpu.h>
 #include <lib/epoch.h>
 #include <lib/lfhash.h>
 #include <mem/alloc.h>
@@ -97,7 +97,7 @@ static void bucket_link(struct lfhash* table, size_t index, struct lfhash_bucket
     enum bucket_state state = BUCKET_UNLINKED;
     if (!atomic_compare_exchange(&bucket->state, &state, BUCKET_LINKING, ATOMIC_RELAXED, ATOMIC_RELAXED)) {
         while (atomic_load(&bucket->state, ATOMIC_ACQUIRE) != BUCKET_LINKED)
-            arch_cpu_pause();
+            cpu_pause();
         return;
     }
 

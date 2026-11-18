@@ -1,34 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/irq.h>
 #include <arch/x86_64/apic.h>
 #include <arch/x86_64/defs.h>
 #include <arch/x86_64/percpu.h>
 #include <lib/assert.h>
+#include <lib/irq.h>
 #include <lib/percpu.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <stdcountof.h>
 #include <stdint.h>
-
-bool arch_irq_get_state() {
-    uint64_t flags;
-    asm volatile("pushf; pop %0" : "=r"(flags)::"memory");
-    return flags & RFLAGS_IF;
-}
-
-bool arch_irq_set_state(bool state) {
-    bool old = arch_irq_get_state();
-    if (state)
-        asm volatile("sti" ::: "memory");
-    else
-        asm volatile("cli" ::: "memory");
-    return old;
-}
-
-void arch_irq_wait() {
-    asm volatile("hlt");
-}
 
 struct apic_msi_line {
     struct msi_line msi;

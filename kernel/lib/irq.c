@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/cpu.h>
-#include <arch/irq.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
+#include <lib/cpu.h>
 #include <lib/irq.h>
 #include <lib/list.h>
 #include <lib/mutex.h>
@@ -16,18 +15,6 @@
 
 [[__percpu]]
 struct irq_percpu irq_data;
-
-bool irq_set_state(bool state) {
-    return arch_irq_set_state(state);
-}
-
-bool irq_get_state() {
-    return arch_irq_get_state();
-}
-
-void irq_wait() {
-    arch_irq_wait();
-}
 
 void irq_lock() {
     bool prev = arch_irq_set_state(false);
@@ -145,7 +132,7 @@ void irq_line_detach(struct irq_line* line, struct irq_handler* handler) {
     irq_unlock();
 
     while (__atomic_load_n(&line->is_busy, __ATOMIC_ACQUIRE))
-        arch_cpu_pause();
+        cpu_pause();
 
     atomic_exchange(&handler->need, false, ATOMIC_SEQ_CST);
     if (line->task) {

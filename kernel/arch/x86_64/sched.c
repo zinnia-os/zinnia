@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/sched.h>
 #include <arch/x86_64/apic.h>
 #include <arch/x86_64/asm.h>
 #include <arch/x86_64/defs.h>
@@ -26,37 +25,45 @@ struct task_frame {
     uint64_t rbx, rbp, r12, r13, r14, r15, rip;
 };
 
-[[__naked]]
-static struct task* perform_switch(uint64_t* old_rsp, uint64_t new_rsp, struct task* prev) {
-    asm volatile(
-        "sub rsp, 0x30\n" // Make room for all regs (except RIP).
-        "mov [rsp + %c[rbx]], rbx\n"
-        "mov [rsp + %c[rbp]], rbp\n"
-        "mov [rsp + %c[r12]], r12\n"
-        "mov [rsp + %c[r13]], r13\n"
-        "mov [rsp + %c[r14]], r14\n"
-        "mov [rsp + %c[r15]], r15\n"
-        "mov [rdi], rsp\n" // rdi = old_rsp
-        "mov rsp, rsi\n"   // rsi = new_rsp
-        "mov rbx, [rsp + %c[rbx]]\n"
-        "mov rbp, [rsp + %c[rbp]]\n"
-        "mov r12, [rsp + %c[r12]]\n"
-        "mov r13, [rsp + %c[r13]]\n"
-        "mov r14, [rsp + %c[r14]]\n"
-        "mov r15, [rsp + %c[r15]]\n"
-        "add rsp, 0x30\n"
-        "mov rax, rdx\n"
-        "ret" // This will conveniently move us to the RIP we put at this stack entry.
-        :
-        : [rbx] "i"(offsetof(struct task_frame, rbx)),
-          [rbp] "i"(offsetof(struct task_frame, rbp)),
-          [r12] "i"(offsetof(struct task_frame, r12)),
-          [r13] "i"(offsetof(struct task_frame, r13)),
-          [r14] "i"(offsetof(struct task_frame, r14)),
-          [r15] "i"(offsetof(struct task_frame, r15))
-        : "memory"
-    );
-}
+struct task* perform_switch(uint64_t* old_rsp, uint64_t new_rsp, struct task* prev);
+void task_entry_thunk();
+
+DEFINE_ASM_FUNC(
+    perform_switch,
+    "sub rsp, 0x30\n" // Make room for all regs (except RIP).
+    "mov [rsp + %c[rbx]], rbx\n"
+    "mov [rsp + %c[rbp]], rbp\n"
+    "mov [rsp + %c[r12]], r12\n"
+    "mov [rsp + %c[r13]], r13\n"
+    "mov [rsp + %c[r14]], r14\n"
+    "mov [rsp + %c[r15]], r15\n"
+    "mov [rdi], rsp\n" // rdi = old_rsp
+    "mov rsp, rsi\n"   // rsi = new_rsp
+    "mov rbx, [rsp + %c[rbx]]\n"
+    "mov rbp, [rsp + %c[rbp]]\n"
+    "mov r12, [rsp + %c[r12]]\n"
+    "mov r13, [rsp + %c[r13]]\n"
+    "mov r14, [rsp + %c[r14]]\n"
+    "mov r15, [rsp + %c[r15]]\n"
+    "add rsp, 0x30\n"
+    "mov rax, rdx\n"
+    "ret\n", // This will conveniently move us to the RIP we put at this stack entry.
+    [rbx] "i"(offsetof(struct task_frame, rbx)),
+    [rbp] "i"(offsetof(struct task_frame, rbp)),
+    [r12] "i"(offsetof(struct task_frame, r12)),
+    [r13] "i"(offsetof(struct task_frame, r13)),
+    [r14] "i"(offsetof(struct task_frame, r14)),
+    [r15] "i"(offsetof(struct task_frame, r15))
+);
+
+// Calls task_entry with the correct parameters.
+DEFINE_ASM_FUNC(
+    task_entry_thunk,
+    "mov rdi, rbx\n"
+    "mov rsi, r12\n"
+    "mov rdx, rax\n"
+    "jmp task_entry\n"
+);
 
 struct task* arch_sched_switch(struct task* from, struct task* to) {
     struct arch_percpu* cpu = percpu_ref(arch_data);
@@ -100,20 +107,6 @@ constexpr size_t FPU_MXCSR_OFFSET = 24;
 constexpr uint16_t FPU_DEFAULT_FCW = 0x37F;
 constexpr uint32_t FPU_DEFAULT_MXCSR = 0x1F80;
 
-// Calls task_entry with the correct parameters.
-[[__naked]]
-void task_entry_thunk() {
-    asm volatile(
-        "mov rdi, rbx\n"
-        "mov rsi, r12\n"
-        "mov rdx, rax\n"
-        "jmp task_entry"
-        :
-        :
-        : "memory", "rdi", "rsi", "rdx"
-    );
-}
-
 errno_t arch_task_init(arch_task_context_t* context, void* entry, uintptr_t arg0, uintptr_t stack_start, bool is_user) {
     struct arch_percpu* cpu = percpu_ref(arch_data);
 
@@ -133,12 +126,12 @@ errno_t arch_task_init(arch_task_context_t* context, void* entry, uintptr_t arg0
         if (!fpu_base)
             return ENOMEM;
         phys_t pages;
-        errno_t s = mem_phys_alloc(DIV_CEIL(fpu_size, arch_mem_page_size()), 0, &pages);
+        errno_t s = mem_phys_alloc(DIV_CEIL(fpu_size, arch_page_size()), 0, &pages);
         if (s) {
             vm_free(fpu_base, fpu_size);
             return s;
         }
-        for (size_t i = 0; i < fpu_size; i += arch_mem_page_size())
+        for (size_t i = 0; i < fpu_size; i += arch_page_size())
             pmap_map(&kernel_vma.pmap, fpu_base + i, pages + i, PTE_WRITE | PTE_READ, CACHE_WRITE_BACK);
         context->fpu_region = (void*)fpu_base;
         context->fpu_phys = pages;
@@ -163,7 +156,7 @@ void arch_task_fini(arch_task_context_t* context) {
     if (context->fpu_region == nullptr)
         return;
 
-    const size_t page_size = arch_mem_page_size();
+    const size_t page_size = arch_page_size();
     const size_t fpu_size = percpu_ref(arch_data)->fpu_size;
     const uintptr_t fpu_base = (uintptr_t)context->fpu_region;
     for (size_t i = 0; i < fpu_size; i += page_size)
@@ -190,29 +183,6 @@ void arch_context_init_user(arch_context_t* ctx, uintptr_t ip, uintptr_t sp) {
     };
 }
 
-[[__naked]]
-void arch_sched_preempt_disable() {
-    asm volatile(
-        "inc qword ptr gs:%c0\n"
-        "ret"
-        :
-        : "i"(offsetof(struct percpu, sched.preempt_level))
-    );
-}
-
-[[__naked]]
-bool arch_sched_preempt_enable() {
-    asm volatile(
-        "dec qword ptr gs:%c0\n"
-        "setz al\n"
-        "movzx eax, al\n"
-        "ret\n"
-        :
-        : "i"(offsetof(struct percpu, sched.preempt_level))
-        : "cc"
-    );
-}
-
 void arch_sched_kick(struct percpu* cpu) {
     if (!cpu->online)
         return;
@@ -232,12 +202,13 @@ void arch_sched_kick(struct percpu* cpu) {
     irq_unlock();
 }
 
-[[__naked]]
 void arch_sched_jump_to_context(arch_context_t* context) {
     asm volatile(
-        "mov rsp, rdi\n"
-        "jmp %0\n" ::"r"(interrupt_return)
+        "mov rsp, %0\n"
+        "jmp %1\n" ::"r"(context),
+        "r"(interrupt_return)
     );
+    __builtin_unreachable();
 }
 
 void arch_sched_jump_to_user(uintptr_t ip, uintptr_t sp, uintptr_t arg) {

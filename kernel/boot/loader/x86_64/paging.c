@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/pmap.h>
 #include <arch/x86_64/defs.h>
+#include <arch/x86_64/pmap.h>
 #include <boot/loader/loader.h>
 #include <boot/loader/x86_64/loader_arch.h>
 

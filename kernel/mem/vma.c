@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/mem.h>
 #include <lib/assert.h>
 #include <lib/errno.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/amap.h>
+#include <mem/layout.h>
 #include <mem/mman.h>
 #include <mem/page.h>
 #include <mem/pmap.h>
@@ -127,9 +127,9 @@ static void mapping_clone(
 }
 
 static void unmap_pages(struct vma* v, size_t start, size_t end) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     for (size_t p = start; p < end; p++)
-        pmap_unmap(&v->pmap, p * page_size);
+        pmap_unmap(&v->pmap, p * pgsz);
 }
 
 static void carve(struct vma* v, size_t start, size_t end, struct vma_mapping** spare, mapping_list_t* dead) {
@@ -190,12 +190,12 @@ static void split_at(struct vma* v, size_t page, struct vma_mapping** spare) {
 }
 
 static errno_t page_range(uintptr_t addr, size_t len, size_t* start, size_t* end) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     uintptr_t last;
-    if (addr % page_size != 0 || len == 0 || ckd_add(&last, addr, len - 1))
+    if (addr % pgsz != 0 || len == 0 || ckd_add(&last, addr, len - 1))
         return EINVAL;
-    *start = addr / page_size;
-    *end = last / page_size + 1;
+    *start = addr / pgsz;
+    *end = last / pgsz + 1;
     return 0;
 }
 
@@ -226,21 +226,21 @@ bool vma_range_mapped(struct vma* v, uintptr_t vaddr, size_t size) {
 }
 
 errno_t vma_find_free(struct vma* v, uintptr_t hint, size_t len, uintptr_t* out) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     if (len == 0)
         return EINVAL;
 
     uintptr_t base = MAX(hint, VMA_MMAP_BASE);
-    if (ckd_add(&base, base, page_size - 1))
+    if (ckd_add(&base, base, pgsz - 1))
         return ENOMEM;
-    size_t candidate = base / page_size;
-    const size_t num_pages = len / page_size + (len % page_size != 0);
+    size_t candidate = base / pgsz;
+    const size_t num_pages = len / pgsz + (len % pgsz != 0);
 
     rwlock_read_lock(&v->lock);
     while (true) {
         size_t candidate_end;
-        if (ckd_add(&candidate_end, candidate, num_pages) || candidate_end > SIZE_MAX / page_size ||
-            !arch_mem_addr_is_user(candidate_end * page_size - 1)) {
+        if (ckd_add(&candidate_end, candidate, num_pages) || candidate_end > SIZE_MAX / pgsz ||
+            !mem_addr_is_user(candidate_end * pgsz - 1)) {
             rwlock_read_unlock(&v->lock);
             return ENOMEM;
         }
@@ -256,7 +256,7 @@ errno_t vma_find_free(struct vma* v, uintptr_t hint, size_t len, uintptr_t* out)
     }
     rwlock_read_unlock(&v->lock);
 
-    *out = candidate * page_size;
+    *out = candidate * pgsz;
     return 0;
 }
 
@@ -297,14 +297,14 @@ static enum pte_flags prot_to_pte(struct vma* v, enum prot_flags prot) {
 }
 
 static void reprotect_pages(struct vma* v, const struct vma_mapping* m) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const bool none = !(m->prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
     const enum pte_flags flags = prot_to_pte(v, m->prot & ~PROT_WRITE);
     for (size_t p = m->start_page; p < m->end_page; p++) {
         if (none)
-            pmap_unmap(&v->pmap, p * page_size);
+            pmap_unmap(&v->pmap, p * pgsz);
         else
-            pmap_protect(&v->pmap, p * page_size, flags);
+            pmap_protect(&v->pmap, p * pgsz, flags);
     }
 }
 
@@ -347,13 +347,13 @@ errno_t vma_protect(struct vma* v, uintptr_t vaddr, size_t size, enum prot_flags
 }
 
 void vma_object_remove_page(struct vmo* object, uint64_t index, phys_t phys, bool protect) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     for (struct vma_mapping* m = tailq_first(&object->mappings); m; m = tailq_next(m, object_link)) {
         if (index < m->offset_page || index - m->offset_page >= m->end_page - m->start_page)
             continue;
 
         struct pmap* pmap = &m->vma->pmap;
-        const uintptr_t va = (m->start_page + (index - m->offset_page)) * page_size;
+        const uintptr_t va = (m->start_page + (index - m->offset_page)) * pgsz;
         phys_t current;
         if (pmap_extract(pmap, va, &current) || current != phys)
             continue;
@@ -392,7 +392,7 @@ static bool can_access(enum prot_flags prot, enum fault_kind kind) {
 }
 
 static errno_t enter(struct vma* v, size_t page, phys_t phys, enum pte_flags flags, enum cache_mode cache) {
-    const uintptr_t va = page * arch_mem_page_size();
+    const uintptr_t va = page * page_size();
     phys_t old;
     const bool replace = pmap_extract(&v->pmap, va, &old) == 0;
     errno_t status = pmap_map(&v->pmap, va, phys, flags, cache);
@@ -577,19 +577,19 @@ static errno_t fault(struct vma* v, size_t page, enum fault_kind kind, bool forc
 bool vma_page_fault(struct vma* v, const struct vma_fault_info* info) {
     const enum fault_kind kind = info->caused_by_write ? FAULT_WRITE : info->caused_by_fetch ? FAULT_EXEC : FAULT_READ;
     phys_t phys;
-    return fault(v, info->addr / arch_mem_page_size(), kind, false, &phys) == 0;
+    return fault(v, info->addr / page_size(), kind, false, &phys) == 0;
 }
 
 static errno_t write_range(struct vma* v, uintptr_t addr, const void* buf, size_t len) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     size_t progress = 0;
     while (progress < len) {
         const uintptr_t cur = addr + progress;
-        const size_t misalign = cur % page_size;
-        const size_t chunk = MIN(page_size - misalign, len - progress);
+        const size_t misalign = cur % pgsz;
+        const size_t chunk = MIN(pgsz - misalign, len - progress);
 
         phys_t phys;
-        errno_t status = fault(v, cur / page_size, FAULT_WRITE, true, &phys);
+        errno_t status = fault(v, cur / pgsz, FAULT_WRITE, true, &phys);
         if (status)
             return status;
 
@@ -652,8 +652,8 @@ errno_t vma_map(
     if (len == 0 || ckd_add(&end, addr, len))
         return ENOMEM;
 
-    const size_t page_size = arch_mem_page_size();
-    if (addr % page_size != vmo_offset % page_size)
+    const size_t pgsz = page_size();
+    if (addr % pgsz != vmo_offset % pgsz)
         return EINVAL;
 
     struct vma_mapping* mapping = mapping_alloc();
@@ -665,9 +665,9 @@ errno_t vma_map(
     }
 
     *mapping = (struct vma_mapping){
-        .start_page = addr / page_size,
-        .end_page = DIV_CEIL(end, page_size),
-        .offset_page = vmo_offset / page_size,
+        .start_page = addr / pgsz,
+        .end_page = DIV_CEIL(end, pgsz),
+        .offset_page = vmo_offset / pgsz,
         .object = vmo,
         .vma = vma,
         .prot = prot,
@@ -692,7 +692,7 @@ errno_t vma_map(
 }
 
 static bool protect_anons(struct vma* v, struct vma_mapping* m) {
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const size_t num_slots = m->end_page - m->start_page;
     const enum pte_flags flags = prot_to_pte(v, m->prot & ~PROT_WRITE);
     struct vm_anon* batch[32];
@@ -708,7 +708,7 @@ static bool protect_anons(struct vma* v, struct vma_mapping* m) {
         for (size_t i = 0; i < found; i++) {
             if (slots[i] - m->amap_offset >= num_slots)
                 goto done;
-            const uintptr_t va = (m->start_page + (slots[i] - m->amap_offset)) * page_size;
+            const uintptr_t va = (m->start_page + (slots[i] - m->amap_offset)) * pgsz;
             if (pmap_protect(&v->pmap, va, flags) == 0)
                 changed = true;
         }

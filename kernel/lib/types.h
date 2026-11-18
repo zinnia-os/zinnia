@@ -2,8 +2,8 @@
 
 #pragma once
 
-#include <arch/types.h>
 #include <lib/utils.h>
+#include <bits/types.h>
 #include <zinnia/types.h>
 
 ASSERT_TYPE(phys_t);

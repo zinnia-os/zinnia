@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/elf.h>
 #include <lib/assert.h>
 #include <lib/compiler.h>
 #include <lib/elf.h>
@@ -106,7 +105,7 @@ bool ksym_lookup(uintptr_t addr, const char** name, size_t* offset) {
     addr -= kernel_slide();
     for (size_t i = 0; i < num_syms(); i++) {
         const elf_sym_t* sym = &__ld_dynsym_start[i];
-        if (ARCH_ELF_ST_TYPE(sym->st_info) != STT_FUNC || sym->st_shndx == SHN_UNDEF)
+        if (ELF_ST_TYPE(sym->st_info) != STT_FUNC || sym->st_shndx == SHN_UNDEF)
             continue;
         if (addr >= sym->st_value && addr - sym->st_value < sym->st_size) {
             const char* sym_name = dynstr(sym->st_name);

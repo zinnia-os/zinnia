@@ -2,8 +2,10 @@
 
 #pragma once
 
+#include <stddef.h>
+
 static inline void arch_cpu_pause() {
     asm volatile("pause");
 }
 
-#define __ARCH_CACHE_LINE_SIZE 64
+constexpr size_t ARCH_CACHE_LINE_SIZE = 64;

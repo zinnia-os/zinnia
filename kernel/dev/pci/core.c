@@ -2,10 +2,9 @@
 
 #define LOG_FMT(fmt) "pci: " fmt
 
-#include <arch/irq.h>
-#include <arch/mem.h>
 #include <dev/pci/pci.h>
 #include <lib/init.h>
+#include <lib/irq.h>
 #include <lib/mmio.h>
 #include <lib/module.h>
 #include <lib/mutex.h>
@@ -14,6 +13,7 @@
 #include <lib/utils.h>
 #include <lib/vec.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <string.h>
@@ -213,20 +213,20 @@ errno_t pci_setup_msix(struct pci_device* dev, struct irq_line** out) {
     if (bar.type != PCI_BAR_MMIO32 && bar.type != PCI_BAR_MMIO64)
         return EINVAL;
 
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     const phys_t table_phys = bar.address + table_offset;
-    const phys_t page_base = ROUND_DOWN(table_phys, page_size);
+    const phys_t page_base = ROUND_DOWN(table_phys, pgsz);
     const size_t page_offset = table_phys - page_base;
-    const size_t map_len = ROUND_UP(page_offset + ENTRY_SIZE, page_size);
+    const size_t map_len = ROUND_UP(page_offset + ENTRY_SIZE, pgsz);
 
     uintptr_t vaddr = vm_alloc(map_len);
     if (!vaddr)
         return ENOMEM;
-    for (size_t i = 0; i < map_len; i += page_size) {
+    for (size_t i = 0; i < map_len; i += pgsz) {
         status = pmap_map(&kernel_vma.pmap, vaddr + i, page_base + i, PTE_READ | PTE_WRITE, CACHE_MMIO);
         if (status) {
             while (i) {
-                i -= page_size;
+                i -= pgsz;
                 pmap_unmap(&kernel_vma.pmap, vaddr + i);
             }
             vm_free(vaddr, map_len);
@@ -236,7 +236,7 @@ errno_t pci_setup_msix(struct pci_device* dev, struct irq_line** out) {
     void* entry = (void*)(vaddr + page_offset);
 
     struct msi_line* msi;
-    status = arch_irq_alloc_msi(&msi);
+    status = irq_alloc_msi(&msi);
     if (status)
         return status;
     irq_line_program(&msi->line, IRQ_TRIGGER_EDGE, IRQ_POLARITY_HIGH);
@@ -264,7 +264,7 @@ errno_t pci_setup_msi(struct pci_device* dev, struct irq_line** out) {
     pci_log(dev, "Using MSI for this device\n");
 
     struct msi_line* msi;
-    errno_t status = arch_irq_alloc_msi(&msi);
+    errno_t status = irq_alloc_msi(&msi);
     if (status)
         return status;
     irq_line_program(&msi->line, IRQ_TRIGGER_EDGE, IRQ_POLARITY_HIGH);

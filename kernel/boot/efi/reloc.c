@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/elf.h>
 #include <boot/efi/efi.h>
+#include <lib/elf.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,9 +35,9 @@ efi_status efistub_relocate(uintptr_t base, const elf64_dyn_t* dynamic) {
     for (size_t off = 0; rela && off + rela_ent <= rela_size; off += rela_ent) {
         const elf64_rela_t* r = (const elf64_rela_t*)(rela + off);
         const uint32_t type = ELF64_R_TYPE(r->r_info);
-        if (type == ARCH_R_NONE)
+        if (type == ELF_R_NONE)
             continue;
-        if (type != ARCH_R_RELATIVE)
+        if (type != ELF_R_RELATIVE)
             return EFI_LOAD_ERROR;
         *(uint64_t*)(base + r->r_offset) = base + r->r_addend;
     }

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <arch/elf.h>
 #include <fs/exec/exec.h>
 #include <fs/vfs.h>
 #include <lib/assert.h>
@@ -12,7 +11,9 @@
 #include <lib/sched.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/layout.h>
 #include <mem/mman.h>
+#include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <mem/vmo.h>
@@ -80,18 +81,18 @@ static errno_t elf_map(
         return EINVAL;
     if (ehdr.e_ident[EI_VERSION] != EV_CURRENT)
         return EINVAL;
-    if (ehdr.e_ident[EI_CLASS] != ARCH_ELF_CLASS)
+    if (ehdr.e_ident[EI_CLASS] != ELF_CLASS)
         return EINVAL;
-    if (ehdr.e_ident[EI_DATA] != ARCH_ELF_DATA)
+    if (ehdr.e_ident[EI_DATA] != ELF_DATA)
         return EINVAL;
-    if (ehdr.e_machine != ARCH_ELF_MACHINE)
+    if (ehdr.e_machine != ELF_MACHINE)
         return EINVAL;
     if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN)
         return EINVAL;
 
     const uintptr_t base = ehdr.e_type == ET_DYN ? dyn_base : 0;
     uintptr_t entry;
-    if (ckd_add(&entry, ehdr.e_entry, base) || !arch_mem_addr_is_user(entry))
+    if (ckd_add(&entry, ehdr.e_entry, base) || !mem_addr_is_user(entry))
         return ENOEXEC;
 
     const size_t phdrs_size = (size_t)ehdr.e_phnum * ehdr.e_phentsize;
@@ -101,7 +102,7 @@ static errno_t elf_map(
     if (ckd_add(&phdrs_end, ehdr.e_phoff, phdrs_size))
         return ENOEXEC;
 
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
     uintptr_t phdr_addr = 0;
 
     for (size_t i = 0; i < ehdr.e_phnum; i++) {
@@ -132,7 +133,7 @@ static errno_t elf_map(
             uintptr_t vaddr, seg_end;
             if (ckd_add(&vaddr, phdr.p_vaddr, base) || ckd_add(&seg_end, vaddr, phdr.p_memsz))
                 return ENOEXEC;
-            if (!arch_mem_addr_is_user(vaddr) || !arch_mem_addr_is_user(seg_end - 1))
+            if (!mem_addr_is_user(vaddr) || !mem_addr_is_user(seg_end - 1))
                 return ENOEXEC;
 
             if (phdr.p_align > 1 && phdr.p_offset % phdr.p_align != phdr.p_vaddr % phdr.p_align)
@@ -149,10 +150,10 @@ static errno_t elf_map(
             if (phdr.p_flags & PF_X)
                 prot |= PROT_EXEC;
 
-            const uintptr_t misalign = vaddr & (page_size - 1);
+            const uintptr_t misalign = vaddr & (pgsz - 1);
             const uintptr_t map_address = vaddr - misalign;
-            const size_t backed_map_size = (phdr.p_filesz + misalign + page_size - 1) & ~(page_size - 1);
-            const size_t total_map_size = (phdr.p_memsz + misalign + page_size - 1) & ~(page_size - 1);
+            const size_t backed_map_size = (phdr.p_filesz + misalign + pgsz - 1) & ~(pgsz - 1);
+            const size_t total_map_size = (phdr.p_memsz + misalign + pgsz - 1) & ~(pgsz - 1);
 
             if (backed_map_size) {
                 err = vma_map(space, obj, map_address, backed_map_size, prot, 0, phdr.p_offset - misalign);
@@ -174,8 +175,8 @@ static errno_t elf_map(
             }
 
             const uintptr_t file_end = vaddr + phdr.p_filesz;
-            if (phdr.p_memsz > phdr.p_filesz && file_end % page_size != 0) {
-                const uintptr_t zero_end = MIN(ROUND_UP(file_end, page_size), seg_end);
+            if (phdr.p_memsz > phdr.p_filesz && file_end % pgsz != 0) {
+                const uintptr_t zero_end = MIN(ROUND_UP(file_end, pgsz), seg_end);
                 err = vma_zero(space, file_end, zero_end - file_end);
                 if (err)
                     return err;
@@ -220,9 +221,9 @@ static errno_t elf_load(struct process* proc, struct exec_info* info, uintptr_t*
     if (err)
         return err;
 
-    const size_t page_size = arch_mem_page_size();
+    const size_t pgsz = page_size();
 
-    const uintptr_t highest = ((uintptr_t)1 << (pmap_high_shift() - 1)) - page_size;
+    const uintptr_t highest = ((uintptr_t)1 << (pmap_high_shift() - 1)) - pgsz;
     const size_t stack_size = 2 * 1024 * 1024; // 2MiB
     const uintptr_t stack_start = highest - stack_size;
 
@@ -315,7 +316,7 @@ static errno_t elf_load(struct process* proc, struct exec_info* info, uintptr_t*
     // Write auxiliary values.
     WRITE_AUXV(AT_NULL, 0);
     WRITE_AUXV(AT_SECURE, 0);
-    WRITE_AUXV(AT_PAGESZ, page_size);
+    WRITE_AUXV(AT_PAGESZ, pgsz);
     WRITE_AUXV(AT_PHNUM, exe.phnum);
     WRITE_AUXV(AT_PHENT, exe.phent);
     WRITE_AUXV(AT_ENTRY, exe.entry);
