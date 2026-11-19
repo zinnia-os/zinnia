@@ -6,5 +6,6 @@ DEFINE_ASM_FUNC_SECTION(
     _start,
     ".init.text",
     "lea rsp, [rip + __ld_stack_top]\n"
+    "push 0\n" // Stop unwinding here.
     "jmp kernel_entry\n"
 );

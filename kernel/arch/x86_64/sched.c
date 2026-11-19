@@ -119,6 +119,9 @@ errno_t arch_task_init(arch_task_context_t* context, void* entry, uintptr_t arg0
     frame->rip = (uint64_t)task_entry_thunk;
     context->rsp = (uint64_t)frame;
 
+    // Zero the return address to stop backtraces.
+    *(uint64_t*)(stack_start - sizeof(uint64_t)) = 0;
+
     if (is_user) {
         // Allocate FPU space.
         const size_t fpu_size = cpu->fpu_size;

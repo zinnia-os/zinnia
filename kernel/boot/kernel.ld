@@ -8,6 +8,7 @@ PHDRS {
     data    PT_LOAD     FLAGS(6);
     dynamic PT_DYNAMIC  FLAGS(6);
     percpu  PT_LOAD     FLAGS(6);
+    eh_frame PT_GNU_EH_FRAME FLAGS(4);
     cmdline 0x60000005;
     boot    0x60000008;
 }
@@ -58,6 +59,19 @@ SECTIONS
         __ld_ktest_end = .;
 
         *(.got .got.*)
+
+    } :rodata
+
+    .eh_frame_hdr : {
+        __ld_eh_frame_hdr_start = .;
+        KEEP(*(.eh_frame_hdr))
+        __ld_eh_frame_hdr_end = .;
+    } :rodata :eh_frame
+
+    .eh_frame : {
+        __ld_eh_frame_start = .;
+        *(.eh_frame .eh_frame.*)
+        __ld_eh_frame_end = .;
 
         __ld_rodata_end = .;
     } :rodata
@@ -117,8 +131,6 @@ SECTIONS
     /DISCARD/ :
     {
         *(.comment*)
-        *(.eh_frame*)
-        *(.rel.eh_frame*)
         *(.gcc_except_table*)
         *(.note.gnu.property)
         *(.interp)

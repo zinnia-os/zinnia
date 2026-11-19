@@ -40,6 +40,7 @@ DEFINE_ASM_FUNC(
     "    push r14\n"
     "    push r15\n"
     "    xor rbp, rbp\n"
+    "    .cfi_undefined rip\n"
     "    mov rdi, rsp\n" // SysV ABI first argument.
     "    sti\n"
     "    call syscall_dispatch\n" // Call syscall handler.

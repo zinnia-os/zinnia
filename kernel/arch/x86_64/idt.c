@@ -155,6 +155,9 @@ DEFINE_ASM_FUNC(
     "i"(offsetof(struct gdt, kernel_code64))
 );
 
+#define CTX_CFI(reg)         ".cfi_offset " #reg ", %c[cfi_" #reg "]\n"
+#define CTX_CFI_OPERAND(reg) [cfi_##reg] "i"((long)offsetof(arch_context_t, reg) - (long)sizeof(arch_context_t))
+
 DEFINE_ASM_FUNC(
     interrupt_stub_internal,
     // Load the kernel GS base if we're coming from user space.
@@ -180,13 +183,52 @@ DEFINE_ASM_FUNC(
     "cld\n"
     // Zero out the base pointer since we can't trust it.
     "xor rbp, rbp\n"
+    // clang-format off
+    ".cfi_signal_frame\n"
+    ".cfi_def_cfa rsp, %c[ctx_size]\n"
+    CTX_CFI(rax)
+    CTX_CFI(rbx)
+    CTX_CFI(rcx)
+    CTX_CFI(rdx)
+    CTX_CFI(rsi)
+    CTX_CFI(rdi)
+    CTX_CFI(rbp)
+    CTX_CFI(r8)
+    CTX_CFI(r9)
+    CTX_CFI(r10)
+    CTX_CFI(r11)
+    CTX_CFI(r12)
+    CTX_CFI(r13)
+    CTX_CFI(r14)
+    CTX_CFI(r15)
+    CTX_CFI(rsp)
+    CTX_CFI(rip)
+    // clang-format on
     // Load the frame as first argument.
     "mov rdi, rsp\n"
     "call %c2\n"
     "jmp interrupt_return\n",
     "i"(CS_OFFSET),
     "i"(offsetof(struct gdt, kernel_code64)),
-    "i"(interrupt_handler)
+    "i"(interrupt_handler),
+    [ctx_size] "i"(sizeof(arch_context_t)),
+    CTX_CFI_OPERAND(rax),
+    CTX_CFI_OPERAND(rbx),
+    CTX_CFI_OPERAND(rcx),
+    CTX_CFI_OPERAND(rdx),
+    CTX_CFI_OPERAND(rsi),
+    CTX_CFI_OPERAND(rdi),
+    CTX_CFI_OPERAND(rbp),
+    CTX_CFI_OPERAND(r8),
+    CTX_CFI_OPERAND(r9),
+    CTX_CFI_OPERAND(r10),
+    CTX_CFI_OPERAND(r11),
+    CTX_CFI_OPERAND(r12),
+    CTX_CFI_OPERAND(r13),
+    CTX_CFI_OPERAND(r14),
+    CTX_CFI_OPERAND(r15),
+    CTX_CFI_OPERAND(rsp),
+    CTX_CFI_OPERAND(rip)
 );
 
 extern void (*const interrupt_stubs[256])();

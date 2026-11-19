@@ -31,7 +31,7 @@ common_includes = [
     uapi_includes,
 ]
 
-kernel_c_args = []
+kernel_c_args = ['-fasynchronous-unwind-tables']
 
 kernel_lds = meson.current_source_dir() / 'boot' / 'kernel.ld'
 kernel_link_args = [
@@ -40,6 +40,7 @@ kernel_link_args = [
     '-Wl,-shared',
     '-Wl,-Bsymbolic',
     '-Wl,-soname,zinnia',
+    '-Wl,--eh-frame-hdr',
 ]
 
 kernel_includes = []
@@ -123,8 +124,7 @@ foreach name, sources : modular_modules
         link_args: [
             common_link_args,
             '-Wl,-shared',
-            '-T' + module_lds,
-            kernel.full_path(),
+            '-T' + module_lds, kernel.full_path(),
         ],
         link_depends: [module_lds, kernel],
         include_directories: [common_includes, kernel_includes],
