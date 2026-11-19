@@ -231,8 +231,8 @@ struct input_absinfo {
 #define EVIOCGSW(len)      __IOC(__IOC_OUT, 'E', 0x1B, len)
 #define EVIOCGBIT(ev, len) __IOC(__IOC_OUT, 'E', 0x20 + (ev), len)
 #define EVIOCGABS(abs)     __IOR('E', 0x40 + (abs), struct input_absinfo)
-#define EVIOCGRAB          __IOW('E', 0x90, int)
-#define EVIOCREVOKE        __IOW('E', 0x91, int)
+#define EVIOCGRAB          __IOWINT('E', 0x90)
+#define EVIOCREVOKE        __IOWINT('E', 0x91)
 #define EVIOCSCLOCKID      __IOW('E', 0xA0, int)
 
 #endif
