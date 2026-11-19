@@ -48,8 +48,8 @@
     DEFINE_ASM( \
         section, \
         "ax", \
-        ".global " #name "\n.type " #name ", @function\n" #name ":\n" body ".size " #name ", . - " #name \
-        "\n" __VA_OPT__(, ) __VA_ARGS__ \
+        ".global " #name "\n.type " #name ", @function\n" #name ":\n.cfi_startproc\n" body \
+        ".cfi_endproc\n.size " #name ", . - " #name "\n" __VA_OPT__(, ) __VA_ARGS__ \
     )
 
 #define DEFINE_ASM_FUNC(name, body, ...) DEFINE_ASM_FUNC_SECTION(name, ".text." #name, body __VA_OPT__(, ) __VA_ARGS__)
