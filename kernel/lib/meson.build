@@ -35,6 +35,7 @@ kernel_sources += files(
     'string.c',
     'timer.c',
     'turnstile.c',
+    'unwind.c',
     'workqueue.c',
 )
 

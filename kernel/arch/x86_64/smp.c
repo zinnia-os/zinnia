@@ -197,6 +197,12 @@ static bool start_ap(phys_t trampoline, uint32_t temp_cr3, uint32_t lapic_id) {
         return false;
     }
 
+    cpu->boot_stack = (struct stack){
+        .base = (uintptr_t)HHDM_PTR(stack),
+        .phys = stack,
+        .size = AP_BOOT_STACK_SIZE,
+    };
+
     log("Starting CPU %zu\n", cpu->id);
 
     memcpy(HHDM_PTR(trampoline), smp_trampoline_start, trampoline_size);

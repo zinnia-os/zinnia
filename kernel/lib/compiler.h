@@ -17,6 +17,7 @@
 #define __unused            gnu::unused
 #define __format(like, ...) gnu::format(like, __VA_ARGS__)
 #define __force_inline      gnu::always_inline
+#define __no_inline         gnu::noinline
 #define __visibility        gnu::visibility
 #define __pure              gnu::pure
 

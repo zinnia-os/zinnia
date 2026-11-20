@@ -6,6 +6,7 @@
 #include <lib/panic.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
+#include <lib/unwind.h>
 #include <mem/alloc.h>
 #include <mem/page.h>
 #include <stdarg.h>
@@ -13,32 +14,45 @@
 
 #define panic_log(msg, ...) kprintf("[    !!!!    ] \e[31m" msg "\e[0m", ##__VA_ARGS__)
 
-static void print_backtrace() {
-    constexpr size_t max_depth = 32;
-    void** fp = __builtin_frame_address(0);
+// ID of the CPU that is currently printing a backtrace.
+static _Atomic(size_t) backtrace_cpu = SIZE_MAX;
+
+[[__no_inline]]
+static void print_backtrace(size_t cpu_id) {
+    constexpr size_t max_depth = 64;
+
+    // If the unwinder faulted on this CPU, don't try again or we'd recurse forever.
+    if (atomic_load(&backtrace_cpu, ATOMIC_RELAXED) == cpu_id) {
+        panic_log("Backtrace: <fault while unwinding>\n");
+        return;
+    }
+    atomic_store(&backtrace_cpu, cpu_id, ATOMIC_RELAXED);
 
     panic_log("Backtrace:\n");
-    for (size_t i = 0; i < max_depth; i++) {
-        if (!fp || (uintptr_t)fp < mem_hhdm_base || (uintptr_t)fp % alignof(void*))
-            break;
 
-        void* ret = fp[1];
-        if (!ret)
-            break;
+    struct unwind_frame frame;
+    unwind_init(&frame);
 
+    // Skip the frame of this function.
+    for (size_t i = 0; i < max_depth && unwind_step(&frame); i++) {
+        const uintptr_t lookup = unwind_lookup_pc(&frame);
         const char* name;
         size_t offset;
-        // The return address may already point past the end of a noreturn call.
-        if (ksym_lookup((uintptr_t)ret - 1, &name, &offset))
-            panic_log("  #%zu [%p] %s+0x%zx\n", i, ret, name, offset + 1);
-        else
-            panic_log("  #%zu [%p] <\?\?\?>\n", i, ret);
-
-        void** next = fp[0];
-        if (next <= fp)
-            break;
-        fp = next;
+        if (ksym_lookup(lookup, &name, &offset)) {
+            panic_log(
+                "  #%zu [%p] %s+0x%zx%s\n",
+                i,
+                (void*)frame.pc,
+                name,
+                offset + (frame.pc - lookup),
+                frame.exact_pc ? " (interrupted)" : ""
+            );
+        } else {
+            panic_log("  #%zu [%p] <\?\?\?>%s\n", i, (void*)frame.pc, frame.exact_pc ? " (interrupted)" : "");
+        }
     }
+
+    atomic_store(&backtrace_cpu, SIZE_MAX, ATOMIC_RELAXED);
 }
 
 [[noreturn]]
@@ -65,7 +79,7 @@ void panic(const char* msg, ...) {
 
     kprintf("\e[0m");
 
-    print_backtrace();
+    print_backtrace(cpu->id);
     panic_log("End of panic message\n");
 
     initgraph_panic();

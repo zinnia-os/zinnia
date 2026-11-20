@@ -5,6 +5,7 @@
 #include <lib/compiler.h>
 #include <lib/initgraph.h>
 #include <lib/sched.h>
+#include <mem/stack.h>
 #include <mem/usercopy.h>
 #include <bits/percpu.h>
 #include <stddef.h>
@@ -39,6 +40,7 @@ struct percpu {
     uintptr_t kernel_stack; // The kernel mode stack.
     uintptr_t user_stack;   // The user mode stack.
     struct scheduler sched; // Scheduler information.
+    struct stack boot_stack;
 };
 
 extern uint8_t __ld_percpu_start[];
