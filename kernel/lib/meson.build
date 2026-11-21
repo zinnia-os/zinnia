@@ -16,6 +16,7 @@ kernel_sources += files(
     'lfqueue.c',
     'lfstack.c',
     'main.c',
+    'md5.c',
     'module.c',
     'mutex.c',
     'panic.c',
