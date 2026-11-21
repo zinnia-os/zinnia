@@ -18,6 +18,7 @@ kernel_sources += files(
     'rtc.c',
     'sched.c',
     'serial.c',
+    'signal.c',
     'smp.c',
     'start.c',
     'syscall.c',
