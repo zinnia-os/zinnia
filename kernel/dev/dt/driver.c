@@ -9,6 +9,8 @@
 #include <lib/vec.h>
 #include <mem/alloc.h>
 #include <mem/page.h>
+#include <mem/pmap.h>
+#include <mem/vma.h>
 #include <string.h>
 
 static struct fdt tree;
@@ -31,6 +33,49 @@ static const struct fdt_match* fdt_match_table(
             return &table[i];
     }
     return nullptr;
+}
+
+ssize_t fdt_node_reg_index(struct fdt_node node, const char* name) {
+    const struct fdt_prop names = fdt_property(node, "reg-names");
+    const char* str = names.data;
+    const size_t name_len = strlen(name);
+    ssize_t index = 0;
+    for (size_t off = 0; names.tree && off < names.length; index++) {
+        const size_t len = strnlen(str + off, names.length - off);
+        if (len == name_len && !memcmp(str + off, name, len))
+            return index;
+        off += len + 1;
+    }
+    return -1;
+}
+
+errno_t fdt_node_map_reg(struct fdt_node node, size_t index, void** out, size_t* out_size) {
+    phys_t base;
+    size_t size;
+    if (!fdt_node_reg(node, index, &base, &size))
+        return EINVAL;
+
+    const size_t pgsz = page_size();
+    const phys_t start = ROUND_DOWN(base, pgsz);
+    const size_t length = ROUND_UP(base + MAX(size, 1), pgsz) - start;
+
+    const uintptr_t vaddr = vm_alloc(length);
+    if (!vaddr)
+        return ENOMEM;
+    for (size_t off = 0; off < length; off += pgsz) {
+        errno_t status = pmap_map(&kernel_vma.pmap, vaddr + off, start + off, PTE_READ | PTE_WRITE, CACHE_MMIO);
+        if (status) {
+            for (size_t undo = 0; undo < off; undo += pgsz)
+                pmap_unmap(&kernel_vma.pmap, vaddr + undo);
+            vm_free(vaddr, length);
+            return status;
+        }
+    }
+
+    *out = (void*)(vaddr + (base - start));
+    if (out_size)
+        *out_size = size;
+    return 0;
 }
 
 errno_t fdt_driver_register(struct fdt_driver* driver) {

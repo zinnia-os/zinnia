@@ -72,6 +72,13 @@ struct fdt_node fdt_next_node(struct fdt_node node);
 bool fdt_node_is_compatible(struct fdt_node node, const char* compatible);
 bool fdt_node_reg(struct fdt_node node, size_t index, phys_t* addr, size_t* size);
 
+// Returns the index of `name` in the node's "reg-names" property.
+// Returns -1 if it doesn't exist.
+ssize_t fdt_node_reg_index(struct fdt_node node, const char* name);
+
+// Maps the `index`th "reg" of a node as device memory.
+errno_t fdt_node_map_reg(struct fdt_node node, size_t index, void** out, size_t* out_size);
+
 struct fdt_driver {
     const char* name;
 
