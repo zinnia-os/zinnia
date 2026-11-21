@@ -82,8 +82,8 @@ static inline struct sys_ret sys_close(int fd) {
     return syscall3(__NR_close, (uintptr_t)fd, 0, 0);
 }
 
-static inline struct sys_ret sys_pread(int fd, void* buf, size_t len, uint64_t off) {
-    return syscall4(__NR_pread, (uintptr_t)fd, (uintptr_t)buf, len, off);
+static inline struct sys_ret sys_preadv(int fd, const void* iov, size_t count, uint64_t off) {
+    return syscall4(__NR_preadv, (uintptr_t)fd, (uintptr_t)iov, count, off);
 }
 
 static inline struct sys_ret sys_fstat(int fd, void* buf) {
@@ -110,8 +110,8 @@ static inline struct sys_ret sys_msync(void* addr, size_t len, int flags) {
     return syscall3(__NR_msync, (uintptr_t)addr, len, (uintptr_t)flags);
 }
 
-static inline struct sys_ret sys_pwrite(int fd, const void* buf, size_t len, uint64_t off) {
-    return syscall4(__NR_pwrite, (uintptr_t)fd, (uintptr_t)buf, len, off);
+static inline struct sys_ret sys_pwritev(int fd, const void* iov, size_t count, uint64_t off) {
+    return syscall4(__NR_pwritev, (uintptr_t)fd, (uintptr_t)iov, count, off);
 }
 
 static inline struct sys_ret sys_readv(int fd, const void* iov, size_t count) {

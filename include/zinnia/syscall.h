@@ -30,9 +30,9 @@
 #define __NR_getppid          24
 #define __NR_waitid           25
 #define __NR_waitpid          26
-#define __NR_pread            27
+#define __NR_preadv           27
 #define __NR_readv            28
-#define __NR_pwrite           29
+#define __NR_pwritev          29
 #define __NR_writev           30
 #define __NR_seek             31
 #define __NR_ioctl            32

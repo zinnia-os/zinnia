@@ -364,14 +364,21 @@ static struct syscall_ret do_io(int fd, iovec_t* iovecs, size_t count, bool writ
     return ret;
 }
 
-static struct syscall_ret do_iov(int fd, const __user iovec_t* iov, size_t count, bool write) {
+static struct syscall_ret do_iov(
+    int fd,
+    const __user iovec_t* iov,
+    size_t count,
+    bool write,
+    bool positioned,
+    uint64_t offset
+) {
     struct syscall_ret ret = {};
 
     iovec_t* iovecs;
     ret.error = copy_iovecs(iov, count, &iovecs);
     if (ret.error)
         return ret;
-    ret = do_io(fd, iovecs, count, write, false, 0);
+    ret = do_io(fd, iovecs, count, write, positioned, offset);
     mem_free(iovecs, MAX(count, 1) * sizeof(iovec_t));
     return ret;
 }
@@ -389,22 +396,20 @@ static struct syscall_ret do_sync(int fd, bool data_only) {
     return ret;
 }
 
-struct syscall_ret sys_pread(int fd, __user void* buf, size_t len, uint64_t offset) {
-    iovec_t iov = {.iov_base = buf, .iov_len = len};
-    return do_io(fd, &iov, 1, false, true, offset);
+struct syscall_ret sys_preadv(int fd, const __user iovec_t* iov, size_t count, uint64_t offset) {
+    return do_iov(fd, iov, count, false, true, offset);
 }
 
 struct syscall_ret sys_readv(int fd, const __user iovec_t* iov, size_t count) {
-    return do_iov(fd, iov, count, false);
+    return do_iov(fd, iov, count, false, false, 0);
 }
 
-struct syscall_ret sys_pwrite(int fd, const __user void* buf, size_t len, uint64_t offset) {
-    iovec_t iov = {.iov_base = (__user void*)buf, .iov_len = len};
-    return do_io(fd, &iov, 1, true, true, offset);
+struct syscall_ret sys_pwritev(int fd, const __user iovec_t* iov, size_t count, uint64_t offset) {
+    return do_iov(fd, iov, count, true, true, offset);
 }
 
 struct syscall_ret sys_writev(int fd, const __user iovec_t* iov, size_t count) {
-    return do_iov(fd, iov, count, true);
+    return do_iov(fd, iov, count, true, false, 0);
 }
 
 struct syscall_ret sys_openat(int dirfd, const __user char* path, enum open_flags flags, mode_t mode) {
