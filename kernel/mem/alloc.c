@@ -2,7 +2,6 @@
 
 #include <lib/assert.h>
 #include <lib/atomic.h>
-#include <lib/clock.h>
 #include <lib/compiler.h>
 #include <lib/cpu.h>
 #include <lib/mutex.h>
@@ -666,7 +665,7 @@ static void mem_update_fn(struct work* work) {
     }
     mutex_unlock(&mem_cache_lock);
 
-    timer_arm(&update_timer, clock_get_elapsed_ns() + UPDATE_INTERVAL_NS);
+    timer_arm_after(&update_timer, UPDATE_INTERVAL_NS);
 }
 
 static void mem_update_tick(struct timer* timer) {
@@ -677,7 +676,7 @@ static void mem_update_tick(struct timer* timer) {
 static void mem_cache_timers(struct boot_info*) {
     work_init(&update_work, mem_update_fn);
     timer_init(&update_timer, mem_update_tick);
-    timer_arm(&update_timer, clock_get_elapsed_ns() + UPDATE_INTERVAL_NS);
+    timer_arm_after(&update_timer, UPDATE_INTERVAL_NS);
 }
 INIT_TASK(mem_cache_timers_stage, "mem.cache_timers", mem_cache_timers);
 INIT_DEPENDS(mem_cache_timers_stage, mem_cache_stage);

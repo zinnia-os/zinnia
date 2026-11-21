@@ -86,6 +86,10 @@ void timer_arm(struct timer* timer, uint64_t deadline_ns) {
     irq_unlock();
 }
 
+void timer_arm_after(struct timer* timer, uint64_t delay_ns) {
+    timer_arm(timer, clock_get_elapsed_ns() + delay_ns);
+}
+
 bool timer_cancel(struct timer* timer) {
     bool removed = dequeue(timer);
     while (atomic_load(&timer->running, ATOMIC_ACQUIRE))

@@ -19,6 +19,7 @@ struct timer {
 
 void timer_init(struct timer* timer, void (*func)(struct timer* timer));
 void timer_arm(struct timer* timer, uint64_t deadline_ns);
+void timer_arm_after(struct timer* timer, uint64_t delay_ns);
 bool timer_cancel(struct timer* timer);
 
 void timer_cpu_init();

@@ -145,7 +145,7 @@ void epoch_call(struct epoch_head* head, void (*func)(struct epoch_head* head)) 
     if ((old == 0 || old % EPOCH_BATCH == 0) && atomic_load(&reclaimer, ATOMIC_ACQUIRE)) {
         if (!cpu->kick.func)
             timer_init(&cpu->kick, kick_tick);
-        timer_arm(&cpu->kick, clock_get_elapsed_ns());
+        timer_arm_after(&cpu->kick, 0);
     }
     irq_unlock();
 }
@@ -242,7 +242,7 @@ static void reclaimer_fn(uintptr_t) {
 
         atomic_store(&reclaimer_idle, true, ATOMIC_SEQ_CST);
         if (atomic_load(&pending, ATOMIC_SEQ_CST))
-            timer_arm(&poll_timer, clock_get_elapsed_ns() + EPOCH_POLL_NS);
+            timer_arm_after(&poll_timer, EPOCH_POLL_NS);
         sched_block(&percpu_get()->sched);
     }
 }
