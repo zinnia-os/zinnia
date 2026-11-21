@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <boot/efi/stub.h>
+#include <lib/mmio.h>
 #include <string.h>
 
 constexpr size_t MEM_MAP_SLACK = 64;
@@ -90,8 +91,17 @@ static enum phys_mem_usage convert_mem_type(uint32_t type) {
     }
 }
 
+static struct efi_simple_text_output_protocol* con_out;
+
+static void stub_log(const char16* msg) {
+    if (con_out)
+        con_out->output_string(con_out, msg);
+}
+
 efi_status efi_main(efi_handle image_handle, struct efi_system_table* st) {
     bs = st->boot_services;
+    con_out = st->con_out;
+    stub_log(u"Entering EFI stub\r\n");
 
     // Check if we support this configuration.
     if (!arch_check_cpu())
@@ -103,8 +113,11 @@ efi_status efi_main(efi_handle image_handle, struct efi_system_table* st) {
         return status;
 
     struct kernel_image kernel;
-    if (!loader_load_kernel(&kernel, "EFISTUB"))
+    if (!loader_load_kernel(&kernel, "EFISTUB")) {
+        stub_log(u"Failed to load the kernel image\r\n");
         return EFI_LOAD_ERROR;
+    }
+    stub_log(u"Kernel image loaded\r\n");
     struct boot_info* info = kernel.info;
 
     // Reserve room for the memory map.
@@ -278,6 +291,31 @@ efi_status efi_main(efi_handle image_handle, struct efi_system_table* st) {
             info->rsdp = (uint64_t)table->vendor_table;
     }
 
+    // Find the device tree blob.
+    for (size_t i = 0; i < st->number_of_table_entries; i++) {
+        const struct efi_configuration_table* table = &st->configuration_table[i];
+        if (memcmp(&table->vendor_guid, &EFI_DTB_TABLE_GUID, sizeof(struct efi_guid)))
+            continue;
+
+        const uint8_t* blob = table->vendor_table;
+        const uint32_t magic = mmio_bswap(*(const uint32_t*)blob);
+        const uint32_t size = mmio_bswap(*(const uint32_t*)(blob + 4));
+        if (magic != 0xd00d'feed || size < 40)
+            break;
+
+        uint64_t copy;
+        if (!loader_alloc(PHYS_RECLAIMABLE, size, &copy))
+            return EFI_OUT_OF_RESOURCES;
+
+        // Copy it to memory owned by us. Firmware may place it in reclaimable memory.
+        memcpy(loader_ptr(copy), blob, size);
+        info->dtb = copy;
+        info->dtb_size = size;
+        break;
+    }
+    stub_log(info->dtb ? u"Found a device tree\r\n" : u"No device tree found\r\n");
+    stub_log(info->cmdline[0] ? u"Using a command line\r\n" : u"No command line given\r\n");
+
     // Map everything up to the highest non-reserved address.
     map_size = map_capacity;
     status = bs->get_memory_map(&map_size, (struct efi_memory_descriptor*)map, &map_key, &desc_size, &desc_version);
@@ -294,6 +332,8 @@ efi_status efi_main(efi_handle image_handle, struct efi_system_table* st) {
     uint64_t root;
     if (!loader_page_tables(&kernel, top, (uint64_t)arch_enter_kernel, &root))
         return EFI_OUT_OF_RESOURCES;
+
+    stub_log(u"Exiting boot services...\r\n");
 
     // Exit boot services.
     for (size_t attempt = 0;; attempt++) {
