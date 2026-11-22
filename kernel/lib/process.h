@@ -78,6 +78,7 @@ struct process {
 
     struct process_signals signals;
     struct process_rlimit limit_nofile;
+    struct process_rlimit limit_core;
 
     mutex_t files_lock;
     struct fd_table files;

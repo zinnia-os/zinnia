@@ -308,6 +308,7 @@ static errno_t process_alloc(struct process* parent, struct process** out) {
         proc->umask = 022;
         proc->pgid = proc->pid;
         rlimit_init(&proc->limit_nofile, PROCESS_DEFAULT_FDS, PROCESS_MAX_FDS);
+        rlimit_init(&proc->limit_core, 0, __RLIM_INFINITY);
         signal_process_init(proc, nullptr);
         *out = proc;
         return 0;
@@ -319,6 +320,7 @@ static errno_t process_alloc(struct process* parent, struct process** out) {
     proc->umask = parent->umask;
     proc->nice = parent->nice;
     rlimit_init(&proc->limit_nofile, atomic_load(&parent->limit_nofile.cur, ATOMIC_RELAXED), parent->limit_nofile.max);
+    rlimit_init(&proc->limit_core, atomic_load(&parent->limit_core.cur, ATOMIC_RELAXED), parent->limit_core.max);
     const errno_t status = ident_copy(&proc->identity, &parent->identity);
     mutex_unlock(&parent->lock);
     if (status) {

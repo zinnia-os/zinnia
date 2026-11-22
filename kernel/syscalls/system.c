@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <fs/ident.h>
+#include <lib/atomic.h>
 #include <lib/clock.h>
 #include <lib/futex.h>
 #include <lib/percpu.h>
@@ -17,6 +18,7 @@
 #include <stdckdint.h>
 #include <stdint.h>
 #include <string.h>
+#include <zinnia/resource.h>
 #include <zinnia/time.h>
 #include <zinnia/utsname.h>
 
@@ -41,6 +43,17 @@ static struct __utsname uname_buf = {
     .machine = ZINNIA_ARCH,
     .domainname = "(none)",
 };
+
+static struct process_rlimit* rlimit_of(struct process* proc, int resource) {
+    switch (resource) {
+    case __RLIMIT_NOFILE:
+        return &proc->limit_nofile;
+    case __RLIMIT_CORE:
+        return &proc->limit_core;
+    default:
+        return nullptr;
+    }
+}
 
 static errno_t read_timespec_ns(const __user struct __timespec* user, uint64_t* out) {
     struct __timespec ts;
@@ -112,6 +125,61 @@ struct syscall_ret sys_setuname(const __user struct __utsname* ptr) {
 
     spin_unlock(&uname_lock);
 
+    return ret;
+}
+
+struct syscall_ret sys_getrlimit(int resource, __user struct __rlimit* rlim) {
+    struct syscall_ret ret = {};
+
+    if (resource < 0 || resource >= __RLIMIT_NLIMITS) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    struct process* proc = self();
+    struct __rlimit value = {__RLIM_INFINITY, __RLIM_INFINITY};
+    mutex_lock(&proc->lock);
+    struct process_rlimit* limit = rlimit_of(proc, resource);
+    if (limit)
+        value = (struct __rlimit){atomic_load(&limit->cur, ATOMIC_RELAXED), limit->max};
+    mutex_unlock(&proc->lock);
+    if (!usercopy_write(rlim, &value, sizeof(value)))
+        ret.error = EFAULT;
+    return ret;
+}
+
+struct syscall_ret sys_setrlimit(int resource, const __user struct __rlimit* rlim) {
+    struct syscall_ret ret = {};
+
+    struct __rlimit value;
+    if (!usercopy_read(&value, rlim, sizeof(value))) {
+        ret.error = EFAULT;
+        return ret;
+    }
+    if (value.rlim_cur > value.rlim_max) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    struct process* proc = self();
+    if (!rlimit_of(proc, resource)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+    if (resource == __RLIMIT_NOFILE && value.rlim_max > PROCESS_MAX_FDS && value.rlim_max != __RLIM_INFINITY) {
+        ret.error = EPERM;
+        return ret;
+    }
+
+    mutex_lock(&proc->lock);
+    struct process_rlimit* limit = rlimit_of(proc, resource);
+    if (value.rlim_max > limit->max && !ident_is_root(&proc->identity, false))
+        ret.error = EPERM;
+    else {
+        limit->max = value.rlim_max;
+        atomic_store(&limit->cur, value.rlim_cur, ATOMIC_RELAXED);
+    }
+    mutex_unlock(&proc->lock);
     return ret;
 }
 
