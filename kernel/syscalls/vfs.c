@@ -8,6 +8,7 @@
 #include <lib/clock.h>
 #include <lib/iovec.h>
 #include <lib/print.h>
+#include <lib/signal.h>
 #include <lib/time.h>
 #include <mem/alloc.h>
 #include <mem/usercopy.h>
@@ -852,6 +853,12 @@ struct syscall_ret sys_ppoll(
             return ret;
     }
 
+    sigset_t mask = 0;
+    if (sigmask && !usercopy_read(&mask, sigmask, sizeof(mask))) {
+        ret.error = EFAULT;
+        return ret;
+    }
+
     struct __pollfd* fds = mem_alloc(MAX(nfds, 1) * sizeof(*fds), 0);
     struct vfs_file** files = mem_alloc(MAX(nfds, 1) * sizeof(*files), 0);
     if (!fds || !files) {
@@ -870,6 +877,10 @@ struct syscall_ret sys_ppoll(
     struct process* proc = self();
     for (size_t i = 0; i < nfds; i++)
         files[i] = fds[i].fd >= 0 ? process_fd_get(proc, fds[i].fd) : nullptr;
+
+    struct task* task = percpu_get()->sched.current;
+    if (sigmask)
+        signal_set_restore_mask(task, mask);
 
     struct poll_table table;
     poll_table_init(&table);
@@ -895,6 +906,8 @@ struct syscall_ret sys_ppoll(
     }
 
     poll_table_fini(&table);
+    if (sigmask && ret.error != EINTR)
+        signal_restore_mask(task);
     for (size_t i = 0; i < nfds; i++) {
         if (files[i])
             vfs_file_unref(files[i]);
