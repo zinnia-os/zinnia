@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <dev/block/blockdev.h>
 #include <fs/ident.h>
 #include <lib/atomic.h>
 #include <lib/clock.h>
 #include <lib/futex.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
+#include <lib/process.h>
+#include <lib/random.h>
 #include <lib/sched.h>
 #include <lib/spin.h>
 #include <lib/time.h>
 #include <mem/alloc.h>
+#include <mem/page.h>
 #include <mem/usercopy.h>
 #include <syscalls/private.h>
 #include <syscalls/syscall.h>
@@ -18,9 +22,13 @@
 #include <stdckdint.h>
 #include <stdint.h>
 #include <string.h>
+#include <zinnia/reboot.h>
 #include <zinnia/resource.h>
 #include <zinnia/time.h>
 #include <zinnia/utsname.h>
+#if CONFIG_ACPI
+#include <dev/acpi/acpi.h>
+#endif
 
 enum syslog_kind : uintptr_t {
     SYSLOG_EMERG = 0,
@@ -55,15 +63,21 @@ static struct process_rlimit* rlimit_of(struct process* proc, int resource) {
     }
 }
 
+constexpr size_t ENTROPY_MAX = 256;
+constexpr int SC_ARG_MAX = 0;
+constexpr int SC_CHILD_MAX = 1;
+constexpr int SC_CLK_TCK = 2;
+constexpr int SC_NGROUPS_MAX = 3;
+constexpr int SC_OPEN_MAX = 4;
+constexpr int SC_PAGE_SIZE = 30;
+constexpr int SC_NPROCESSORS_CONF = 83;
+constexpr int SC_NPROCESSORS_ONLN = 84;
+
 static errno_t read_timespec_ns(const __user struct __timespec* user, uint64_t* out) {
     struct __timespec ts;
     if (!usercopy_read(&ts, user, sizeof(ts)))
         return EFAULT;
-    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || (uint64_t)ts.tv_nsec >= SECS_TO_NS(1))
-        return EINVAL;
-    if (ckd_mul(out, (uint64_t)ts.tv_sec, SECS_TO_NS(1)) || ckd_add(out, *out, (uint64_t)ts.tv_nsec))
-        *out = UINT64_MAX;
-    return 0;
+    return time_to_nano(&ts, out);
 }
 
 static uint64_t deadline_after(uint64_t ns) {
@@ -71,6 +85,14 @@ static uint64_t deadline_after(uint64_t ns) {
     if (ckd_add(&deadline, clock_get_elapsed_ns(), ns))
         return UINT64_MAX;
     return deadline;
+}
+
+static bool clock_valid(uintptr_t clock) {
+    return clock <= __CLOCK_BOOTTIME;
+}
+
+bool clock_is_realtime(uintptr_t clock) {
+    return clock == __CLOCK_REALTIME || clock == __CLOCK_REALTIME_COARSE;
 }
 
 struct syscall_ret sys_archctl(uintptr_t op, uintptr_t arg) {
@@ -125,6 +147,107 @@ struct syscall_ret sys_setuname(const __user struct __utsname* ptr) {
 
     spin_unlock(&uname_lock);
 
+    return ret;
+}
+
+struct syscall_ret sys_clock_get(uintptr_t clock, __user struct __timespec* tp) {
+    struct syscall_ret ret = {};
+
+    if (!clock_valid(clock)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    const uint64_t ns = clock_is_realtime(clock) ? clock_get_realtime_ns() : clock_get_elapsed_ns();
+    const struct __timespec ts = time_from_nano(ns);
+    if (!usercopy_write(tp, &ts, sizeof(ts)))
+        ret.error = EFAULT;
+    return ret;
+}
+
+struct syscall_ret sys_clock_set(uintptr_t clock, const __user struct __timespec* tp) {
+    struct syscall_ret ret = {};
+
+    if (clock != __CLOCK_REALTIME) {
+        ret.error = EINVAL;
+        return ret;
+    }
+    if (!ident_is_root(&self()->identity, false)) {
+        ret.error = EPERM;
+        return ret;
+    }
+
+    uint64_t ns;
+    ret.error = read_timespec_ns(tp, &ns);
+    if (ret.error)
+        return ret;
+    if (ns > INT64_MAX) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    clock_set_realtime_ns(ns);
+    return ret;
+}
+
+struct syscall_ret sys_clock_getres(uintptr_t clock, __user struct __timespec* tp) {
+    struct syscall_ret ret = {};
+
+    if (!clock_valid(clock)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+    if (!tp)
+        return ret;
+    const struct __timespec ts = {.tv_sec = 0, .tv_nsec = 1};
+    if (!usercopy_write(tp, &ts, sizeof(ts)))
+        ret.error = EFAULT;
+    return ret;
+}
+
+struct syscall_ret sys_getentropy(__user void* buffer, size_t length) {
+    struct syscall_ret ret = {};
+
+    if (length > ENTROPY_MAX) {
+        ret.error = EIO;
+        return ret;
+    }
+
+    uint8_t data[ENTROPY_MAX];
+    random_fill(data, length);
+    const bool ok = usercopy_write(buffer, data, length);
+    memset(data, 0, sizeof(data));
+    if (!ok)
+        ret.error = EFAULT;
+    return ret;
+}
+
+struct syscall_ret sys_futex_wait(__user int* pointer, int expected, const __user struct __timespec* timeout) {
+    struct syscall_ret ret = {};
+
+    uint64_t deadline = 0;
+    if (timeout) {
+        uint64_t ns;
+        ret.error = read_timespec_ns(timeout, &ns);
+        if (ret.error)
+            return ret;
+        deadline = deadline_after(ns);
+    }
+
+    struct task* task = percpu_get()->sched.current;
+    ret.error = futex_wait(task->space, (uintptr_t)pointer, expected, timeout ? &deadline : nullptr);
+    return ret;
+}
+
+struct syscall_ret sys_futex_wake(__user int* pointer, uint32_t count) {
+    struct syscall_ret ret = {};
+
+    if ((uintptr_t)pointer % sizeof(int)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+    struct task* task = percpu_get()->sched.current;
+    ret.value = futex_wake(task->space, (uintptr_t)pointer, count);
     return ret;
 }
 
@@ -237,31 +360,116 @@ struct syscall_ret sys_syslog(enum syslog_kind kind, __user char* message, size_
     return ret;
 }
 
-struct syscall_ret sys_futex_wait(__user int* pointer, int expected, const __user struct __timespec* timeout) {
+struct syscall_ret sys_reboot(uint32_t magic, uint32_t cmd) {
     struct syscall_ret ret = {};
 
-    uint64_t deadline = 0;
-    if (timeout) {
-        uint64_t ns;
-        ret.error = read_timespec_ns(timeout, &ns);
-        if (ret.error)
-            return ret;
-        deadline = deadline_after(ns);
-    }
-
-    struct task* task = percpu_get()->sched.current;
-    ret.error = futex_wait(task->space, (uintptr_t)pointer, expected, timeout ? &deadline : nullptr);
-    return ret;
-}
-
-struct syscall_ret sys_futex_wake(__user int* pointer, uint32_t count) {
-    struct syscall_ret ret = {};
-
-    if ((uintptr_t)pointer % sizeof(int)) {
+    if (magic != __REBOOT_MAGIC) {
         ret.error = EINVAL;
         return ret;
     }
-    struct task* task = percpu_get()->sched.current;
-    ret.value = futex_wake(task->space, (uintptr_t)pointer, count);
+    if (!ident_is_root(&self()->identity, false)) {
+        ret.error = EPERM;
+        return ret;
+    }
+
+    ret.error = vfs_sync_all();
+    errno_t block_status = blockdev_sync_all();
+    if (ret.error || block_status)
+        log_warn("reboot: Failed to sync file systems (%i, %i)\n", ret.error, block_status);
+
+    switch (cmd) {
+    case __RB_DISABLE_CAD:
+        log_warn("reboot: RB_DISABLE_CAD is unimplemented\n");
+        return ret;
+    case __RB_ENABLE_CAD:
+        log_warn("reboot: RB_ENABLE_CAD is unimplemented\n");
+        return ret;
+    case __RB_AUTOBOOT:
+#if CONFIG_ACPI
+        ret.error = acpi_reboot();
+        return ret;
+#else
+        ret.error = ENOSYS;
+        return ret;
+#endif
+    case __RB_POWER_OFF:
+#if CONFIG_ACPI
+        ret.error = acpi_power_off();
+        return ret;
+#else
+        ret.error = ENOSYS;
+        return ret;
+#endif
+    default:
+        log_warn("reboot: Unknown command %#x\n", cmd);
+        ret.error = EINVAL;
+        return ret;
+    }
+}
+
+struct syscall_ret sys_sleep(const __user struct __timespec* request, __user struct __timespec* remainder) {
+    struct syscall_ret ret = {};
+
+    uint64_t ns;
+    ret.error = read_timespec_ns(request, &ns);
+    if (ret.error || ns == 0)
+        return ret;
+
+    const uint64_t deadline = deadline_after(ns);
+    struct poll_table table;
+    poll_table_init(&table);
+    do {
+        ret.error = poll_table_wait(&table, &deadline);
+        atomic_store(&table.triggered, false, ATOMIC_RELAXED);
+    } while (ret.error == 0);
+    poll_table_fini(&table);
+
+    if (ret.error == ETIMEDOUT)
+        ret.error = 0;
+    if (remainder) {
+        const uint64_t now = clock_get_elapsed_ns();
+        const struct __timespec left = time_from_nano(ret.error && deadline > now ? deadline - now : 0);
+        if (!usercopy_write(remainder, &left, sizeof(left)) && !ret.error)
+            ret.error = EFAULT;
+    }
     return ret;
+}
+
+struct syscall_ret sys_yield() {
+    struct syscall_ret ret = {};
+
+    sched_reschedule(&percpu_get()->sched);
+    return ret;
+}
+
+struct syscall_ret sys_sysconf(int name) {
+    struct syscall_ret ret = {};
+
+    switch (name) {
+    case SC_ARG_MAX:
+        ret.value = 256 * 1024;
+        return ret;
+    case SC_CHILD_MAX:
+        ret.value = -1;
+        return ret;
+    case SC_CLK_TCK:
+        ret.value = 100;
+        return ret;
+    case SC_NGROUPS_MAX:
+        ret.value = 65536;
+        return ret;
+    case SC_OPEN_MAX:
+        ret.value = process_fd_limit(self());
+        return ret;
+    case SC_PAGE_SIZE:
+        ret.value = page_size();
+        return ret;
+    case SC_NPROCESSORS_CONF:
+    case SC_NPROCESSORS_ONLN:
+        ret.value = percpu_count();
+        return ret;
+    default:
+        ret.error = EINVAL;
+        return ret;
+    }
 }

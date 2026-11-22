@@ -14,4 +14,6 @@ static inline struct process* self() {
 errno_t copy_user_path(const __user char* path, char** out);
 errno_t copy_user_string(const __user char* str, size_t max, char** out);
 
+bool clock_is_realtime(uintptr_t clock);
+
 bool can_signal(struct process* sender, struct process* target, signal_t sig);
