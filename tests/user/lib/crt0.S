@@ -7,6 +7,7 @@
 .type _start, @function
 _start:
     xor ebp, ebp
+    mov rdi, rsp
     and rsp, -16
     call main
     mov edi, eax

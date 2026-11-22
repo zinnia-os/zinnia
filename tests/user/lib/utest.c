@@ -203,7 +203,21 @@ void utest_run_all() {
     utest_log("1..%zu", index);
 }
 
-int main() {
+static const uintptr_t* initial_sp;
+
+uintptr_t utest_getauxval(uintptr_t type) {
+    const uintptr_t* p = initial_sp + initial_sp[0] + 2;
+    while (*p)
+        p++;
+    for (p++; p[0]; p += 2) {
+        if (p[0] == type)
+            return p[1];
+    }
+    return 0;
+}
+
+int main(const uintptr_t* sp) {
+    initial_sp = sp;
     utest_run_all();
     for (;;)
         ;

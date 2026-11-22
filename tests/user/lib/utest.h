@@ -44,6 +44,8 @@ void utest_fail(struct utest* test, const char* file, int line, const char* fmt,
 
 void utest_run_all();
 
+uintptr_t utest_getauxval(uintptr_t type);
+
 bool utest_streq(const char* a, const char* b);
 
 #define _UTEST_CHECK(cond, on_fail, ...) \
