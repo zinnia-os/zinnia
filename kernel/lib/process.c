@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <fs/exec/exec.h>
+#include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/epoch.h>
-#include <lib/panic.h>
+#include <lib/hashmap.h>
+#include <lib/irq.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/process.h>
+#include <lib/rwlock.h>
 #include <lib/sched.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/vma.h>
 #include <mem/vmo.h>
+#include <syscalls/syscall.h>
 #include <string.h>
-
-constexpr size_t PROCESS_INITIAL_FDS = 64;
+#include <zinnia/wait.h>
 
 static struct process kernel_process;
 static atomic_bool kernel_process_ready;
+
+static mutex_t tree_lock;
+static mutex_t session_lock;
+static struct rwlock pid_lock;
+static hashmap(pid_t, struct process*) pid_table;
 static atomic_int next_pid = 1;
 
 struct fd_files {
@@ -83,6 +91,26 @@ static errno_t fd_table_resize(struct fd_table* t, size_t capacity) {
     return 0;
 }
 
+static errno_t fd_table_clone(struct fd_table* dst, struct fd_table* src) {
+    if (!src->capacity)
+        return 0;
+    const errno_t status = fd_table_resize(dst, src->capacity);
+    if (status)
+        return status;
+
+    for (size_t i = 0; i < src->capacity; i++)
+        atomic_store(fd_slot(dst, i), atomic_load(fd_slot(src, i), ATOMIC_RELAXED), ATOMIC_RELAXED);
+    memcpy(dst->open, src->open, fd_words(src->capacity) * sizeof(*dst->open));
+    memcpy(dst->cloexec, src->cloexec, fd_words(src->capacity) * sizeof(*dst->cloexec));
+    dst->next_free = src->next_free;
+
+    for (size_t w = 0; w < fd_words(dst->capacity); w++) {
+        for (uint64_t bits = dst->open[w]; bits; bits &= bits - 1)
+            vfs_file_ref(atomic_load(fd_slot(dst, w * 64 + __builtin_ctzll(bits)), ATOMIC_RELAXED));
+    }
+    return 0;
+}
+
 static errno_t fd_table_grow(struct fd_table* t, size_t fd) {
     if (fd < t->capacity)
         return 0;
@@ -134,12 +162,14 @@ static struct vfs_file* fd_lookup(struct process* proc, int fd) {
 
 static void process_init_common(struct process* proc) {
     refcount_init(&proc->rc);
+    tailq_init(&proc->children);
+    poll_event_init(&proc->child_event);
     spin_init(&proc->tasks_lock);
     tailq_init(&proc->tasks);
+    poll_event_init(&proc->threads_event);
     mutex_init(&proc->lock);
     mutex_init(&proc->files_lock);
     vec_init(&proc->identity.groups);
-    signal_process_init(proc);
 }
 
 struct process* process_kernel() {
@@ -147,20 +177,11 @@ struct process* process_kernel() {
         process_init_common(&kernel_process);
         kernel_process.pid = 0;
         kernel_process.space = &kernel_vma;
+        signal_process_init(&kernel_process, nullptr);
+        hashmap_init(&pid_table);
         atomic_store(&kernel_process_ready, true, ATOMIC_RELEASE);
     }
     return &kernel_process;
-}
-
-static void close_files(struct process* proc) {
-    struct fd_table* t = &proc->files;
-    mutex_lock(&proc->files_lock);
-    for (size_t w = 0; w < fd_words(t->capacity); w++) {
-        for (uint64_t bits = t->open[w]; bits; bits &= bits - 1)
-            vfs_file_unref(atomic_load(fd_slot(t, w * 64 + __builtin_ctzll(bits)), ATOMIC_RELAXED));
-    }
-    fd_table_destroy(t);
-    mutex_unlock(&proc->files_lock);
 }
 
 void process_ref(struct process* proc) {
@@ -170,13 +191,28 @@ void process_ref(struct process* proc) {
 void process_unref(struct process* proc) {
     if (proc == &kernel_process || !refcount_dec(&proc->rc))
         return;
-    close_files(proc);
-    vfs_path_drop(proc->root);
-    vfs_path_drop(proc->cwd);
     if (proc->space)
         vma_unref(proc->space);
     vec_destroy(&proc->identity.groups);
+    fd_table_destroy(&proc->files);
     mem_free(proc, sizeof(*proc));
+}
+
+struct process* process_lookup(pid_t pid) {
+    rwlock_read_lock(&pid_lock);
+    struct process** found = hashmap_get(&pid_table, pid, hashmap_hash_default, hashmap_eq_default);
+    struct process* proc = found ? *found : nullptr;
+    if (proc)
+        process_ref(proc);
+    rwlock_read_unlock(&pid_lock);
+    return proc;
+}
+
+pid_t process_parent_pid(struct process* proc) {
+    mutex_lock(&tree_lock);
+    pid_t pid = proc->parent ? proc->parent->pid : 0;
+    mutex_unlock(&tree_lock);
+    return pid;
 }
 
 uint8_t process_priority(struct process* proc) {
@@ -198,6 +234,54 @@ void process_detach_task(struct process* proc, struct task* task) {
     spin_lock(&proc->tasks_lock);
     tailq_remove(&proc->tasks, task, process_link);
     spin_unlock(&proc->tasks_lock);
+    poll_event_notify(&proc->threads_event);
+}
+
+bool process_task_must_exit(struct task* task) {
+    struct task* single = atomic_load(&task->process->single_task, ATOMIC_ACQUIRE);
+    return single && single != task;
+}
+
+bool process_single_thread(struct process* proc) {
+    struct task* self = percpu_get()->sched.current;
+    struct task* expected = nullptr;
+    if (!atomic_compare_exchange(&proc->single_task, &expected, self, ATOMIC_ACQ_REL, ATOMIC_ACQUIRE))
+        return expected == self;
+
+    struct poll_table table;
+    poll_table_init(&table);
+    table.interruptible = false;
+    poll_wait(&table, &proc->threads_event);
+
+    spin_lock(&proc->tasks_lock);
+    for (struct task* t = tailq_first(&proc->tasks); t; t = tailq_next(t, process_link)) {
+        if (t != self)
+            sched_notify(t);
+    }
+    spin_unlock(&proc->tasks_lock);
+    poll_event_notify(&proc->signals.cont_event);
+
+    while (true) {
+        // Stop waiting once we're the only task left in the process.
+        spin_lock(&proc->tasks_lock);
+        const bool only = tailq_first(&proc->tasks) == self && !tailq_next(self, process_link);
+        spin_unlock(&proc->tasks_lock);
+        if (only)
+            break;
+
+        poll_table_wait(&table, nullptr);
+        atomic_store(&table.triggered, false, ATOMIC_RELAXED);
+    }
+    poll_table_fini(&table);
+
+    spin_lock(&proc->tasks_lock);
+    proc->thread_count = 1;
+    spin_unlock(&proc->tasks_lock);
+    return true;
+}
+
+static struct process* current_process() {
+    return percpu_get()->sched.current->process;
 }
 
 static void rlimit_init(struct process_rlimit* limit, rlim_t cur, rlim_t max) {
@@ -205,19 +289,82 @@ static void rlimit_init(struct process_rlimit* limit, rlim_t cur, rlim_t max) {
     limit->max = max;
 }
 
-static errno_t process_alloc(struct process** out) {
+static void process_discard(struct process* proc) {
+    vfs_path_drop(proc->root);
+    vfs_path_drop(proc->cwd);
+    process_unref(proc);
+}
+
+static errno_t process_alloc(struct process* parent, struct process** out) {
     struct process* proc = mem_alloc(sizeof(struct process), 0);
     if (!proc)
         return ENOMEM;
     process_init_common(proc);
     proc->pid = atomic_fetch_add(&next_pid, 1, ATOMIC_RELAXED);
-    proc->root = vfs_get_root();
-    proc->cwd = vfs_get_root();
-    proc->umask = 022;
-    rlimit_init(&proc->limit_nofile, PROCESS_DEFAULT_FDS, PROCESS_MAX_FDS);
 
+    if (parent == &kernel_process) {
+        proc->root = vfs_get_root();
+        proc->cwd = vfs_get_root();
+        proc->umask = 022;
+        proc->pgid = proc->pid;
+        rlimit_init(&proc->limit_nofile, PROCESS_DEFAULT_FDS, PROCESS_MAX_FDS);
+        signal_process_init(proc, nullptr);
+        *out = proc;
+        return 0;
+    }
+
+    mutex_lock(&parent->lock);
+    proc->root = vfs_path_clone(parent->root);
+    proc->cwd = vfs_path_clone(parent->cwd);
+    proc->umask = parent->umask;
+    proc->nice = parent->nice;
+    rlimit_init(&proc->limit_nofile, atomic_load(&parent->limit_nofile.cur, ATOMIC_RELAXED), parent->limit_nofile.max);
+    const errno_t status = ident_copy(&proc->identity, &parent->identity);
+    mutex_unlock(&parent->lock);
+    if (status) {
+        process_discard(proc);
+        return status;
+    }
+
+    mutex_lock(&session_lock);
+    proc->pgid = parent->pgid;
+    proc->sid = parent->sid;
+    mutex_unlock(&session_lock);
+
+    signal_process_init(proc, parent);
     *out = proc;
     return 0;
+}
+static void process_publish(struct process* parent, struct process* proc) {
+    rwlock_write_lock(&pid_lock);
+    errno_t status = hashmap_insert(&pid_table, proc->pid, proc, hashmap_hash_default, hashmap_eq_default);
+    assert(status == 0, "Out of memory while publishing process %d", proc->pid);
+    rwlock_write_unlock(&pid_lock);
+
+    mutex_lock(&tree_lock);
+    proc->parent = parent;
+    tailq_insert_tail(&parent->children, proc, sibling);
+    mutex_unlock(&tree_lock);
+}
+
+static void close_files(struct process* proc, bool only_cloexec) {
+    struct fd_table* t = &proc->files;
+    mutex_lock(&proc->files_lock);
+    for (size_t w = 0; w < fd_words(t->capacity); w++) {
+        uint64_t bits = t->open[w];
+        if (only_cloexec)
+            bits &= t->cloexec[w];
+        while (bits) {
+            const size_t fd = w * 64 + __builtin_ctzll(bits);
+            bits &= bits - 1;
+            struct vfs_file* file = atomic_load(fd_slot(t, fd), ATOMIC_RELAXED);
+            fd_clear(t, fd);
+            vfs_file_unref(file);
+        }
+    }
+    if (!only_cloexec)
+        fd_table_destroy(t);
+    mutex_unlock(&proc->files_lock);
 }
 
 static errno_t load_image(
@@ -255,13 +402,13 @@ static errno_t load_image(
 
 errno_t process_spawn_init(const char* path, const char** argv, const char** envp) {
     struct process* proc;
-    errno_t status = process_alloc(&proc);
+    errno_t status = process_alloc(process_kernel(), &proc);
     if (status)
         return status;
 
     struct task_start_info* start = mem_alloc(sizeof(struct task_start_info), 0);
     if (!start) {
-        process_unref(proc);
+        process_discard(proc);
         return ENOMEM;
     }
 
@@ -273,9 +420,11 @@ errno_t process_spawn_init(const char* path, const char** argv, const char** env
     }
     if (status) {
         mem_free(start, sizeof(*start));
-        process_unref(proc);
+        process_discard(proc);
         return status;
     }
+
+    proc->sid = proc->pid;
 
     struct vfs_file* console;
     status = vfs_file_open(proc->root, proc->cwd, "/dev/console", O_RDWR, 0, ident_kernel(), &console);
@@ -289,20 +438,499 @@ errno_t process_spawn_init(const char* path, const char** argv, const char** env
 
     struct task* task;
     status = task_create(argv[0], proc, sched_to_user, (uintptr_t)start, &task);
-    process_unref(proc);
     if (status) {
         mem_free(start, sizeof(*start));
+        process_discard(proc);
         return status;
     }
 
+    process_publish(process_kernel(), proc);
     sched_add_task(&percpu_get()->sched, task);
     return 0;
 }
 
-// TODO
+errno_t process_fork(arch_context_t* ctx, pid_t* out_pid) {
+    struct task* self = percpu_get()->sched.current;
+    struct process* parent = self->process;
+
+    struct process* child;
+    errno_t status = process_alloc(parent, &child);
+    if (status)
+        return status;
+
+    arch_context_t* child_ctx = mem_alloc(sizeof(*child_ctx), 0);
+    if (!child_ctx) {
+        status = ENOMEM;
+        goto err_child;
+    }
+    *child_ctx = *ctx;
+    child_ctx->ARCH_CTX_RET0 = 0;
+    child_ctx->ARCH_CTX_RET1 = 0;
+
+    mutex_lock(&parent->lock);
+    status = vma_fork(parent->space, &child->space);
+    mutex_unlock(&parent->lock);
+    if (status)
+        goto err_ctx;
+
+    mutex_lock(&parent->files_lock);
+    status = fd_table_clone(&child->files, &parent->files);
+    mutex_unlock(&parent->files_lock);
+    if (status)
+        goto err_files;
+
+    struct task* task;
+    status = task_create(self->name, child, sched_to_user_context, (uintptr_t)child_ctx, &task);
+    if (status)
+        goto err_files;
+    task->user_stack = percpu_get()->user_stack;
+    arch_task_fork(&task->context);
+    signal_task_fork(task, self);
+
+    process_publish(parent, child);
+    *out_pid = child->pid;
+    sched_add_task(&percpu_get()->sched, task);
+    return 0;
+
+err_files:
+    close_files(child, false);
+err_ctx:
+    mem_free(child_ctx, sizeof(*child_ctx));
+err_child:
+    process_discard(child);
+    return status;
+}
+
+static errno_t do_exec(
+    struct vmo* object,
+    const char* path,
+    const char** argv,
+    const char** envp,
+    arch_context_t* ctx
+) {
+    struct task* self = percpu_get()->sched.current;
+    struct process* proc = self->process;
+
+    struct vma* space;
+    uintptr_t ip, sp;
+    errno_t status = load_image(proc, object, path, argv, envp, &space, &ip, &sp);
+    vmo_unref(object);
+    if (status)
+        return status;
+
+    if (!process_single_thread(proc)) {
+        vma_unref(space);
+        sched_exit();
+    }
+
+    close_files(proc, true);
+    proc->did_exec = true;
+    signal_exec(proc, self);
+
+    vma_ref(space);
+    mutex_lock(&proc->lock);
+    struct vma* old = proc->space;
+    proc->space = space;
+    mutex_unlock(&proc->lock);
+
+    irq_lock();
+    self->space = space;
+    pmap_set(&space->pmap);
+    irq_unlock();
+
+    vma_unref(old);
+    vma_unref(old);
+
+    strncpy(self->name, argv[0] ? argv[0] : path, sizeof(self->name) - 1);
+    arch_context_init_user(ctx, ip, sp);
+    atomic_store(&proc->single_task, nullptr, ATOMIC_RELEASE);
+    return 0;
+}
+
+errno_t process_exec(const char* path, const char** argv, const char** envp, arch_context_t* ctx) {
+    struct vmo* object;
+    errno_t status = exec_open(current_process(), path, &object);
+    if (status)
+        return status;
+    return do_exec(object, path, argv, envp, ctx);
+}
+
+errno_t process_fexec(
+    struct vfs_file* file,
+    const char* exec_path,
+    const char** argv,
+    const char** envp,
+    arch_context_t* ctx
+) {
+    struct vmo* object;
+    errno_t status = exec_file_object(current_process(), file, &object);
+    if (status)
+        return status;
+    return do_exec(object, exec_path, argv, envp, ctx);
+}
+
+static void thread_start(uintptr_t info) {
+    if (process_task_must_exit(percpu_get()->sched.current)) {
+        mem_free((void*)info, sizeof(struct task_start_info));
+        sched_exit();
+    }
+    sched_to_user(info);
+}
+
+errno_t process_thread_create(uintptr_t ip, uintptr_t sp, size_t* out_tid) {
+    struct task* self = percpu_get()->sched.current;
+    struct task_start_info* start = mem_alloc(sizeof(*start), 0);
+    if (!start)
+        return ENOMEM;
+    start->ip = ip;
+    start->sp = sp;
+
+    struct task* task;
+    errno_t status = task_create(self->name, self->process, thread_start, (uintptr_t)start, &task);
+    if (status) {
+        mem_free(start, sizeof(*start));
+        return status;
+    }
+    atomic_store(&task->signals.mask, atomic_load(&self->signals.mask, ATOMIC_RELAXED), ATOMIC_RELAXED);
+
+    *out_tid = task->id;
+    sched_add_task(&percpu_get()->sched, task);
+    return 0;
+}
+
+void process_thread_exit() {
+    struct process* proc = current_process();
+    spin_lock(&proc->tasks_lock);
+    const bool last = --proc->thread_count == 0;
+    spin_unlock(&proc->tasks_lock);
+
+    if (last)
+        process_exit(0);
+    sched_exit();
+}
+
+[[noreturn]]
+static void do_exit(int wait_status, int code, int info) {
+    struct process* proc = current_process();
+    assert(proc != &kernel_process, "The kernel process can't exit");
+    assert(proc->pid != 1, "Attempted to kill init with status %#x", wait_status);
+
+    if (!process_single_thread(proc))
+        sched_exit();
+
+    close_files(proc, false);
+    mutex_lock(&proc->lock);
+    vfs_path_drop(proc->root);
+    vfs_path_drop(proc->cwd);
+    proc->root = (struct vfs_path){};
+    proc->cwd = (struct vfs_path){};
+    struct vma* space = proc->space;
+    proc->space = nullptr;
+    mutex_unlock(&proc->lock);
+    vma_unref(space);
+
+    struct process* init = process_lookup(1);
+
+    mutex_lock(&tree_lock);
+    struct process* child;
+    bool zombies = false;
+    while ((child = tailq_first(&proc->children))) {
+        tailq_remove(&proc->children, child, sibling);
+        child->parent = init;
+        tailq_insert_tail(&init->children, child, sibling);
+        zombies |= child->state == PROCESS_ZOMBIE;
+    }
+
+    proc->state = PROCESS_ZOMBIE;
+    proc->exit_status = wait_status;
+    proc->exit_code = code;
+    proc->exit_info = info;
+    mutex_unlock(&tree_lock);
+
+    if (zombies)
+        poll_event_notify(&init->child_event);
+    process_unref(init);
+    process_notify_parent(proc, code, info);
+    sched_exit();
+}
+
+void process_exit(int status) {
+    do_exit((status & 0xFF) << 8, __CLD_EXITED, status & 0xFF);
+}
+
 void process_exit_signal(signal_t sig) {
-    struct process* proc = percpu_get()->sched.current->process;
-    panic("TODO");
+    do_exit(sig & 0x7F, __CLD_KILLED, sig);
+}
+
+void process_notify_parent(struct process* proc, int code, int status) {
+    mutex_lock(&tree_lock);
+    struct process* parent = proc->parent;
+    if (parent)
+        process_ref(parent);
+    mutex_unlock(&tree_lock);
+
+    if (!parent)
+        return;
+    if (parent == &kernel_process) {
+        process_unref(parent);
+        return;
+    }
+
+    poll_event_notify(&parent->child_event);
+
+    spin_lock(&parent->signals.lock);
+    const bool quiet = (code == __CLD_STOPPED || code == __CLD_CONTINUED) &&
+        (parent->signals.actions[SIGCHLD - 1].sa_flags & __SA_NOCLDSTOP);
+    spin_unlock(&parent->signals.lock);
+
+    if (!quiet) {
+        const struct sig_info info = {
+            .code = code,
+            .pid = proc->pid,
+            .uid = proc->identity.uid,
+            .status = status,
+        };
+        signal_send(parent, SIGCHLD, &info);
+    }
+    process_unref(parent);
+}
+
+// Report a stop or continue of `child` that its parent hasn't waited for yet.
+static bool take_stop_or_continue(struct process* child, int options, struct wait_result* out) {
+    struct process_signals* s = &child->signals;
+    const bool consume = !(options & __WNOWAIT);
+    bool found = false;
+
+    spin_lock(&s->lock);
+    if ((options & __WSTOPPED) && atomic_load(&s->stopped, ATOMIC_RELAXED) && s->stop_unwaited) {
+        *out = (struct wait_result){
+            .pid = child->pid,
+            .uid = child->identity.uid,
+            .status = (s->stop_sig << 8) | 0x7F,
+            .code = __CLD_STOPPED,
+            .info = s->stop_sig,
+        };
+        s->stop_unwaited = !consume;
+        found = true;
+    } else if ((options & __WCONTINUED) && s->cont_unwaited) {
+        *out = (struct wait_result){
+            .pid = child->pid,
+            .uid = child->identity.uid,
+            .status = 0xFFFF,
+            .code = __CLD_CONTINUED,
+            .info = SIGCONT,
+        };
+        s->cont_unwaited = !consume;
+        found = true;
+    }
+    spin_unlock(&s->lock);
+    return found;
+}
+
+errno_t process_wait(pid_t selector, int options, struct wait_result* out) {
+    struct process* self = current_process();
+    *out = (struct wait_result){};
+
+    struct poll_table table;
+    poll_table_init(&table);
+    poll_wait(&table, &self->child_event);
+
+    errno_t status = 0;
+    mutex_lock(&tree_lock);
+    while (true) {
+        bool found = false;
+        struct process* reaped = nullptr;
+        bool reported = false;
+        for (struct process* child = tailq_first(&self->children); child; child = tailq_next(child, sibling)) {
+            const pid_t pgid = selector == 0 ? self->pgid : -selector;
+            if (selector > 0 ? child->pid != selector : selector != -1 && child->pgid != pgid)
+                continue;
+            found = true;
+
+            if (child->state == PROCESS_ZOMBIE) {
+                if (!(options & __WEXITED))
+                    continue;
+                *out = (struct wait_result){
+                    .pid = child->pid,
+                    .uid = child->identity.uid,
+                    .status = child->exit_status,
+                    .code = child->exit_code,
+                    .info = child->exit_info,
+                };
+                if (!(options & __WNOWAIT)) {
+                    tailq_remove(&self->children, child, sibling);
+                    reaped = child;
+                }
+                reported = true;
+                break;
+            }
+
+            if (take_stop_or_continue(child, options, out)) {
+                reported = true;
+                break;
+            }
+        }
+
+        if (reported) {
+            mutex_unlock(&tree_lock);
+            if (reaped) {
+                rwlock_write_lock(&pid_lock);
+                hashmap_remove(&pid_table, reaped->pid, hashmap_hash_default, hashmap_eq_default);
+                rwlock_write_unlock(&pid_lock);
+                process_unref(reaped);
+            }
+            break;
+        }
+
+        if (!found) {
+            status = ECHILD;
+            mutex_unlock(&tree_lock);
+            break;
+        }
+
+        if (options & __WNOHANG) {
+            mutex_unlock(&tree_lock);
+            break;
+        }
+
+        if (poll_table_sleep(&table, &tree_lock, nullptr) == EINTR) {
+            status = ERESTART;
+            mutex_unlock(&tree_lock);
+            break;
+        }
+    }
+
+    poll_table_fini(&table);
+    return status;
+}
+
+struct process** process_snapshot(size_t* out_count) {
+    rwlock_read_lock(&pid_lock);
+    const size_t capacity = hashmap_count(&pid_table);
+    struct process** procs = mem_alloc(MAX(capacity, 1) * sizeof(*procs), 0);
+    size_t count = 0;
+    if (procs) {
+        hashmap_foreach(&pid_table, i) {
+            struct process* proc = pid_table.values[i];
+            process_ref(proc);
+            procs[count++] = proc;
+        }
+    }
+    rwlock_read_unlock(&pid_lock);
+
+    *out_count = count;
+    return procs;
+}
+
+void process_set_nice(struct process* proc, int nice) {
+    proc->nice = MAX(-20, MIN(19, nice));
+    spin_lock(&proc->tasks_lock);
+    for (struct task* task = tailq_first(&proc->tasks); task; task = tailq_next(task, process_link))
+        sched_set_priority(task, process_priority(proc));
+    spin_unlock(&proc->tasks_lock);
+}
+
+static bool any_process(bool (*match)(struct process* proc, pid_t a, pid_t b), pid_t a, pid_t b) {
+    bool found = false;
+    rwlock_read_lock(&pid_lock);
+    hashmap_foreach(&pid_table, i) {
+        if (match(pid_table.values[i], a, b)) {
+            found = true;
+            break;
+        }
+    }
+    rwlock_read_unlock(&pid_lock);
+    return found;
+}
+
+static struct process* lookup_or_self(struct process* proc, pid_t pid) {
+    if (pid == 0 || pid == proc->pid) {
+        process_ref(proc);
+        return proc;
+    }
+    return process_lookup(pid);
+}
+
+errno_t process_getpgid(struct process* proc, pid_t pid, pid_t* out_pgid) {
+    struct process* target = lookup_or_self(proc, pid);
+    if (!target)
+        return ESRCH;
+
+    mutex_lock(&session_lock);
+    *out_pgid = target->pgid;
+    mutex_unlock(&session_lock);
+    process_unref(target);
+    return 0;
+}
+
+errno_t process_getsid(struct process* proc, pid_t pid, pid_t* out_sid) {
+    struct process* target = lookup_or_self(proc, pid);
+    if (!target)
+        return ESRCH;
+
+    mutex_lock(&session_lock);
+    *out_sid = target->sid;
+    mutex_unlock(&session_lock);
+    process_unref(target);
+    return 0;
+}
+
+static bool in_pgrp_and_session(struct process* proc, pid_t pgid, pid_t sid) {
+    return proc->pgid == pgid && proc->sid == sid;
+}
+
+static bool in_pgrp_other(struct process* proc, pid_t pgid, pid_t self) {
+    return proc->pgid == pgid && proc->pid != self;
+}
+
+errno_t process_setsid(struct process* proc, pid_t* out_sid) {
+    mutex_lock(&session_lock);
+    const bool leader = proc->sid == proc->pid || (proc->pgid == proc->pid && proc->sid != 0);
+    if (leader || any_process(in_pgrp_other, proc->pid, proc->pid)) {
+        mutex_unlock(&session_lock);
+        return EPERM;
+    }
+
+    proc->pgid = proc->pid;
+    proc->sid = proc->pid;
+    mutex_unlock(&session_lock);
+
+    *out_sid = proc->pid;
+    return 0;
+}
+
+errno_t process_setpgid(struct process* proc, pid_t pid, pid_t pgid) {
+    if (pgid < 0)
+        return EINVAL;
+
+    struct process* target = lookup_or_self(proc, pid);
+    if (!target)
+        return ESRCH;
+    mutex_lock(&tree_lock);
+    const bool child = target->parent == proc;
+    mutex_unlock(&tree_lock);
+    if (target != proc && !child) {
+        process_unref(target);
+        return ESRCH;
+    }
+
+    errno_t status = 0;
+    mutex_lock(&session_lock);
+    const pid_t new_pgid = pgid ? pgid : target->pid;
+    if (target != proc && target->sid != proc->sid)
+        status = EPERM;
+    else if (target != proc && target->did_exec)
+        status = EACCES;
+    else if (target->sid == target->pid)
+        status = EPERM;
+    else if (new_pgid != target->pid && !any_process(in_pgrp_and_session, new_pgid, target->sid))
+        status = EPERM;
+    else
+        target->pgid = new_pgid;
+    mutex_unlock(&session_lock);
+
+    process_unref(target);
+    return status;
 }
 
 errno_t process_fd_alloc(struct process* proc, struct vfs_file* file, bool cloexec, int* out_fd) {

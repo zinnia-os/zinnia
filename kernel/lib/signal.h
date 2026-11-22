@@ -99,6 +99,8 @@ struct process_signals {
 
     _Atomic(bool) stopped;
     signal_t stop_sig;
+    bool stop_unwaited;
+    bool cont_unwaited;
     struct poll_event cont_event;
 };
 
@@ -114,7 +116,9 @@ struct sig_delivery {
     size_t alt_size;
 };
 
-void signal_process_init(struct process* proc);
+void signal_process_init(struct process* proc, struct process* parent);
+void signal_task_fork(struct task* task, struct task* parent);
+void signal_exec(struct process* proc, struct task* task);
 
 struct sig_info signal_info_kernel();
 struct sig_info signal_info_user(struct process* sender, int code);

@@ -21,3 +21,20 @@ bool ident_in_group(const struct ident* identity, gid_t gid, bool use_real) {
 bool ident_is_root(const struct ident* identity, bool use_real) {
     return (use_real ? identity->uid : identity->euid) == 0;
 }
+
+errno_t ident_copy(struct ident* dst, const struct ident* src) {
+    dst->uid = src->uid;
+    dst->euid = src->euid;
+    dst->suid = src->suid;
+    dst->gid = src->gid;
+    dst->egid = src->egid;
+    dst->sgid = src->sgid;
+
+    vec_clear(&dst->groups);
+    vec_foreach(&src->groups, i) {
+        const errno_t status = vec_push(&dst->groups, vec_elem_get(&src->groups, i));
+        if (status)
+            return status;
+    }
+    return 0;
+}

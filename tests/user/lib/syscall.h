@@ -228,3 +228,93 @@ static inline struct sys_ret sys_pipe(int* fds, uint32_t flags) {
 static inline struct sys_ret sys_ppoll(void* fds, size_t nfds, const void* timeout, const void* sigmask) {
     return syscall4(__NR_ppoll, (uintptr_t)fds, nfds, (uintptr_t)timeout, (uintptr_t)sigmask);
 }
+
+static inline struct sys_ret sys_fork() {
+    return syscall3(__NR_fork, 0, 0, 0);
+}
+
+static inline struct sys_ret sys_execve(const char* path, const char* const* argv, const char* const* envp) {
+    return syscall3(__NR_execve, (uintptr_t)path, (uintptr_t)argv, (uintptr_t)envp);
+}
+
+static inline struct sys_ret sys_waitpid(int pid, int* status, int options) {
+    return syscall4(__NR_waitpid, (uintptr_t)pid, (uintptr_t)status, (uintptr_t)options, 0);
+}
+
+static inline struct sys_ret sys_waitid(int idtype, int id, void* info, int options) {
+    return syscall4(__NR_waitid, (uintptr_t)idtype, (uintptr_t)id, (uintptr_t)info, (uintptr_t)options);
+}
+
+static inline struct sys_ret sys_kill(int pid, int sig) {
+    return syscall3(__NR_kill, (uintptr_t)pid, (uintptr_t)sig, 0);
+}
+
+static inline int sys_getpid() {
+    return (int)syscall3(__NR_getpid, 0, 0, 0).value;
+}
+
+static inline int sys_getppid() {
+    return (int)syscall3(__NR_getppid, 0, 0, 0).value;
+}
+
+static inline int sys_gettid() {
+    return (int)syscall3(__NR_gettid, 0, 0, 0).value;
+}
+
+static inline struct sys_ret sys_setsid() {
+    return syscall3(__NR_setsid, 0, 0, 0);
+}
+
+static inline struct sys_ret sys_getsid(int pid) {
+    return syscall3(__NR_getsid, (uintptr_t)pid, 0, 0);
+}
+
+static inline struct sys_ret sys_setpgid(int pid, int pgid) {
+    return syscall3(__NR_setpgid, (uintptr_t)pid, (uintptr_t)pgid, 0);
+}
+
+static inline struct sys_ret sys_getpgid(int pid) {
+    return syscall3(__NR_getpgid, (uintptr_t)pid, 0, 0);
+}
+
+static inline uint32_t sys_getuid() {
+    return (uint32_t)syscall3(__NR_getuid, 0, 0, 0).value;
+}
+
+static inline uint32_t sys_geteuid() {
+    return (uint32_t)syscall3(__NR_geteuid, 0, 0, 0).value;
+}
+
+static inline struct sys_ret sys_setuid(uint32_t uid) {
+    return syscall3(__NR_setuid, uid, 0, 0);
+}
+
+static inline struct sys_ret sys_thread_create(void (*entry)(), void* stack) {
+    return syscall3(__NR_thread_create, (uintptr_t)entry, (uintptr_t)stack, 0);
+}
+
+[[noreturn]]
+static inline void sys_thread_exit() {
+    syscall3(__NR_thread_exit, 0, 0, 0);
+    __builtin_unreachable();
+}
+
+static inline struct sys_ret sys_futex_wait(volatile int* addr, int expected) {
+    return syscall3(__NR_futex_wait, (uintptr_t)addr, (uintptr_t)expected, 0);
+}
+
+static inline struct sys_ret sys_futex_wake(volatile int* addr, uint32_t count) {
+    return syscall3(__NR_futex_wake, (uintptr_t)addr, count, 0);
+}
+
+static inline struct sys_ret sys_sigsuspend(const uint64_t* mask) {
+    return syscall3(__NR_sigsuspend, (uintptr_t)mask, 0, 0);
+}
+
+static inline struct sys_ret sys_getresuid(uint32_t* r, uint32_t* e, uint32_t* s) {
+    return syscall3(__NR_getresuid, (uintptr_t)r, (uintptr_t)e, (uintptr_t)s);
+}
+
+static inline struct sys_ret sys_getresgid(uint32_t* r, uint32_t* e, uint32_t* s) {
+    return syscall3(__NR_getresgid, (uintptr_t)r, (uintptr_t)e, (uintptr_t)s);
+}

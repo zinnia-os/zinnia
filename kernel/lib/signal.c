@@ -79,11 +79,34 @@ static void discard_everywhere_locked(struct process* proc, sigset_t set) {
     spin_unlock(&proc->tasks_lock);
 }
 
-void signal_process_init(struct process* proc) {
+void signal_process_init(struct process* proc, struct process* parent) {
     struct process_signals* s = &proc->signals;
     spin_init(&s->lock);
     poll_event_init(&s->event);
     poll_event_init(&s->cont_event);
+
+    if (parent) {
+        spin_lock(&parent->signals.lock);
+        memcpy(s->actions, parent->signals.actions, sizeof(s->actions));
+        spin_unlock(&parent->signals.lock);
+    }
+}
+
+void signal_task_fork(struct task* task, struct task* parent) {
+    atomic_store(&task->signals.mask, atomic_load(&parent->signals.mask, ATOMIC_RELAXED), ATOMIC_RELAXED);
+    task->signals.alt_sp = parent->signals.alt_sp;
+    task->signals.alt_size = parent->signals.alt_size;
+}
+
+void signal_exec(struct process* proc, struct task* task) {
+    spin_lock(&proc->signals.lock);
+    for (size_t i = 0; i < SIG_MAX; i++) {
+        if (proc->signals.actions[i].sa_handler != __SIG_IGN)
+            proc->signals.actions[i] = (struct __sigaction){};
+    }
+    task->signals.alt_sp = 0;
+    task->signals.alt_size = 0;
+    spin_unlock(&proc->signals.lock);
 }
 
 struct sig_info signal_info_kernel() {
@@ -99,6 +122,8 @@ struct sig_info signal_info_user(struct process* sender, int code) {
 }
 
 bool signal_pending(struct task* task) {
+    if (process_task_must_exit(task))
+        return true;
     const sigset_t pending = atomic_load(&task->signals.queue.pending, ATOMIC_ACQUIRE) |
         atomic_load(&task->process->signals.shared.pending, ATOMIC_ACQUIRE);
     return pending & ~atomic_load(&task->signals.mask, ATOMIC_RELAXED);
@@ -123,6 +148,8 @@ static bool do_send(struct process* proc, ssize_t tid, signal_t sig, const struc
     spin_lock(&s->lock);
     if ((sig == SIGCONT || sig == SIGKILL) && atomic_load(&s->stopped, ATOMIC_RELAXED)) {
         atomic_store(&s->stopped, false, ATOMIC_RELEASE);
+        s->stop_unwaited = false;
+        s->cont_unwaited = sig == SIGCONT;
         continued = true;
     }
     if (sig == SIGCONT)
@@ -165,8 +192,11 @@ static bool do_send(struct process* proc, ssize_t tid, signal_t sig, const struc
 
     if (queued)
         poll_event_notify(&s->event);
-    if (continued)
+    if (continued) {
         poll_event_notify(&s->cont_event);
+        if (sig == SIGCONT)
+            process_notify_parent(proc, __CLD_CONTINUED, SIGCONT);
+    }
     return target != nullptr;
 }
 
@@ -257,16 +287,19 @@ void signal_deliver(arch_context_t* ctx, const arch_syscall_restart_t* restart) 
         return;
 
     while (true) {
+        if (process_task_must_exit(task))
+            sched_exit();
+
         spin_lock(&s->lock);
         if (atomic_load(&s->stopped, ATOMIC_RELAXED)) {
             spin_unlock(&s->lock);
 
-            // Sleep uninterruptibly until SIGCONT or SIGKILL continues the process.
+            // Sleep uninterruptibly until SIGCONT or SIGKILL continues the process, or we have to exit.
             struct poll_table table;
             poll_table_init(&table);
             table.interruptible = false;
             poll_wait(&table, &s->cont_event);
-            while (atomic_load(&s->stopped, ATOMIC_ACQUIRE)) {
+            while (atomic_load(&s->stopped, ATOMIC_ACQUIRE) && !process_task_must_exit(task)) {
                 poll_table_wait(&table, nullptr);
                 atomic_store(&table.triggered, false, ATOMIC_RELAXED);
             }
@@ -311,7 +344,10 @@ void signal_deliver(arch_context_t* ctx, const arch_syscall_restart_t* restart) 
             case ACTION_STOP:
                 atomic_store(&s->stopped, true, ATOMIC_RELEASE);
                 s->stop_sig = sig;
+                s->stop_unwaited = true;
+                s->cont_unwaited = false;
                 spin_unlock(&s->lock);
+                process_notify_parent(proc, __CLD_STOPPED, sig);
                 continue;
             case ACTION_TERMINATE:
             case ACTION_CORE:

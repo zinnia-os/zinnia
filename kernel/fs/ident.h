@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <lib/errno.h>
 #include <lib/types.h>
 #include <lib/vec.h>
 
@@ -17,3 +18,5 @@ const struct ident* ident_kernel(void);
 bool ident_in_group(const struct ident* identity, gid_t gid, bool use_real);
 
 bool ident_is_root(const struct ident* identity, bool use_real);
+
+errno_t ident_copy(struct ident* dst, const struct ident* src);

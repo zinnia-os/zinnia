@@ -5,6 +5,7 @@
 #include <lib/irq.h>
 #include <lib/sched.h>
 #include <lib/signal.h>
+#include <mem/alloc.h>
 #include <mem/usercopy.h>
 #include <syscalls/private.h>
 #include <stdckdint.h>
@@ -12,6 +13,103 @@
 
 static struct task* current_task() {
     return percpu_get()->sched.current;
+}
+
+bool can_signal(struct process* sender, struct process* target, signal_t sig) {
+    const struct ident* from = &sender->identity;
+    const struct ident* to = &target->identity;
+    if (ident_is_root(from, false))
+        return true;
+    if (from->uid == to->uid || from->uid == to->suid || from->euid == to->uid || from->euid == to->suid)
+        return true;
+    return sig == SIGCONT && sender->sid == target->sid;
+}
+
+static errno_t send_checked(struct process* sender, struct process* target, signal_t sig, const struct sig_info* info) {
+    if (!can_signal(sender, target, sig))
+        return EPERM;
+    if (sig && !signal_send(target, sig, info))
+        return ESRCH;
+    return 0;
+}
+
+struct syscall_ret sys_kill(pid_t pid, signal_t sig) {
+    struct syscall_ret ret = {};
+
+    if (sig != 0 && !sig_valid(sig)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    struct process* sender = self();
+    const struct sig_info info = signal_info_user(sender, __SI_USER);
+
+    if (pid > 0) {
+        struct process* target = process_lookup(pid);
+        if (!target) {
+            ret.error = ESRCH;
+            return ret;
+        }
+        ret.error = send_checked(sender, target, sig, &info);
+        process_unref(target);
+        return ret;
+    }
+
+    if (pid == INT32_MIN) {
+        ret.error = ESRCH;
+        return ret;
+    }
+    const pid_t pgid = pid == 0 ? sender->pgid : -pid;
+
+    size_t count;
+    struct process** procs = process_snapshot(&count);
+    if (!procs) {
+        ret.error = ENOMEM;
+        return ret;
+    }
+
+    bool found = false;
+    bool sent = false;
+    for (size_t i = 0; i < count; i++) {
+        struct process* target = procs[i];
+        const bool match = pid == -1 ? target->pid > 1 && target != sender : target->pgid == pgid;
+        if (match) {
+            found = true;
+            sent |= send_checked(sender, target, sig, &info) == 0;
+        }
+        process_unref(target);
+    }
+    mem_free(procs, MAX(count, 1) * sizeof(*procs));
+
+    if (!found) {
+        ret.error = ESRCH;
+        return ret;
+    }
+    if (!sent)
+        ret.error = EPERM;
+    return ret;
+}
+
+struct syscall_ret sys_sigqueue(pid_t pid, signal_t sig, uintptr_t value) {
+    struct syscall_ret ret = {};
+
+    if (sig != 0 && !sig_valid(sig)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    struct process* target = process_lookup(pid);
+    if (!target) {
+        ret.error = ESRCH;
+        return ret;
+    }
+
+    struct process* sender = self();
+    struct sig_info info = signal_info_user(sender, __SI_QUEUE);
+    info.value = value;
+    ret.error = send_checked(sender, target, sig, &info);
+    process_unref(target);
+    return ret;
 }
 
 struct syscall_ret sys_sigaction(signal_t sig, const __user struct __sigaction* act, __user struct __sigaction* oact) {

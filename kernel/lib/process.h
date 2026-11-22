@@ -3,8 +3,10 @@
 #pragma once
 
 #include <fs/ident.h>
+#include <fs/poll.h>
 #include <fs/vfs.h>
 #include <lib/atomic.h>
+#include <lib/condvar.h>
 #include <lib/errno.h>
 #include <lib/mutex.h>
 #include <lib/refcount.h>
@@ -12,9 +14,11 @@
 #include <lib/spin.h>
 #include <lib/tailq.h>
 #include <lib/types.h>
+#include <bits/sched.h>
 #include <stdint.h>
 #include <zinnia/resource.h>
 
+constexpr size_t PROCESS_INITIAL_FDS = 64;
 constexpr size_t PROCESS_DEFAULT_FDS = 1024;
 constexpr size_t PROCESS_MAX_FDS = 1 << 20;
 
@@ -36,13 +40,29 @@ struct fd_table {
     size_t next_free;
 };
 
+enum process_state {
+    PROCESS_RUNNING,
+    PROCESS_ZOMBIE,
+};
+
 struct process {
     struct refcount rc;
     pid_t pid;
 
+    struct process* parent;
+    tailq_head(struct process) children;
+    tailq_link(struct process) sibling;
+    enum process_state state;
+    int exit_status;
+    int exit_code;
+    int exit_info;
+    struct poll_event child_event;
+
     struct spinlock tasks_lock;
     tailq_head(struct task) tasks;
     size_t thread_count;
+    _Atomic(struct task*) single_task;
+    struct poll_event threads_event;
 
     mutex_t lock;
     struct vma* space;
@@ -51,27 +71,65 @@ struct process {
     struct ident identity;
     mode_t umask;
     int8_t nice;
+    bool did_exec;
 
+    pid_t pgid;
+    pid_t sid;
+
+    struct process_signals signals;
     struct process_rlimit limit_nofile;
 
     mutex_t files_lock;
     struct fd_table files;
-
-    struct process_signals signals;
 };
 
 struct process* process_kernel();
 void process_ref(struct process* proc);
 void process_unref(struct process* proc);
+struct process* process_lookup(pid_t pid);
+pid_t process_parent_pid(struct process* proc);
 
 uint8_t process_priority(struct process* proc);
 void process_attach_task(struct process* proc, struct task* task);
 void process_detach_task(struct process* proc, struct task* task);
+bool process_single_thread(struct process* proc);
+bool process_task_must_exit(struct task* task);
 
+errno_t process_spawn_init(const char* path, const char** argv, const char** envp);
+errno_t process_fork(arch_context_t* ctx, pid_t* out_pid);
+errno_t process_exec(const char* path, const char** argv, const char** envp, arch_context_t* ctx);
+errno_t process_fexec(
+    struct vfs_file* file,
+    const char* exec_path,
+    const char** argv,
+    const char** envp,
+    arch_context_t* ctx
+);
+errno_t process_thread_create(uintptr_t ip, uintptr_t sp, size_t* out_tid);
+[[noreturn]]
+void process_thread_exit();
+[[noreturn]]
+void process_exit(int status);
 [[noreturn]]
 void process_exit_signal(signal_t sig);
 
-errno_t process_spawn_init(const char* path, const char** argv, const char** envp);
+struct wait_result {
+    pid_t pid;
+    uid_t uid;
+    int status;
+    int code;
+    int info;
+};
+
+errno_t process_wait(pid_t selector, int options, struct wait_result* out);
+void process_notify_parent(struct process* proc, int code, int status);
+struct process** process_snapshot(size_t* out_count);
+void process_set_nice(struct process* proc, int nice);
+
+errno_t process_setsid(struct process* proc, pid_t* out_sid);
+errno_t process_setpgid(struct process* proc, pid_t pid, pid_t pgid);
+errno_t process_getpgid(struct process* proc, pid_t pid, pid_t* out_pgid);
+errno_t process_getsid(struct process* proc, pid_t pid, pid_t* out_sid);
 
 size_t process_fd_limit(struct process* proc);
 
