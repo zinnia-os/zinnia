@@ -8,6 +8,7 @@
 #include <lib/percpu.h>
 #include <lib/ringbuf.h>
 #include <lib/sched.h>
+#include <lib/signal.h>
 #include <mem/alloc.h>
 #include <mem/usercopy.h>
 #include <zinnia/ioctls.h>
@@ -148,8 +149,13 @@ static errno_t pipe_write(struct vfs_file* file, iovec_iter_t* buffer, uint64_t 
     size_t done = 0;
     mutex_lock(&pipe->lock);
     while (done < total) {
+        // Broken pipe.
         if (pipe->readers == 0) {
             status = EPIPE;
+            if (!done) {
+                const struct sig_info info = signal_info_kernel();
+                signal_send_task(percpu_get()->sched.current, SIGPIPE, &info);
+            }
             break;
         }
 
