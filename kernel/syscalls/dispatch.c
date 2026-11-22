@@ -6,11 +6,13 @@
 #include <lib/panic.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
+#include <lib/process.h>
 #include <lib/sched.h>
 #include <lib/signal.h>
 #include <lib/types.h>
 #include <lib/utils.h>
 #include <syscalls/syscall.h>
+#include <bits/signal.h>
 #include <stdcountof.h>
 
 // Declare all syscalls.
@@ -37,6 +39,18 @@ const char* const syscall_names[256] = {
 #undef SYSCALL_MISSING
 };
 
+static void warn_unimplemented(size_t num) {
+    const char* name = num < countof(syscall_names) && syscall_names[num] ? syscall_names[num] : "(unknown)";
+    struct task* task = percpu_get()->sched.current;
+    log_warn(
+        "syscall: \"%s\" (%zu) is not implemented, called by \"%s\" (pid %d)\n",
+        name,
+        num,
+        task->name,
+        task->process ? task->process->pid : 0
+    );
+}
+
 static void syscall_do_signals(arch_context_t* ctx, const arch_syscall_restart_t* restart, errno_t error) {
     struct task* task = percpu_get()->sched.current;
     const bool restarting = error == ERESTART;
@@ -51,9 +65,7 @@ void syscall_dispatch(arch_context_t* ctx) {
     irq_set_state(true);
 
     if (__unlikely(num >= countof(syscall_table) || syscall_table[num].func == nullptr)) {
-        const char* name = num < countof(syscall_names) && syscall_names[num] ? syscall_names[num] : "(unknown)";
-        log_warn("syscall: \"%s\" (%zu) is not implemented\n", name, num);
-
+        warn_unimplemented(num);
         ctx->ARCH_CTX_RET1 = ENOSYS;
         syscall_do_signals(ctx, &restart, ENOSYS);
         irq_set_state(false);
