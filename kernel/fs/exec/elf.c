@@ -9,6 +9,7 @@
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/sched.h>
+#include <lib/signal.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/layout.h>
@@ -320,6 +321,7 @@ static errno_t elf_load(struct process* proc, struct exec_info* info, uintptr_t*
     WRITE_AUXV(AT_PHNUM, exe.phnum);
     WRITE_AUXV(AT_PHENT, exe.phent);
     WRITE_AUXV(AT_ENTRY, exe.entry);
+    WRITE_AUXV(AT_MINSIGSTKSZ, signal_frame_size());
     if (exe.phdr)
         WRITE_AUXV(AT_PHDR, exe.phdr);
     if (interp_base)

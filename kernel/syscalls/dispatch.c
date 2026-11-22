@@ -2,10 +2,12 @@
 
 #include <lib/compiler.h>
 #include <lib/errno.h>
+#include <lib/irq.h>
 #include <lib/panic.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/sched.h>
+#include <lib/signal.h>
 #include <lib/types.h>
 #include <lib/utils.h>
 #include <syscalls/syscall.h>
@@ -35,14 +37,26 @@ const char* const syscall_names[256] = {
 #undef SYSCALL_MISSING
 };
 
+static void syscall_do_signals(arch_context_t* ctx, const arch_syscall_restart_t* restart, errno_t error) {
+    struct task* task = percpu_get()->sched.current;
+    const bool restarting = error == ERESTART;
+    if (restarting || signal_pending(task) || task->signals.restore_mask)
+        signal_deliver(ctx, restarting ? restart : nullptr);
+}
+
 void syscall_dispatch(arch_context_t* ctx) {
     const size_t num = ctx->ARCH_CTX_NUM;
+    arch_syscall_restart_t restart;
+    syscall_save(ctx, &restart);
+    irq_set_state(true);
 
     if (__unlikely(num >= countof(syscall_table) || syscall_table[num].func == nullptr)) {
         const char* name = num < countof(syscall_names) && syscall_names[num] ? syscall_names[num] : "(unknown)";
         log_warn("syscall: \"%s\" (%zu) is not implemented\n", name, num);
 
         ctx->ARCH_CTX_RET1 = ENOSYS;
+        syscall_do_signals(ctx, &restart, ENOSYS);
+        irq_set_state(false);
         return;
     }
 
@@ -102,4 +116,6 @@ void syscall_dispatch(arch_context_t* ctx) {
 
     ctx->ARCH_CTX_RET0 = ret.value;
     ctx->ARCH_CTX_RET1 = ret.error;
+    syscall_do_signals(ctx, &restart, ret.error);
+    irq_set_state(false);
 }

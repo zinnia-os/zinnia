@@ -31,6 +31,7 @@ kernel_sources += files(
     'rwlock.c',
     'sched.c',
     'semaphore.c',
+    'signal.c',
     'spin.c',
     'stdlib.c',
     'string.c',

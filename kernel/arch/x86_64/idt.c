@@ -11,7 +11,9 @@
 #include <lib/panic.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
+#include <lib/process.h>
 #include <lib/sched.h>
+#include <lib/signal.h>
 #include <lib/timer.h>
 #include <lib/utils.h>
 #include <mem/pmap.h>
@@ -45,6 +47,7 @@ void interrupt_handler(arch_context_t* ctx) {
     struct percpu* cpu = percpu_get();
     struct arch_percpu* arch_cpu = percpu_ref(arch_data);
     uint64_t isr = ctx->isr;
+    const bool from_user = (ctx->cs & CPL_USER) == CPL_USER;
 
     switch (isr) {
     case IDT_PF:
@@ -54,7 +57,7 @@ void interrupt_handler(arch_context_t* ctx) {
         const struct vma_fault_info info = {
             .ip = ctx->rip,
             .addr = cr2,
-            .caused_by_user = (ctx->cs & CPL_USER) == CPL_USER,
+            .caused_by_user = from_user,
             .caused_by_write = ctx->error & (1 << 1),
             .caused_by_fetch = ctx->error & (1 << 4),
             .page_was_present = ctx->error & (1 << 0),
@@ -79,6 +82,15 @@ void interrupt_handler(arch_context_t* ctx) {
                 ctx->rip = (uintptr_t)region->fault_ip;
                 break;
             }
+        }
+
+        if (from_user) {
+            const struct sig_info fault = {
+                .code = fault_status == EACCES ? __SEGV_ACCERR : __SEGV_MAPERR,
+                .addr = info.addr,
+            };
+            signal_force(current, SIGSEGV, &fault);
+            break;
         }
 
         panic(
@@ -110,8 +122,47 @@ void interrupt_handler(arch_context_t* ctx) {
             sched_reschedule(&cpu->sched);
         break;
     default:
-        if (isr < 0x20)
+        if (isr < 0x20) {
+            // Map the exception to a signal.
+            signal_t sig = 0;
+            int code = __SI_KERNEL;
+            switch (isr) {
+            case IDT_DE:
+                sig = SIGFPE;
+                code = __FPE_INTDIV;
+                break;
+            case IDT_DB:
+            case IDT_BP:
+                sig = SIGTRAP;
+                code = __TRAP_BRKPT;
+                break;
+            case IDT_UD:
+                sig = SIGILL;
+                code = __ILL_ILLOPC;
+                break;
+            case IDT_MF:
+            case IDT_XM:
+                sig = SIGFPE;
+                break;
+            case IDT_AC:
+                sig = SIGBUS;
+                code = __BUS_ADRALN;
+                break;
+            case IDT_OF:
+            case IDT_BR:
+            case IDT_NM:
+            case IDT_SS:
+            case IDT_GP:
+                sig = SIGSEGV;
+                break;
+            }
+            if (from_user && sig) {
+                const struct sig_info fault = {.code = code, .addr = ctx->rip};
+                signal_force(cpu->sched.current, sig, &fault);
+                break;
+            }
             panic("Unhandled exception %lu at %#lx, error: %#lx\n", isr, ctx->rip, ctx->error);
+        }
         assert(isr - 0x20 < countof(arch_cpu->irq_lines), "Unhandled interrupt on ISR %lu", isr);
         struct irq_line* line = arch_cpu->irq_lines[isr - 0x20];
         assert(line, "Unhandled interrupt on ISR %lu", isr);
@@ -119,6 +170,14 @@ void interrupt_handler(arch_context_t* ctx) {
         irq_line_raise(line);
         if (arch_sched_preempt_enable() && cpu->sched.owe_preempt)
             sched_reschedule(&cpu->sched);
+    }
+
+    // Deliver pending signals before we return to user space.
+    struct task* task = percpu_get()->sched.current;
+    if (from_user && task && task->process != process_kernel() && signal_pending(task)) {
+        irq_set_state(true);
+        signal_deliver(ctx, nullptr);
+        irq_set_state(false);
     }
 }
 

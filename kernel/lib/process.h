@@ -8,6 +8,7 @@
 #include <lib/errno.h>
 #include <lib/mutex.h>
 #include <lib/refcount.h>
+#include <lib/signal.h>
 #include <lib/spin.h>
 #include <lib/tailq.h>
 #include <lib/types.h>
@@ -55,6 +56,8 @@ struct process {
 
     mutex_t files_lock;
     struct fd_table files;
+
+    struct process_signals signals;
 };
 
 struct process* process_kernel();
@@ -64,6 +67,9 @@ void process_unref(struct process* proc);
 uint8_t process_priority(struct process* proc);
 void process_attach_task(struct process* proc, struct task* task);
 void process_detach_task(struct process* proc, struct task* task);
+
+[[noreturn]]
+void process_exit_signal(signal_t sig);
 
 errno_t process_spawn_init(const char* path, const char** argv, const char** envp);
 

@@ -4,6 +4,7 @@ kernel_sources += files(
     'memory.c',
     'module.c',
     'process.c',
+    'signal.c',
     'system.c',
     'vfs.c',
 )

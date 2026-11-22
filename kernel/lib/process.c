@@ -3,6 +3,7 @@
 #include <fs/exec/exec.h>
 #include <lib/atomic.h>
 #include <lib/epoch.h>
+#include <lib/panic.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/process.h>
@@ -138,6 +139,7 @@ static void process_init_common(struct process* proc) {
     mutex_init(&proc->lock);
     mutex_init(&proc->files_lock);
     vec_init(&proc->identity.groups);
+    signal_process_init(proc);
 }
 
 struct process* process_kernel() {
@@ -295,6 +297,12 @@ errno_t process_spawn_init(const char* path, const char** argv, const char** env
 
     sched_add_task(&percpu_get()->sched, task);
     return 0;
+}
+
+// TODO
+void process_exit_signal(signal_t sig) {
+    struct process* proc = percpu_get()->sched.current->process;
+    panic("TODO");
 }
 
 errno_t process_fd_alloc(struct process* proc, struct vfs_file* file, bool cloexec, int* out_fd) {

@@ -6,6 +6,7 @@
 #include <lib/errno.h>
 #include <lib/init.h>
 #include <lib/initgraph.h>
+#include <lib/signal.h>
 #include <lib/spin.h>
 #include <lib/tailq.h>
 #include <lib/timer.h>
@@ -77,6 +78,8 @@ struct task {
     tailq_link(struct task) ts_link;         // Link in the waiters of `blocked_ts`.
     uint8_t ts_queue;
     atomic_bool ts_woken;
+
+    struct task_signals signals;
 
     tailq_link(struct task) next;
 };

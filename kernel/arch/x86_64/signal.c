@@ -4,11 +4,11 @@
 #include <arch/x86_64/defs.h>
 #include <arch/x86_64/percpu.h>
 #include <lib/percpu.h>
+#include <lib/signal.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/layout.h>
 #include <mem/usercopy.h>
-#include <bits/signal.h>
 #include <stdckdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -66,53 +66,17 @@ static struct frame_layout frame_layout() {
     return (struct frame_layout){.ext_offset = ext_offset, .ext_size = ext_size, .size = ext_offset + ext_size};
 }
 
-static bool on_alt_stack(const struct sig_delivery* delivery, uint64_t sp) {
-    return delivery->alt_size && sp > delivery->alt_sp && sp - delivery->alt_sp <= delivery->alt_size;
-}
-
-static errno_t find_tag(uintptr_t uc_addr, uint32_t magic, struct __mcontext_tag* out) {
-    for (size_t i = 0; i < MAX_TAGS; i++) {
-        const uintptr_t addr = uc_addr + sizeof(__ucontext_t) + i * sizeof(*out);
-        if (!usercopy_read(out, (const __user void*)addr, sizeof(*out)))
-            return EFAULT;
-        if (out->magic == __MC_TAG_END)
-            return ENOENT;
-        if (out->magic == magic)
-            return 0;
-    }
-    return EFAULT;
-}
-
-static errno_t load_xsave(const __ucontext_t* uc, uintptr_t uc_addr, uint8_t* ext, size_t ext_size) {
-    uint64_t* header = (uint64_t*)ext;
-    if (uc->uc_flags & __UC_TAGS) {
-        struct __mcontext_tag tag;
-        const errno_t status = find_tag(uc_addr, __MC_TAG_X86_64_XSAVE, &tag);
-        if (status && status != ENOENT)
-            return status;
-
-        uintptr_t addr;
-        if (!status) {
-            if (tag.size != ext_size || tag.offset < sizeof(__ucontext_t) || tag.offset % XSAVE_ALIGN ||
-                ckd_add(&addr, uc_addr, tag.offset) || !usercopy_read(ext, (const __user void*)addr, ext_size))
-                return EFAULT;
-            if ((header[0] & ~asm_rdxcr(0)) || header[1] || header[2])
-                return EFAULT;
-        }
-    }
-    header[0] |= XCR0_X87 | XCR0_SSE;
-    return 0;
-}
-
 size_t arch_signal_frame_size() {
-    return ROUND_UP(sizeof(struct __siginfo), 16) + frame_layout().size + XSAVE_ALIGN + sizeof(uint64_t);
+    return sizeof(struct __siginfo) + 16 + frame_layout().size + XSAVE_ALIGN + sizeof(uint64_t);
 }
 
 errno_t arch_signal_setup_frame(arch_context_t* ctx, const struct sig_delivery* delivery) {
     if (!arch_mem_addr_is_user(delivery->handler) || !arch_mem_addr_is_user(delivery->restorer))
         return EFAULT;
 
-    const bool on_alt = on_alt_stack(delivery, ctx->rsp);
+    // Check if the interrupted code was already running on the alternate stack.
+    const bool on_alt =
+        delivery->alt_size && ctx->rsp > delivery->alt_sp && ctx->rsp - delivery->alt_sp <= delivery->alt_size;
     const bool use_alt = (delivery->flags & __SA_ONSTACK) && delivery->alt_size && !on_alt;
     const uint64_t base = use_alt ? delivery->alt_sp + delivery->alt_size : ctx->rsp - RED_ZONE;
     if (base < arch_signal_frame_size() || !arch_mem_addr_is_user(base - 1))
@@ -122,6 +86,8 @@ errno_t arch_signal_setup_frame(arch_context_t* ctx, const struct sig_delivery* 
     const uint64_t info_addr = ROUND_DOWN(base - sizeof(struct __siginfo), 16);
     const uint64_t uc_addr = ROUND_DOWN(info_addr - layout.size, XSAVE_ALIGN);
     const uint64_t ret_addr = uc_addr - sizeof(uint64_t);
+    if ((use_alt || on_alt) && ret_addr < delivery->alt_sp)
+        return EFAULT;
 
     struct fpu_buffer fpu;
     errno_t status = fpu_buffer_alloc(&fpu);
@@ -206,8 +172,35 @@ errno_t arch_signal_restore_context(arch_context_t* ctx, const __ucontext_t* uc,
     status = mc->mc_fpregs.mxcsr & ~mxcsr_mask ? EFAULT : 0;
 
     if (!status && fpu.size > FXSAVE_SIZE) {
-        memset(fpu.state + FXSAVE_SIZE, 0, fpu.size - FXSAVE_SIZE);
-        status = load_xsave(uc, uc_addr, fpu.state + FXSAVE_SIZE, fpu.size - FXSAVE_SIZE);
+        uint8_t* ext = fpu.state + FXSAVE_SIZE;
+        const size_t ext_size = fpu.size - FXSAVE_SIZE;
+        uint64_t* header = (uint64_t*)ext;
+        memset(ext, 0, ext_size);
+
+        // Walk the tag table after the context and load the XSAVE payload if there is one.
+        if (uc->uc_flags & __UC_TAGS) {
+            struct __mcontext_tag tag;
+            bool found = false;
+            status = EFAULT;
+            for (size_t i = 0; i < MAX_TAGS; i++) {
+                const uintptr_t addr = uc_addr + sizeof(__ucontext_t) + i * sizeof(tag);
+                if (!usercopy_read(&tag, (const __user void*)addr, sizeof(tag)))
+                    break;
+                if (tag.magic == __MC_TAG_END || tag.magic == __MC_TAG_X86_64_XSAVE) {
+                    found = tag.magic == __MC_TAG_X86_64_XSAVE;
+                    status = 0;
+                    break;
+                }
+            }
+
+            uintptr_t addr;
+            if (found &&
+                (tag.size != ext_size || tag.offset < sizeof(__ucontext_t) || tag.offset % XSAVE_ALIGN ||
+                 ckd_add(&addr, uc_addr, tag.offset) || !usercopy_read(ext, (const __user void*)addr, ext_size) ||
+                 (header[0] & ~asm_rdxcr(0)) || header[1] || header[2]))
+                status = EFAULT;
+        }
+        header[0] |= XCR0_X87 | XCR0_SSE;
     }
 
     if (status) {
@@ -246,8 +239,4 @@ void arch_syscall_restart(arch_context_t* ctx, const arch_syscall_restart_t* res
 void arch_syscall_set_return(arch_context_t* ctx, uintptr_t value, errno_t error) {
     ctx->rax = value;
     ctx->rdx = error;
-}
-
-bool arch_context_is_user(const arch_context_t* ctx) {
-    return (ctx->cs & CPL_USER) == CPL_USER;
 }
