@@ -8,6 +8,7 @@
 #include <lib/initgraph.h>
 #include <lib/mutex.h>
 #include <lib/ringbuf.h>
+#include <lib/signal.h>
 #include <lib/types.h>
 #include <zinnia/termios.h>
 
@@ -25,7 +26,6 @@ struct tty_ops {
     void (*destroy)(struct tty* tty);
 };
 
-// TODO: foreground pgrp and session.
 struct tty {
     struct chardev dev;
     char name[TTY_NAME_MAX];
@@ -40,6 +40,9 @@ struct tty {
     size_t eof_pending;
     struct poll_event read_event;
     _Atomic(bool) hung_up;
+
+    pid_t pgrp;
+    pid_t session;
 };
 
 errno_t tty_init(struct tty* tty, const char* name, const struct tty_ops* ops, uint32_t major, uint32_t minor);
@@ -50,8 +53,10 @@ errno_t tty_register(struct tty* tty, mode_t mode);
 void tty_input(struct tty* tty, const char* buf, size_t len);
 void tty_hangup(struct tty* tty);
 void tty_set_winsize(struct tty* tty, const struct __winsize* winsize);
+void tty_signal_foreground(struct tty* tty, signal_t sig);
 bool tty_is_hung_up(struct tty* tty);
 
 errno_t tty_ioctl(struct tty* tty, struct vfs_file* file, uintptr_t request, uintptr_t arg, uintptr_t* out_result);
+void tty_detach_session_locked(struct tty* tty);
 
 INIT_EXTERN(tty_stage);

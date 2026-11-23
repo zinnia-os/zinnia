@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <dev/tty/tty.h>
 #include <fs/exec/exec.h>
 #include <lib/assert.h>
 #include <lib/atomic.h>
+#include <lib/console.h>
 #include <lib/epoch.h>
 #include <lib/hashmap.h>
 #include <lib/irq.h>
@@ -290,6 +292,13 @@ static void rlimit_init(struct process_rlimit* limit, rlim_t cur, rlim_t max) {
 }
 
 static void process_discard(struct process* proc) {
+    // Drop the controlling terminal inherited at fork.
+    mutex_lock(&session_lock);
+    struct tty* tty = proc->ctty;
+    proc->ctty = nullptr;
+    mutex_unlock(&session_lock);
+    if (tty)
+        tty_unref(tty);
     vfs_path_drop(proc->root);
     vfs_path_drop(proc->cwd);
     process_unref(proc);
@@ -331,6 +340,9 @@ static errno_t process_alloc(struct process* parent, struct process** out) {
     mutex_lock(&session_lock);
     proc->pgid = parent->pgid;
     proc->sid = parent->sid;
+    proc->ctty = parent->ctty;
+    if (proc->ctty)
+        tty_ref(proc->ctty);
     mutex_unlock(&session_lock);
 
     signal_process_init(proc, parent);
@@ -427,6 +439,14 @@ errno_t process_spawn_init(const char* path, const char** argv, const char** env
     }
 
     proc->sid = proc->pid;
+    struct tty* tty = console_get_tty();
+    if (tty) {
+        mutex_lock(&session_lock);
+        tty->session = proc->sid;
+        tty->pgrp = proc->pgid;
+        proc->ctty = tty;
+        mutex_unlock(&session_lock);
+    }
 
     struct vfs_file* console;
     status = vfs_file_open(proc->root, proc->cwd, "/dev/console", O_RDWR, 0, ident_kernel(), &console);
@@ -622,6 +642,16 @@ static void do_exit(int wait_status, int code, int info) {
 
     signal_process_fini(proc);
     close_files(proc, false);
+
+    // Drop the controlling terminal, and detach it from the session if we lead it.
+    mutex_lock(&session_lock);
+    struct tty* tty = proc->ctty;
+    proc->ctty = nullptr;
+    if (tty && proc->sid == proc->pid)
+        tty_detach_session_locked(tty);
+    mutex_unlock(&session_lock);
+    if (tty)
+        tty_unref(tty);
     mutex_lock(&proc->lock);
     vfs_path_drop(proc->root);
     vfs_path_drop(proc->cwd);
@@ -825,12 +855,43 @@ struct process** process_snapshot(size_t* out_count) {
     return procs;
 }
 
+bool process_pgrp_orphaned(pid_t pgid, pid_t sid) {
+    size_t count;
+    struct process** procs = process_snapshot(&count);
+    if (!procs)
+        return false;
+
+    bool orphaned = true;
+    mutex_lock(&tree_lock);
+    for (size_t i = 0; i < count && orphaned; i++) {
+        struct process* proc = procs[i];
+        struct process* parent = proc->parent;
+        if (proc->pgid == pgid && proc->state != PROCESS_ZOMBIE && parent && parent != &kernel_process &&
+            parent->pgid != pgid && parent->sid == sid)
+            orphaned = false;
+    }
+    mutex_unlock(&tree_lock);
+
+    for (size_t i = 0; i < count; i++)
+        process_unref(procs[i]);
+    mem_free(procs, MAX(count, 1) * sizeof(*procs));
+    return orphaned;
+}
+
 void process_set_nice(struct process* proc, int nice) {
     proc->nice = MAX(-20, MIN(19, nice));
     spin_lock(&proc->tasks_lock);
     for (struct task* task = tailq_first(&proc->tasks); task; task = tailq_next(task, process_link))
         sched_set_priority(task, process_priority(proc));
     spin_unlock(&proc->tasks_lock);
+}
+
+void process_session_lock() {
+    mutex_lock(&session_lock);
+}
+
+void process_session_unlock() {
+    mutex_unlock(&session_lock);
 }
 
 static bool any_process(bool (*match)(struct process* proc, pid_t a, pid_t b), pid_t a, pid_t b) {
@@ -882,8 +943,24 @@ static bool in_pgrp_and_session(struct process* proc, pid_t pgid, pid_t sid) {
     return proc->pgid == pgid && proc->sid == sid;
 }
 
+bool process_pgrp_in_session(pid_t pgid, pid_t sid) {
+    return any_process(in_pgrp_and_session, pgid, sid);
+}
+
 static bool in_pgrp_other(struct process* proc, pid_t pgid, pid_t self) {
     return proc->pgid == pgid && proc->pid != self;
+}
+
+void process_clear_ctty(pid_t sid, struct tty* tty) {
+    rwlock_read_lock(&pid_lock);
+    hashmap_foreach(&pid_table, i) {
+        struct process* proc = pid_table.values[i];
+        if (proc->sid == sid && proc->ctty == tty) {
+            proc->ctty = nullptr;
+            tty_unref(tty);
+        }
+    }
+    rwlock_read_unlock(&pid_lock);
 }
 
 errno_t process_setsid(struct process* proc, pid_t* out_sid) {
@@ -894,10 +971,14 @@ errno_t process_setsid(struct process* proc, pid_t* out_sid) {
         return EPERM;
     }
 
+    struct tty* tty = proc->ctty;
     proc->pgid = proc->pid;
     proc->sid = proc->pid;
+    proc->ctty = nullptr;
     mutex_unlock(&session_lock);
 
+    if (tty)
+        tty_unref(tty);
     *out_sid = proc->pid;
     return 0;
 }

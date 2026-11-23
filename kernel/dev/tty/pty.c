@@ -4,6 +4,7 @@
 #include <lib/assert.h>
 #include <lib/atomic.h>
 #include <lib/print.h>
+#include <lib/signal.h>
 #include <mem/alloc.h>
 #include <mem/usercopy.h>
 #include <zinnia/termios.h>
@@ -226,7 +227,11 @@ static errno_t master_ioctl(struct vfs_file* file, uintptr_t request, uintptr_t 
         value = pty->packet;
         mutex_unlock(&pty->lock);
         return write_int(arg, value);
-    // TODO: TIOCSIG
+    case TIOCSIG:
+        if (!sig_valid((int)arg))
+            return EINVAL;
+        tty_signal_foreground(&pty->tty, (int)arg);
+        return 0;
     case FIONREAD:
         mutex_lock(&pty->lock);
         value = ringbuf_len(&pty->master_buf);
@@ -254,10 +259,11 @@ static enum poll_flags master_poll(struct vfs_file* file, enum poll_flags events
 static void master_release(struct vfs_file* file) {
     struct pty* pty = file->priv;
 
+    tty_signal_foreground(&pty->tty, SIGHUP);
+    tty_signal_foreground(&pty->tty, SIGCONT);
     tty_hangup(&pty->tty);
     poll_event_notify(&pty->master_read_event);
     poll_event_notify(&pty->master_write_event);
-    // TODO: SIGHUP and SIGCONT to the foreground pgrp
     devtmpfs_remove(pty->tty.name);
     tty_unref(&pty->tty);
 }

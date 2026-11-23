@@ -8,6 +8,7 @@
 #include <lib/percpu.h>
 #include <lib/process.h>
 #include <lib/sched.h>
+#include <lib/signal.h>
 #include <lib/utils.h>
 #include <mem/usercopy.h>
 #include <string.h>
@@ -20,10 +21,12 @@ struct tty_out {
     char buf[64];
     size_t len;
     bool wake;
+    sigset_t signals;
 };
 
 static const struct vfs_file_ops tty_file_ops;
 
+static struct chardev ctty_dev;
 static struct chardev console_dev;
 
 static struct process* current_process() {
@@ -90,7 +93,32 @@ void tty_input(struct tty* tty, const char* buf, size_t len) {
             c = '\r';
         }
 
-        // TODO: ISIG signal delivery to the foreground pgrp.
+        // Turn the signal characters into signals.
+        if (t->c_lflag & __ISIG) {
+            const char* echo = nullptr;
+            signal_t sig = 0;
+            if (is_cc(t, __VINTR, c)) {
+                echo = "^C\n";
+                sig = SIGINT;
+            } else if (is_cc(t, __VQUIT, c)) {
+                echo = "^\\\n";
+                sig = SIGQUIT;
+            } else if (is_cc(t, __VSUSP, c)) {
+                echo = "^Z\n";
+                sig = SIGTSTP;
+            }
+
+            if (echo) {
+                out.signals |= sig_bit(sig);
+                if (!(t->c_lflag & __NOFLSH)) {
+                    ringbuf_clear(&tty->read_buf);
+                    tty->canon_len = 0;
+                }
+                if (t->c_lflag & __ECHO)
+                    out_puts(&out, echo);
+                continue;
+            }
+        }
 
         if (!(t->c_lflag & __ICANON)) {
             // Pass the byte straight through in raw mode.
@@ -145,6 +173,44 @@ void tty_input(struct tty* tty, const char* buf, size_t len) {
 
     if (out.wake)
         poll_event_notify(&tty->read_event);
+    for (sigset_t pending = out.signals; pending; pending &= pending - 1)
+        tty_signal_foreground(tty, __builtin_ctzll(pending) + 1);
+}
+
+void tty_signal_foreground(struct tty* tty, signal_t sig) {
+    process_session_lock();
+    const pid_t pgrp = tty->pgrp;
+    process_session_unlock();
+
+    if (pgrp) {
+        const struct sig_info info = signal_info_kernel();
+        signal_send_pgrp(pgrp, sig, &info);
+    }
+}
+
+static errno_t job_control_gate(struct tty* tty, bool is_read) {
+    struct task* task = percpu_get()->sched.current;
+    struct process* proc = task->process;
+
+    process_session_lock();
+    const bool is_ctty = proc->ctty == tty;
+    const pid_t pgrp = proc->pgid;
+    const pid_t sid = proc->sid;
+    const pid_t foreground = tty->pgrp;
+    process_session_unlock();
+
+    if (!is_ctty || !foreground || foreground == pgrp)
+        return 0;
+
+    const signal_t sig = is_read ? SIGTTIN : SIGTTOU;
+    if (signal_blocked_or_ignored(task, sig))
+        return is_read ? EIO : 0;
+    if (process_pgrp_orphaned(pgrp, sid))
+        return EIO;
+
+    const struct sig_info info = signal_info_kernel();
+    signal_send_pgrp(pgrp, sig, &info);
+    return ERESTART;
 }
 
 void tty_hangup(struct tty* tty) {
@@ -166,7 +232,9 @@ static bool canon_readable(struct tty* tty) {
 
 static errno_t tty_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t offset, ssize_t* out_read) {
     struct tty* tty = file->priv;
-    // TODO: SIGTTIN job control gate for background process groups.
+    errno_t gate = job_control_gate(tty, true);
+    if (gate)
+        return gate;
 
     struct poll_table table;
     poll_table_init(&table);
@@ -249,7 +317,15 @@ static errno_t tty_write(struct vfs_file* file, iovec_iter_t* buffer, uint64_t o
     struct tty* tty = file->priv;
     if (tty_is_hung_up(tty))
         return EIO;
-    // TODO: TOSTOP/SIGTTOU job control gate
+
+    mutex_lock(&tty->lock);
+    const bool tostop = tty->termios.c_lflag & __TOSTOP;
+    mutex_unlock(&tty->lock);
+    if (tostop) {
+        errno_t gate = job_control_gate(tty, false);
+        if (gate)
+            return gate;
+    }
 
     char in[TTY_IO_CHUNK];
     char out[TTY_IO_CHUNK * 2];
@@ -331,11 +407,35 @@ static errno_t set_termios(struct tty* tty, uintptr_t arg, bool flush) {
     return 0;
 }
 
+static errno_t require_ctty_locked(struct tty* tty, struct process* proc) {
+    return proc->ctty == tty && tty->session == proc->sid ? 0 : ENOTTY;
+}
+
+void tty_detach_session_locked(struct tty* tty) {
+    const pid_t sid = tty->session;
+    if (!sid)
+        return;
+
+    tty->session = 0;
+    tty->pgrp = 0;
+    process_clear_ctty(sid, tty);
+}
+
+static errno_t get_session_value(struct tty* tty, bool want_session, uintptr_t arg) {
+    process_session_lock();
+    errno_t status = require_ctty_locked(tty, current_process());
+    const pid_t value = want_session ? tty->session : tty->pgrp;
+    process_session_unlock();
+    return status ? status : write_int(arg, value);
+}
+
 void tty_set_winsize(struct tty* tty, const struct __winsize* winsize) {
     mutex_lock(&tty->lock);
+    const bool changed = memcmp(&tty->winsize, winsize, sizeof(*winsize)) != 0;
     tty->winsize = *winsize;
     mutex_unlock(&tty->lock);
-    // TODO: SIGWINCH to the foreground pgrp when the size changes.
+    if (changed)
+        tty_signal_foreground(tty, SIGWINCH);
 }
 
 errno_t tty_ioctl(struct tty* tty, struct vfs_file* file, uintptr_t request, uintptr_t arg, uintptr_t* out_result) {
@@ -385,7 +485,70 @@ errno_t tty_ioctl(struct tty* tty, struct vfs_file* file, uintptr_t request, uin
         const size_t len = strlen(file->absolute_path) + 1;
         return usercopy_write((__user void*)arg, file->absolute_path, len) ? 0 : EFAULT;
     }
-    // TODO: TIOCGPGRP, TIOCSPGRP, TIOCGSID, TIOCSCTTY, TIOCNOTTY
+    case TIOCGPGRP:
+        return get_session_value(tty, false, arg);
+    case TIOCGSID:
+        return get_session_value(tty, true, arg);
+    case TIOCSPGRP: {
+        // Move a pgrp of our session to the foreground.
+        int pgrp;
+        if (!usercopy_read(&pgrp, (const __user void*)arg, sizeof(pgrp)))
+            return EFAULT;
+        if (pgrp <= 0)
+            return EINVAL;
+
+        errno_t status = job_control_gate(tty, false);
+        if (status)
+            return status;
+
+        struct process* proc = current_process();
+        process_session_lock();
+        status = require_ctty_locked(tty, proc);
+        if (!status && !process_pgrp_in_session(pgrp, proc->sid))
+            status = EPERM;
+        if (!status)
+            tty->pgrp = pgrp;
+        process_session_unlock();
+        return status;
+    }
+    case TIOCSCTTY: {
+        // Make this the controlling terminal of our session and drop the old one.
+        struct process* proc = current_process();
+        errno_t status = 0;
+        process_session_lock();
+        if (proc->sid != proc->pid) {
+            status = EPERM;
+        } else if (proc->ctty != tty) {
+            if (proc->ctty) {
+                status = EPERM;
+            } else {
+                if (tty->session && tty->session != proc->sid)
+                    tty_detach_session_locked(tty);
+                tty->session = proc->sid;
+                tty->pgrp = proc->pgid;
+                tty_ref(tty);
+                proc->ctty = tty;
+            }
+        }
+        process_session_unlock();
+        return status;
+    }
+    case TIOCNOTTY: {
+        // Give up the controlling terminal.
+        struct process* proc = current_process();
+        process_session_lock();
+        errno_t status = require_ctty_locked(tty, proc);
+        if (!status) {
+            if (proc->sid == proc->pid) {
+                tty_detach_session_locked(tty);
+            } else {
+                proc->ctty = nullptr;
+                tty_unref(tty);
+            }
+        }
+        process_session_unlock();
+        return status;
+    }
     case TIOCCONS:
         if (current_process()->identity.euid != 0)
             return EPERM;
@@ -480,6 +643,8 @@ errno_t tty_init(struct tty* tty, const char* name, const struct tty_ops* ops, u
     tty->eof_pending = 0;
     poll_event_init(&tty->read_event);
     atomic_init(&tty->hung_up, false);
+    tty->pgrp = 0;
+    tty->session = 0;
     return 0;
 }
 
@@ -495,8 +660,7 @@ errno_t tty_register(struct tty* tty, mode_t mode) {
     return devtmpfs_add_chardev(tty->name, &tty->dev, mode);
 }
 
-static errno_t console_open(struct chardev* dev, struct vfs_file* file) {
-    struct tty* tty = console_get_tty();
+static errno_t attach_borrowed(struct tty* tty, struct vfs_file* file) {
     if (!tty)
         return ENXIO;
     errno_t status = attach_file(tty, file);
@@ -504,12 +668,32 @@ static errno_t console_open(struct chardev* dev, struct vfs_file* file) {
     return status;
 }
 
+static errno_t ctty_open(struct chardev* dev, struct vfs_file* file) {
+    struct process* proc = current_process();
+
+    process_session_lock();
+    struct tty* tty = proc->ctty;
+    if (tty)
+        tty_ref(tty);
+    process_session_unlock();
+
+    return attach_borrowed(tty, file);
+}
+
+static errno_t console_open(struct chardev* dev, struct vfs_file* file) {
+    return attach_borrowed(console_get_tty(), file);
+}
+
+static const struct chardev_ops ctty_dev_ops = {.open = ctty_open};
 static const struct chardev_ops console_dev_ops = {.open = console_open};
 
 static void tty_stage_init(struct boot_info* info) {
-    // TODO: /dev/tty
+    chardev_init(&ctty_dev, &ctty_dev_ops, nullptr, 5, 0);
+    errno_t status = devtmpfs_add_chardev("tty", &ctty_dev, 0666);
+    assert(status == 0, "Unable to create /dev/tty (%i)", status);
+
     chardev_init(&console_dev, &console_dev_ops, nullptr, 5, 1);
-    errno_t status = devtmpfs_add_chardev("console", &console_dev, 0600);
+    status = devtmpfs_add_chardev("console", &console_dev, 0600);
     assert(status == 0, "Unable to create /dev/console (%i)", status);
 }
 

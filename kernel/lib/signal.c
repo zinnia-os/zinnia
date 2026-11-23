@@ -6,6 +6,7 @@
 #include <lib/process.h>
 #include <lib/sched.h>
 #include <lib/signal.h>
+#include <mem/alloc.h>
 #include <stdckdint.h>
 #include <string.h>
 
@@ -161,6 +162,15 @@ bool signal_pending(struct task* task) {
     return pending & ~atomic_load(&task->signals.mask, ATOMIC_RELAXED);
 }
 
+bool signal_blocked_or_ignored(struct task* task, signal_t sig) {
+    struct process_signals* s = &task->process->signals;
+    spin_lock(&s->lock);
+    const bool result = (atomic_load(&task->signals.mask, ATOMIC_RELAXED) & sig_bit(sig)) ||
+        s->actions[sig - 1].sa_handler == __SIG_IGN;
+    spin_unlock(&s->lock);
+    return result;
+}
+
 static bool do_send(struct process* proc, ssize_t tid, signal_t sig, const struct sig_info* info) {
     if (sig == 0) {
         // Signal 0 only checks if the target exists, so just look for a matching task.
@@ -254,6 +264,25 @@ void signal_force(struct task* task, signal_t sig, const struct sig_info* info) 
     atomic_fetch_and(&task->signals.mask, ~sig_bit(sig), ATOMIC_RELAXED);
     queue_add(&task->signals.queue, sig, info);
     spin_unlock(&s->lock);
+}
+
+size_t signal_send_pgrp(pid_t pgid, signal_t sig, const struct sig_info* info) {
+    if (pgid <= 0)
+        return 0;
+
+    size_t count;
+    struct process** procs = process_snapshot(&count);
+    if (!procs)
+        return 0;
+
+    size_t sent = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (procs[i]->pgid == pgid && signal_send(procs[i], sig, info))
+            sent++;
+        process_unref(procs[i]);
+    }
+    mem_free(procs, MAX(count, 1) * sizeof(*procs));
+    return sent;
 }
 
 void signal_flush_ignored(struct process* proc, signal_t sig) {

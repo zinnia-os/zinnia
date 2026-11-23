@@ -130,6 +130,7 @@ struct sig_info signal_info_kernel();
 struct sig_info signal_info_user(struct process* sender, int code);
 
 bool signal_pending(struct task* task);
+bool signal_blocked_or_ignored(struct task* task, signal_t sig);
 
 // Queue `sig` on `proc` and wake a thread that doesn't block it.
 bool signal_send(struct process* proc, signal_t sig, const struct sig_info* info);
@@ -138,6 +139,7 @@ bool signal_send_thread(struct process* proc, size_t tid, signal_t sig, const st
 
 // Queue a synchronous fault signal on `task`.
 void signal_force(struct task* task, signal_t sig, const struct sig_info* info);
+size_t signal_send_pgrp(pid_t pgid, signal_t sig, const struct sig_info* info);
 
 void signal_flush_ignored(struct process* proc, signal_t sig);
 signal_t signal_dequeue(struct task* task, sigset_t set, struct sig_info* out_info);

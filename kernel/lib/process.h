@@ -23,6 +23,7 @@ constexpr size_t PROCESS_DEFAULT_FDS = 1024;
 constexpr size_t PROCESS_MAX_FDS = 1 << 20;
 
 struct task;
+struct tty;
 struct vma;
 
 struct process_rlimit {
@@ -75,6 +76,7 @@ struct process {
 
     pid_t pgid;
     pid_t sid;
+    struct tty* ctty;
 
     struct process_signals signals;
     struct process_rlimit limit_nofile;
@@ -125,7 +127,13 @@ struct wait_result {
 errno_t process_wait(pid_t selector, int options, struct wait_result* out);
 void process_notify_parent(struct process* proc, int code, int status);
 struct process** process_snapshot(size_t* out_count);
+bool process_pgrp_orphaned(pid_t pgid, pid_t sid);
 void process_set_nice(struct process* proc, int nice);
+
+void process_session_lock();
+void process_session_unlock();
+bool process_pgrp_in_session(pid_t pgid, pid_t sid);
+void process_clear_ctty(pid_t sid, struct tty* tty);
 
 errno_t process_setsid(struct process* proc, pid_t* out_sid);
 errno_t process_setpgid(struct process* proc, pid_t pid, pid_t pgid);
