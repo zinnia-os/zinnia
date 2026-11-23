@@ -16,3 +16,4 @@ kernel_sources += files(
 )
 
 subdir('exec')
+subdir('ext2')

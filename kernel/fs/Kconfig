@@ -1,0 +1,7 @@
+menu "File systems"
+
+config EXT2
+  tristate "Second extended file system"
+  default y
+
+endmenu
