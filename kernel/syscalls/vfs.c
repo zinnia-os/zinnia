@@ -329,10 +329,8 @@ static struct syscall_ret do_remove(int dirfd, const __user char* path, bool dir
     return ret;
 }
 
-constexpr size_t IOV_MAX = 1024;
-
 static errno_t copy_iovecs(const __user iovec_t* iov, size_t count, iovec_t** out) {
-    if (count > IOV_MAX)
+    if (count > __IOV_MAX)
         return EINVAL;
     const size_t buf_size = MAX(count, 1) * sizeof(iovec_t);
     iovec_t* iovecs = mem_alloc(buf_size, 0);

@@ -17,7 +17,6 @@
 #include <zinnia/sched.h>
 #include <zinnia/wait.h>
 
-constexpr size_t NGROUPS_MAX = 65536;
 constexpr uid_t UID_KEEP = (uid_t)-1;
 constexpr gid_t GID_KEEP = (gid_t)-1;
 
@@ -30,7 +29,6 @@ static bool ident_has_gid(const struct ident* id, gid_t gid) {
 }
 
 constexpr size_t EXEC_MAX_STRINGS = 4096;
-constexpr size_t EXEC_MAX_BYTES = (256 * 1024);
 
 static errno_t copy_string(const __user char* src, size_t max, size_t* budget, char** out) {
     size_t len;
@@ -81,7 +79,7 @@ static errno_t copy_strings(const __user uintptr_t* src, size_t* budget, char***
         }
 
         char* str;
-        errno_t status = copy_string((const __user char*)ptr, EXEC_MAX_BYTES, budget, &str);
+        errno_t status = copy_string((const __user char*)ptr, __ARG_MAX, budget, &str);
         if (status) {
             free_strings(strings);
             return status;
@@ -141,8 +139,6 @@ static errno_t check_sched_target(pid_t pid) {
     process_unref(proc);
     return 0;
 }
-
-constexpr size_t THREAD_NAME_MAX = 16;
 
 static errno_t with_thread(pid_t tid, char* name, size_t name_len, bool set) {
     struct process* proc = self();
@@ -266,7 +262,7 @@ struct syscall_ret sys_getgroups(size_t size, __user gid_t* list) {
 struct syscall_ret sys_setgroups(size_t size, const __user gid_t* list) {
     struct syscall_ret ret = {};
 
-    if (size > NGROUPS_MAX) {
+    if (size > __NGROUPS_MAX) {
         ret.error = EINVAL;
         return ret;
     }
@@ -642,7 +638,7 @@ struct syscall_ret sys_fork(arch_context_t* ctx) {
 struct syscall_ret sys_execve(arch_context_t* ctx) {
     struct syscall_ret ret = {};
 
-    size_t budget = EXEC_MAX_BYTES;
+    size_t budget = __ARG_MAX;
     char* path = nullptr;
     char** argv = nullptr;
     char** envp = nullptr;
@@ -681,7 +677,7 @@ struct syscall_ret sys_fexecve(arch_context_t* ctx) {
         return ret;
     }
 
-    size_t budget = EXEC_MAX_BYTES;
+    size_t budget = __ARG_MAX;
     char** argv = nullptr;
     char** envp = nullptr;
     ret.error = copy_exec_args(
@@ -844,16 +840,16 @@ struct syscall_ret sys_thread_setname(pid_t tid, const __user char* name) {
     struct syscall_ret ret = {};
 
     size_t len;
-    if (!usercopy_strlen(name, THREAD_NAME_MAX, &len)) {
+    if (!usercopy_strlen(name, __THREAD_NAME_MAX, &len)) {
         ret.error = EFAULT;
         return ret;
     }
-    if (len >= THREAD_NAME_MAX) {
+    if (len >= __THREAD_NAME_MAX) {
         ret.error = ERANGE;
         return ret;
     }
 
-    char buf[THREAD_NAME_MAX];
+    char buf[__THREAD_NAME_MAX];
     if (!usercopy_read(buf, name, len)) {
         ret.error = EFAULT;
         return ret;

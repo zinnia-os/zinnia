@@ -22,9 +22,11 @@
 #include <stdckdint.h>
 #include <stdint.h>
 #include <string.h>
+#include <zinnia/limits.h>
 #include <zinnia/reboot.h>
 #include <zinnia/resource.h>
 #include <zinnia/time.h>
+#include <zinnia/unistd.h>
 #include <zinnia/utsname.h>
 #if CONFIG_ACPI
 #include <dev/acpi/acpi.h>
@@ -64,14 +66,6 @@ static struct process_rlimit* rlimit_of(struct process* proc, int resource) {
 }
 
 constexpr size_t ENTROPY_MAX = 256;
-constexpr int SC_ARG_MAX = 0;
-constexpr int SC_CHILD_MAX = 1;
-constexpr int SC_CLK_TCK = 2;
-constexpr int SC_NGROUPS_MAX = 3;
-constexpr int SC_OPEN_MAX = 4;
-constexpr int SC_PAGE_SIZE = 30;
-constexpr int SC_NPROCESSORS_CONF = 83;
-constexpr int SC_NPROCESSORS_ONLN = 84;
 
 static errno_t read_timespec_ns(const __user struct __timespec* user, uint64_t* out) {
     struct __timespec ts;
@@ -446,26 +440,26 @@ struct syscall_ret sys_sysconf(int name) {
     struct syscall_ret ret = {};
 
     switch (name) {
-    case SC_ARG_MAX:
-        ret.value = 256 * 1024;
+    case __SC_ARG_MAX:
+        ret.value = __ARG_MAX;
         return ret;
-    case SC_CHILD_MAX:
+    case __SC_CHILD_MAX:
         ret.value = -1;
         return ret;
-    case SC_CLK_TCK:
+    case __SC_CLK_TCK:
         ret.value = 100;
         return ret;
-    case SC_NGROUPS_MAX:
-        ret.value = 65536;
+    case __SC_NGROUPS_MAX:
+        ret.value = __NGROUPS_MAX;
         return ret;
-    case SC_OPEN_MAX:
+    case __SC_OPEN_MAX:
         ret.value = process_fd_limit(self());
         return ret;
-    case SC_PAGE_SIZE:
+    case __SC_PAGE_SIZE:
         ret.value = page_size();
         return ret;
-    case SC_NPROCESSORS_CONF:
-    case SC_NPROCESSORS_ONLN:
+    case __SC_NPROCESSORS_CONF:
+    case __SC_NPROCESSORS_ONLN:
         ret.value = percpu_count();
         return ret;
     default:
