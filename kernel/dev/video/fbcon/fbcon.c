@@ -169,12 +169,16 @@ static bool fbcon_setup(struct console* con) {
     if (!fbcon.cols || !fbcon.rows)
         return false;
 
+    con->cols = fbcon.cols;
+    con->rows = fbcon.rows;
     clear_screen();
     return true;
 }
 
+// TODO: Make this use a real VT.
 static struct console fbcon_con = {
     .name = "fbcon",
+    .priority = CONSOLE_PRIO_DISPLAY,
     .init = fbcon_setup,
     .write = fbcon_write,
 };

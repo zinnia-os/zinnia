@@ -1,6 +1,7 @@
 subdir('block')
 subdir('char')
 subdir('dt')
+subdir('tty')
 subdir('video')
 
 if kconfig.get('CONFIG_PCI', 'n') == 'y'

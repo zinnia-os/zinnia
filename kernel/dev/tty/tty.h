@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+#pragma once
+
+#include <dev/char/chardev.h>
+#include <fs/poll.h>
+#include <lib/initgraph.h>
+#include <lib/mutex.h>
+#include <lib/ringbuf.h>
+#include <lib/types.h>
+#include <zinnia/termios.h>
+
+constexpr size_t TTY_BUF_SIZE = 4096;
+constexpr size_t TTY_NAME_MAX = 32;
+
+struct tty;
+
+// TODO: open/close hooks for pty.
+struct tty_ops {
+    errno_t (*write)(struct tty* tty, const char* buf, size_t len);
+    void (*echo)(struct tty* tty, const char* buf, size_t len);
+    errno_t (*ioctl)(struct tty* tty, struct vfs_file* file, uintptr_t request, uintptr_t arg, uintptr_t* out_result);
+    void (*destroy)(struct tty* tty);
+};
+
+// TODO: hangup state, foreground pgrp and session.
+struct tty {
+    struct chardev dev;
+    char name[TTY_NAME_MAX];
+    const struct tty_ops* ops;
+
+    mutex_t lock;
+    struct __termios termios;
+    struct __winsize winsize;
+    struct ringbuf read_buf;
+    char canon_buf[TTY_BUF_SIZE];
+    size_t canon_len;
+    size_t eof_pending;
+    struct poll_event read_event;
+};
+
+errno_t tty_init(struct tty* tty, const char* name, const struct tty_ops* ops, uint32_t major, uint32_t minor);
+void tty_ref(struct tty* tty);
+void tty_unref(struct tty* tty);
+errno_t tty_register(struct tty* tty, mode_t mode);
+
+void tty_input(struct tty* tty, const char* buf, size_t len);
+void tty_set_winsize(struct tty* tty, const struct __winsize* winsize);
+
+errno_t tty_ioctl(struct tty* tty, struct vfs_file* file, uintptr_t request, uintptr_t arg, uintptr_t* out_result);
+
+INIT_EXTERN(tty_stage);
