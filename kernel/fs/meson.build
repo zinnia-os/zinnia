@@ -2,6 +2,7 @@ kernel_sources += files(
     'anon.c',
     'cache.c',
     'devtmpfs.c',
+    'eventfd.c',
     'file.c',
     'ident.c',
     'init.c',

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <dev/block/blockdev.h>
+#include <fs/eventfd.h>
 #include <fs/pipe.h>
 #include <fs/poll.h>
 #include <fs/vfs.h>
@@ -14,6 +15,7 @@
 #include <mem/usercopy.h>
 #include <syscalls/private.h>
 #include <stdckdint.h>
+#include <zinnia/eventfd.h>
 #include <zinnia/fcntl.h>
 #include <zinnia/ioctls.h>
 #include <zinnia/limits.h>
@@ -1401,6 +1403,28 @@ struct syscall_ret sys_umount(const __user char* dir, uint32_t flags) {
 
     ret.error = vfs_path_unmount(target);
     vfs_path_drop(target);
+    return ret;
+}
+
+struct syscall_ret sys_eventfd_create(uint32_t initval, uint32_t flags) {
+    struct syscall_ret ret = {};
+
+    if (flags & ~(__EFD_SEMAPHORE | __EFD_CLOEXEC | __EFD_NONBLOCK)) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    struct process* proc = self();
+    struct vfs_file* file;
+    ret.error = eventfd_create(initval, flags & __EFD_SEMAPHORE, flags & __EFD_NONBLOCK, &proc->identity, &file);
+    if (ret.error)
+        return ret;
+
+    int fd = -1;
+    ret.error = process_fd_alloc(proc, file, flags & __EFD_CLOEXEC, &fd);
+    vfs_file_unref(file);
+    if (!ret.error)
+        ret.value = fd;
     return ret;
 }
 
