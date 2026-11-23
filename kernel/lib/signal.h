@@ -6,6 +6,7 @@
 #include <lib/atomic.h>
 #include <lib/errno.h>
 #include <lib/spin.h>
+#include <lib/timer.h>
 #include <lib/types.h>
 #include <bits/sched.h>
 #include <stddef.h>
@@ -102,6 +103,10 @@ struct process_signals {
     bool stop_unwaited;
     bool cont_unwaited;
     struct poll_event cont_event;
+
+    struct timer itimer;
+    uint64_t itimer_deadline;
+    uint64_t itimer_interval;
 };
 
 // Everything the arch code needs to build a signal frame.
@@ -117,6 +122,7 @@ struct sig_delivery {
 };
 
 void signal_process_init(struct process* proc, struct process* parent);
+void signal_process_fini(struct process* proc);
 void signal_task_fork(struct task* task, struct task* parent);
 void signal_exec(struct process* proc, struct task* task);
 
@@ -142,6 +148,9 @@ void signal_deliver(arch_context_t* ctx, const arch_syscall_restart_t* restart);
 void signal_set_restore_mask(struct task* task, sigset_t mask);
 
 void signal_restore_mask(struct task* task);
+
+uint64_t signal_itimer_get(struct process* proc, uint64_t* out_interval);
+void signal_itimer_set(struct process* proc, uint64_t value, uint64_t interval);
 
 void signal_info_to_user(signal_t sig, const struct sig_info* info, struct __siginfo* out);
 

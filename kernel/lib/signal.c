@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <lib/atomic.h>
+#include <lib/clock.h>
 #include <lib/percpu.h>
 #include <lib/process.h>
 #include <lib/sched.h>
 #include <lib/signal.h>
+#include <stdckdint.h>
 #include <string.h>
 
 enum default_action {
@@ -79,17 +81,47 @@ static void discard_everywhere_locked(struct process* proc, sigset_t set) {
     spin_unlock(&proc->tasks_lock);
 }
 
+static void itimer_fn(struct timer* timer) {
+    struct process_signals* s = containerof(timer, struct process_signals, itimer);
+    struct process* proc = containerof(s, struct process, signals);
+
+    const struct sig_info info = {.code = __SI_TIMER};
+    signal_send(proc, SIGALRM, &info);
+
+    spin_lock(&s->lock);
+    if (s->itimer_interval) {
+        const uint64_t now = clock_get_elapsed_ns();
+        s->itimer_deadline += s->itimer_interval;
+        if (s->itimer_deadline <= now)
+            s->itimer_deadline = now + s->itimer_interval;
+        timer_arm(timer, s->itimer_deadline);
+    } else {
+        s->itimer_deadline = 0;
+    }
+    spin_unlock(&s->lock);
+}
+
 void signal_process_init(struct process* proc, struct process* parent) {
     struct process_signals* s = &proc->signals;
     spin_init(&s->lock);
     poll_event_init(&s->event);
     poll_event_init(&s->cont_event);
+    timer_init(&s->itimer, itimer_fn);
 
     if (parent) {
         spin_lock(&parent->signals.lock);
         memcpy(s->actions, parent->signals.actions, sizeof(s->actions));
         spin_unlock(&parent->signals.lock);
     }
+}
+
+void signal_process_fini(struct process* proc) {
+    struct process_signals* s = &proc->signals;
+    spin_lock(&s->lock);
+    s->itimer_interval = 0;
+    s->itimer_deadline = 0;
+    spin_unlock(&s->lock);
+    timer_cancel(&s->itimer);
 }
 
 void signal_task_fork(struct task* task, struct task* parent) {
@@ -388,4 +420,35 @@ void signal_deliver(arch_context_t* ctx, const arch_syscall_restart_t* restart) 
             process_exit_signal(SIGSEGV);
         return;
     }
+}
+
+uint64_t signal_itimer_get(struct process* proc, uint64_t* out_interval) {
+    struct process_signals* s = &proc->signals;
+    const uint64_t now = clock_get_elapsed_ns();
+    spin_lock(&s->lock);
+    uint64_t remaining = 0;
+    if (s->itimer_deadline)
+        remaining = s->itimer_deadline > now ? s->itimer_deadline - now : 1;
+    *out_interval = s->itimer_interval;
+    spin_unlock(&s->lock);
+    return remaining;
+}
+
+void signal_itimer_set(struct process* proc, uint64_t value, uint64_t interval) {
+    struct process_signals* s = &proc->signals;
+    spin_lock(&s->lock);
+    s->itimer_interval = 0;
+    s->itimer_deadline = 0;
+    spin_unlock(&s->lock);
+    timer_cancel(&s->itimer);
+
+    if (!value)
+        return;
+
+    spin_lock(&s->lock);
+    s->itimer_interval = interval;
+    if (ckd_add(&s->itimer_deadline, clock_get_elapsed_ns(), value))
+        s->itimer_deadline = UINT64_MAX;
+    timer_arm(&s->itimer, s->itimer_deadline);
+    spin_unlock(&s->lock);
 }

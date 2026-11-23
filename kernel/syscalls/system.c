@@ -10,8 +10,10 @@
 #include <lib/process.h>
 #include <lib/random.h>
 #include <lib/sched.h>
+#include <lib/signal.h>
 #include <lib/spin.h>
 #include <lib/time.h>
+#include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/page.h>
 #include <mem/usercopy.h>
@@ -87,6 +89,15 @@ static bool clock_valid(uintptr_t clock) {
 
 bool clock_is_realtime(uintptr_t clock) {
     return clock == __CLOCK_REALTIME || clock == __CLOCK_REALTIME_COARSE;
+}
+
+static struct __itimerval current_itimer(struct process* proc) {
+    uint64_t interval;
+    const uint64_t value = signal_itimer_get(proc, &interval);
+    return (struct __itimerval){
+        .it_interval = time_tv_from_nano(interval),
+        .it_value = time_tv_from_nano(ROUND_UP(value, 1'000)),
+    };
 }
 
 struct syscall_ret sys_archctl(uintptr_t op, uintptr_t arg) {
@@ -242,6 +253,55 @@ struct syscall_ret sys_futex_wake(__user int* pointer, uint32_t count) {
     }
     struct task* task = percpu_get()->sched.current;
     ret.value = futex_wake(task->space, (uintptr_t)pointer, count);
+    return ret;
+}
+
+struct syscall_ret sys_itimer_get(int which, __user struct __itimerval* curr) {
+    struct syscall_ret ret = {};
+
+    if (which != __ITIMER_REAL) {
+        ret.error = EINVAL;
+        return ret;
+    }
+    const struct __itimerval value = current_itimer(self());
+    if (!usercopy_write(curr, &value, sizeof(value)))
+        ret.error = EFAULT;
+    return ret;
+}
+
+struct syscall_ret sys_itimer_set(
+    int which,
+    const __user struct __itimerval* new_value,
+    __user struct __itimerval* old
+) {
+    struct syscall_ret ret = {};
+
+    if (which != __ITIMER_REAL) {
+        ret.error = EINVAL;
+        return ret;
+    }
+
+    struct __itimerval next;
+    if (!usercopy_read(&next, new_value, sizeof(next))) {
+        ret.error = EFAULT;
+        return ret;
+    }
+
+    uint64_t value, interval;
+    ret.error = time_tv_to_nano(&next.it_value, &value);
+    if (!ret.error)
+        ret.error = time_tv_to_nano(&next.it_interval, &interval);
+    if (ret.error)
+        return ret;
+
+    struct process* proc = self();
+    const struct __itimerval previous = current_itimer(proc);
+    signal_itimer_set(proc, value, interval);
+
+    if (old && !usercopy_write(old, &previous, sizeof(previous))) {
+        ret.error = EFAULT;
+        return ret;
+    }
     return ret;
 }
 

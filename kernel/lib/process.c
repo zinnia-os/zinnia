@@ -620,6 +620,7 @@ static void do_exit(int wait_status, int code, int info) {
     if (!process_single_thread(proc))
         sched_exit();
 
+    signal_process_fini(proc);
     close_files(proc, false);
     mutex_lock(&proc->lock);
     vfs_path_drop(proc->root);
