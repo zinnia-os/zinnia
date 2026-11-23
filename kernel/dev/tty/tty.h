@@ -4,6 +4,7 @@
 
 #include <dev/char/chardev.h>
 #include <fs/poll.h>
+#include <lib/atomic.h>
 #include <lib/initgraph.h>
 #include <lib/mutex.h>
 #include <lib/ringbuf.h>
@@ -15,15 +16,16 @@ constexpr size_t TTY_NAME_MAX = 32;
 
 struct tty;
 
-// TODO: open/close hooks for pty.
 struct tty_ops {
     errno_t (*write)(struct tty* tty, const char* buf, size_t len);
     void (*echo)(struct tty* tty, const char* buf, size_t len);
+    errno_t (*open)(struct tty* tty, struct vfs_file* file);
+    void (*close)(struct tty* tty, struct vfs_file* file);
     errno_t (*ioctl)(struct tty* tty, struct vfs_file* file, uintptr_t request, uintptr_t arg, uintptr_t* out_result);
     void (*destroy)(struct tty* tty);
 };
 
-// TODO: hangup state, foreground pgrp and session.
+// TODO: foreground pgrp and session.
 struct tty {
     struct chardev dev;
     char name[TTY_NAME_MAX];
@@ -37,6 +39,7 @@ struct tty {
     size_t canon_len;
     size_t eof_pending;
     struct poll_event read_event;
+    _Atomic(bool) hung_up;
 };
 
 errno_t tty_init(struct tty* tty, const char* name, const struct tty_ops* ops, uint32_t major, uint32_t minor);
@@ -45,7 +48,9 @@ void tty_unref(struct tty* tty);
 errno_t tty_register(struct tty* tty, mode_t mode);
 
 void tty_input(struct tty* tty, const char* buf, size_t len);
+void tty_hangup(struct tty* tty);
 void tty_set_winsize(struct tty* tty, const struct __winsize* winsize);
+bool tty_is_hung_up(struct tty* tty);
 
 errno_t tty_ioctl(struct tty* tty, struct vfs_file* file, uintptr_t request, uintptr_t arg, uintptr_t* out_result);
 

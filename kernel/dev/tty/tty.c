@@ -147,6 +147,15 @@ void tty_input(struct tty* tty, const char* buf, size_t len) {
         poll_event_notify(&tty->read_event);
 }
 
+void tty_hangup(struct tty* tty) {
+    atomic_store(&tty->hung_up, true, ATOMIC_RELEASE);
+    poll_event_notify(&tty->read_event);
+}
+
+bool tty_is_hung_up(struct tty* tty) {
+    return atomic_load(&tty->hung_up, ATOMIC_ACQUIRE);
+}
+
 static bool file_nonblocking(struct vfs_file* file) {
     return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
 }
@@ -168,14 +177,14 @@ static errno_t tty_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t of
     mutex_lock(&tty->lock);
     if (tty->termios.c_lflag & __ICANON) {
         // Wait for a complete line or an EOF.
-        while (!status && !canon_readable(tty)) {
+        while (!status && !canon_readable(tty) && !tty_is_hung_up(tty)) {
             if (file_nonblocking(file))
                 status = EAGAIN;
             else if (poll_table_sleep(&table, &tty->lock, nullptr) == EINTR)
                 status = ERESTART;
         }
 
-        if (!status && !ringbuf_len(&tty->read_buf)) {
+        if (!status && !ringbuf_len(&tty->read_buf) && tty->eof_pending) {
             tty->eof_pending--;
         } else if (!status) {
             // Copy out at most one line.
@@ -215,6 +224,8 @@ static errno_t tty_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t of
 
             if (vmin == 0 && interval == 0)
                 break;
+            if (tty_is_hung_up(tty))
+                break;
             if (file_nonblocking(file)) {
                 status = EAGAIN;
                 break;
@@ -236,7 +247,9 @@ static errno_t tty_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t of
 
 static errno_t tty_write(struct vfs_file* file, iovec_iter_t* buffer, uint64_t offset, ssize_t* out_written) {
     struct tty* tty = file->priv;
-    // TODO: TOSTOP/SIGTTOU job control gate and hangup check.
+    if (tty_is_hung_up(tty))
+        return EIO;
+    // TODO: TOSTOP/SIGTTOU job control gate
 
     char in[TTY_IO_CHUNK];
     char out[TTY_IO_CHUNK * 2];
@@ -276,6 +289,9 @@ static errno_t tty_write(struct vfs_file* file, iovec_iter_t* buffer, uint64_t o
 static enum poll_flags tty_poll(struct vfs_file* file, enum poll_flags events, struct poll_table* table) {
     struct tty* tty = file->priv;
     poll_wait(table, &tty->read_event);
+
+    if (tty_is_hung_up(tty))
+        return POLLIN | POLLRDNORM | POLLERR | POLLHUP;
 
     enum poll_flags revents = POLLOUT | POLLWRNORM;
     mutex_lock(&tty->lock);
@@ -384,7 +400,10 @@ static errno_t tty_file_ioctl(struct vfs_file* file, uintptr_t request, uintptr_
 }
 
 static void tty_release(struct vfs_file* file) {
-    tty_unref(file->priv);
+    struct tty* tty = file->priv;
+    if (tty->ops->close)
+        tty->ops->close(tty, file);
+    tty_unref(tty);
 }
 
 static const struct vfs_file_ops tty_file_ops = {
@@ -396,6 +415,12 @@ static const struct vfs_file_ops tty_file_ops = {
 };
 
 static errno_t attach_file(struct tty* tty, struct vfs_file* file) {
+    if (tty->ops->open) {
+        errno_t status = tty->ops->open(tty, file);
+        if (status)
+            return status;
+    }
+
     tty_ref(tty);
     file->ops = &tty_file_ops;
     file->priv = tty;
@@ -454,6 +479,7 @@ errno_t tty_init(struct tty* tty, const char* name, const struct tty_ops* ops, u
     tty->canon_len = 0;
     tty->eof_pending = 0;
     poll_event_init(&tty->read_event);
+    atomic_init(&tty->hung_up, false);
     return 0;
 }
 
