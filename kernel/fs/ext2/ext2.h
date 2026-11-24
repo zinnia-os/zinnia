@@ -3,7 +3,9 @@
 #pragma once
 
 #include <dev/block/blockdev.h>
+#include <dev/block/buf.h>
 #include <fs/vfs.h>
+#include <lib/mutex.h>
 #include <lib/utils.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -15,6 +17,7 @@ constexpr size_t EXT2_GOOD_OLD_INODE_SIZE = 128;
 constexpr size_t EXT2_SUPER_OFFSET = 1024;
 constexpr size_t EXT2_MIN_BLOCK_SIZE = 1024;
 constexpr size_t EXT2_MAX_BLOCK_SIZE = 4096;
+constexpr size_t EXT2_SECTOR_SIZE = 512;
 
 constexpr size_t EXT2_NDIR_BLOCKS = 12;
 constexpr size_t EXT2_IND_BLOCK = 12;
@@ -134,10 +137,42 @@ struct ext2_dir_entry {
 };
 static_assert(sizeof(struct ext2_dir_entry) == 8);
 
+struct ext2_group {
+    uint32_t block_bitmap;
+    uint32_t inode_bitmap;
+    uint32_t inode_table;
+    uint32_t free_blocks;
+    uint32_t free_inodes;
+    uint32_t used_dirs;
+};
+
 struct ext2_super {
     struct vfs_super_block base;
     struct blockdev* dev;
-    // TODO
+    bool writable;
+
+    size_t block_size;
+    size_t inode_size;
+    uint32_t blocks_count;
+    uint32_t inodes_count;
+    uint32_t r_blocks_count;
+    uint32_t first_data_block;
+    uint32_t blocks_per_group;
+    uint32_t inodes_per_group;
+    uint32_t first_ino;
+    uint32_t group_count;
+    uint32_t feature_incompat;
+    uint64_t max_file_size;
+
+    mutex_t alloc_lock;
+    uint32_t feature_ro_compat;
+    uint32_t free_blocks;
+    uint32_t free_inodes;
+    uint16_t state;
+    uint16_t mnt_count;
+    struct ext2_group* groups;
+
+    // TODO: Add the rename lock and inode cache.
 };
 
 struct ext2_inode_info {
@@ -146,6 +181,10 @@ struct ext2_inode_info {
 
 static inline struct ext2_super* ext2_sb(struct vfs_super_block* sb) {
     return containerof(sb, struct ext2_super, base);
+}
+
+static inline uint32_t ext2_group_of_ino(struct ext2_super* sb, uint32_t ino) {
+    return (ino - 1) / sb->inodes_per_group;
 }
 
 static inline bool ext2_is_dir(const struct ext2_inode* raw) {
@@ -173,5 +212,10 @@ static inline uint64_t ext2_size(const struct ext2_inode* raw) {
         size |= (uint64_t)raw->i_size_high << 32;
     return size;
 }
+
+// Current timestamp in ext2 units.
+uint32_t ext2_now();
+
+bool ext2_valid_block(struct ext2_super* sb, uint32_t block);
 
 // TODO: Add block/inode allocation, inode IO, bmap and node ops.
