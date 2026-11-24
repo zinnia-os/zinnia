@@ -270,6 +270,13 @@ struct fdt_node fdt_next_node(struct fdt_node node) {
     return (struct fdt_node){};
 }
 
+const char* fdt_node_name(struct fdt_node node) {
+    struct token token;
+    if (!node.tree || !read_token(node.tree, node.offset, &token) || token.kind != FDT_BEGIN_NODE)
+        return nullptr;
+    return token.name;
+}
+
 bool fdt_node_is_compatible(struct fdt_node node, const char* compatible) {
     struct fdt_prop property = fdt_property(node, "compatible");
     const char* data = property.data;

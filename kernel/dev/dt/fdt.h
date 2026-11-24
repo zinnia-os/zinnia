@@ -69,6 +69,7 @@ bool fdt_property_u32(struct fdt_node node, const char* name, uint32_t* value);
 bool fdt_property_u64(struct fdt_node node, const char* name, uint64_t* value);
 
 struct fdt_node fdt_next_node(struct fdt_node node);
+const char* fdt_node_name(struct fdt_node node);
 bool fdt_node_is_compatible(struct fdt_node node, const char* compatible);
 bool fdt_node_reg(struct fdt_node node, size_t index, phys_t* addr, size_t* size);
 
