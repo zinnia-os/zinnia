@@ -91,8 +91,9 @@ static size_t cluster_size(struct vmo* vmo, uint64_t index) {
 
 static errno_t fill(struct vmo* vmo, uint64_t index, enum vmo_access access, struct page** out) {
     struct page* pages[RA_MAX_PAGES];
-    size_t count = cluster_size(vmo, index);
-    const enum alloc_flags flags = vmo->pager->get_pages ? ALLOC_NOZERO : 0;
+    const bool read = vmo->pager->get_pages && access != VMO_OVERWRITE;
+    size_t count = read ? cluster_size(vmo, index) : 1;
+    const enum alloc_flags flags = read ? ALLOC_NOZERO : 0;
 
     for (size_t i = 0; i < count; i++) {
         struct page* page;
@@ -121,7 +122,7 @@ static errno_t fill(struct vmo* vmo, uint64_t index, enum vmo_access access, str
 
     size_t valid = count;
     errno_t status = 0;
-    if (vmo->pager->get_pages)
+    if (read)
         status = vmo->pager->get_pages(vmo, index, pages, count, &valid);
 
     mutex_lock(&vmo->lock);
@@ -167,7 +168,7 @@ errno_t vmo_get_page(struct vmo* vmo, uint64_t index, enum vmo_access access, st
     if (vmo->pager->lookup)
         return ENOTSUP;
 
-    if (access == VMO_READ) {
+    if (access != VMO_WRITE) {
         struct page* page = lookup_fast(vmo, index);
         if (page) {
             *out = page;

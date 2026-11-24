@@ -38,6 +38,7 @@ struct vmo {
 enum vmo_access {
     VMO_READ,
     VMO_WRITE,
+    VMO_OVERWRITE,
 };
 
 void vmo_init(struct vmo* vmo, const struct vmo_pager_ops* pager);
