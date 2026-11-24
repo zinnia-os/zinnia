@@ -571,12 +571,7 @@ static bool run_cfa_program(
         case CFA_RESTORE_STATE:
             if (depth == 0)
                 return false;
-            // The CFA rule is not part of the remembered state.
-            const struct rule cfa = row->cfa;
-            const int64_t cfa_offset = row->cfa_offset;
             *row = stack[--depth];
-            row->cfa = cfa;
-            row->cfa_offset = cfa_offset;
             break;
         case CFA_DEF_CFA:
             row->cfa = (struct rule){.kind = RULE_REG, .value = read_uleb(&c)};
