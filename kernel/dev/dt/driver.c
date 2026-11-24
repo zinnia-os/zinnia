@@ -3,6 +3,7 @@
 #define LOG_FMT(fmt) "fdt: " fmt
 
 #include <dev/dt/fdt.h>
+#include <lib/cmdline.h>
 #include <lib/init.h>
 #include <lib/print.h>
 #include <lib/spin.h>
@@ -15,6 +16,12 @@
 
 static struct fdt tree;
 static bool tree_valid = false;
+
+static bool dump_nodes = false;
+static void dump_option(bool value) {
+    dump_nodes = value;
+}
+CMDLINE_OPTION("fdt.dump", "List all device tree nodes", dump_option);
 
 static struct spinlock driver_lock = {};
 static vec(struct fdt_driver*) drivers = {};
@@ -138,6 +145,27 @@ static bool fdt_stage_init(struct boot_info* info) {
     struct fdt_prop model = fdt_property(fdt_root(&tree), "model");
     if (model.tree && model.length)
         log("Running on \"%.*s\"\n", (int)model.length, (const char*)model.data);
+
+    for (struct fdt_node node = fdt_root(&tree); dump_nodes && node.tree; node = fdt_next_node(node)) {
+        struct fdt_prop compat = fdt_property(node, "compatible");
+        if (!compat.tree || !compat.length)
+            continue;
+
+        char buf[256];
+        size_t len = 0;
+        buf[0] = 0;
+        const char* data = compat.data;
+        for (size_t i = 0; i < compat.length && len < sizeof(buf);) {
+            const size_t n = strnlen(data + i, compat.length - i);
+            if (n == compat.length - i)
+                break;
+            len += ksnprintf(buf + len, sizeof(buf) - len, len ? ", \"%s\"" : "\"%s\"", data + i);
+            i += n + 1;
+        }
+
+        const char* name = fdt_node_name(node);
+        log("%s: %s\n", name && *name ? name : "/", buf);
+    }
 
     return true;
 }
