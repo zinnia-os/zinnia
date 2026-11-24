@@ -53,7 +53,7 @@ static void link_edges() {
             struct init_edge* edge = &group->edges[i];
             edge->source = group->depends ? group->nodes[i] : group->node;
             edge->target = group->depends ? group->node : group->nodes[i];
-            edge->propagates_disable = group->depends;
+            edge->propagates_disable = group->propagates_disable;
 
             edge->next_out = edge->source->out_edges;
             edge->source->out_edges = edge;

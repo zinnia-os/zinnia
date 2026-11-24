@@ -27,6 +27,7 @@ struct init_edge {
 struct init_edges {
     struct init_node* node;
     bool depends;
+    bool propagates_disable;
     size_t count;
     struct init_node* const* nodes;
     struct init_edge* edges;
@@ -68,12 +69,13 @@ struct init_node {
     [[__used, __section(".initgraph.nodes")]] \
     static struct init_node* const CONCAT(node, _initgraph_node) = node
 
-#define _INIT_EDGES(x, from, is_depends, ...) \
+#define _INIT_EDGES(x, from, is_depends, propagates, ...) \
     static struct init_node* const CONCAT(x, _nodes)[] = {__VA_ARGS__}; \
     static struct init_edge CONCAT(x, _edges)[countof(CONCAT(x, _nodes))]; \
     static const struct init_edges x = { \
         .node = (from), \
         .depends = (is_depends), \
+        .propagates_disable = (propagates), \
         .count = countof(CONCAT(x, _nodes)), \
         .nodes = CONCAT(x, _nodes), \
         .edges = CONCAT(x, _edges), \
@@ -81,8 +83,16 @@ struct init_node {
     [[__used, __section(".initgraph.edges")]] \
     static const struct init_edges* const CONCAT(x, _ptr) = &x
 
-#define INIT_DEPENDS(node, ...) _INIT_EDGES(UNIQUE_IDENT(init_edges), node, true, __VA_ARGS__)
-#define INIT_ENTAILS(node, ...) _INIT_EDGES(UNIQUE_IDENT(init_edges), node, false, __VA_ARGS__)
+// Make `node` depend on a list of previous stages to run and succeed.
+// If one of them fails, `node` is skipped.
+#define INIT_DEPENDS(node, ...) _INIT_EDGES(UNIQUE_IDENT(init_edges), node, true, true, __VA_ARGS__)
+
+// Like `INIT_DEPENDS`, but doesn't get skipped if a previous stage fails.
+#define INIT_WANTS(node, ...) _INIT_EDGES(UNIQUE_IDENT(init_edges), node, true, false, __VA_ARGS__)
+
+// Make `node` entail a list of next stages that will run after it.
+// If `node` fails, nothing gets skipped.
+#define INIT_ENTAILS(node, ...) _INIT_EDGES(UNIQUE_IDENT(init_edges), node, false, false, __VA_ARGS__)
 
 void initgraph_run(struct init_node* goal, struct boot_info* info);
 
