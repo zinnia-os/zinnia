@@ -7,3 +7,4 @@ build/
 *.so
 __pycache__/
 clice.toml
+.clice/
