@@ -137,23 +137,18 @@ static errno_t apply_rela(struct module* mod, uint64_t addr, uint64_t size, uint
 
         errno_t status = 0;
         uintptr_t value;
-        switch (ELF_R_TYPE(rela.r_info)) {
-        case ELF_R_NONE:
-            break;
-        case ELF_R_64:
-        case ELF_R_GLOB_DAT:
-        case ELF_R_JUMP_SLOT:
+        const uint32_t r_info = ELF_R_TYPE(rela.r_info);
+        if (r_info == ELF_R_NONE) {
+            // Do nothing.
+        } else if (r_info == ELF_R_64 || r_info == ELF_R_GLOB_DAT || r_info == ELF_R_JUMP_SLOT) {
             status = resolve_symbol(mod, ELF_R_SYM(rela.r_info), &value);
             if (status == 0)
                 status = store_word(mod, rela.r_offset, value + rela.r_addend);
-            break;
-        case ELF_R_RELATIVE:
+        } else if (r_info == ELF_R_RELATIVE) {
             status = store_word(mod, rela.r_offset, mod->bias + rela.r_addend);
-            break;
-        default:
+        } else {
             log_err("%s: Unsupported relocation type %u\n", mod->name, ELF_R_TYPE(rela.r_info));
             status = ENOEXEC;
-            break;
         }
 
         if (status)
