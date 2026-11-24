@@ -12,7 +12,6 @@ loader_c_args = [
     '-nostdinc',
     '-fno-stack-protector',
     '-fno-omit-frame-pointer',
-    '-mgeneral-regs-only',
 ]
 
 loader_objcopy_format = 'unknown'

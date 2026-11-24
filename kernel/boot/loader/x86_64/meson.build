@@ -6,6 +6,7 @@ loader_sources += files(
 loader_c_args += [
     '-mno-red-zone',
     '-masm=intel',
+    '-mgeneral-regs-only',
 ]
 
 loader_objcopy_format = 'elf64-x86-64'
