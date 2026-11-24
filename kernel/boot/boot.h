@@ -3,6 +3,7 @@
 #pragma once
 
 #include <lib/types.h>
+#include <config.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -56,5 +57,7 @@ struct boot_info {
     struct boot_framebuffer fb;
     phys_t dtb;
     size_t dtb_size;
+#if CONFIG_ACPI
     phys_t rsdp;
+#endif
 };

@@ -12,7 +12,12 @@
 #include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
+#include <config.h>
 #include <string.h>
+
+#if CONFIG_ACPI
+#include <dev/acpi/acpi.h>
+#endif
 
 static struct fdt tree;
 static bool tree_valid = false;
@@ -171,3 +176,7 @@ static bool fdt_stage_init(struct boot_info* info) {
 }
 INIT_TASK(fdt_stage, "dev.dt", fdt_stage_init);
 INIT_DEPENDS(fdt_stage, mem_stage);
+#if CONFIG_ACPI
+// ACPI might fail, but we still want to run the fdt_stage in that case.
+INIT_WANTS(fdt_stage, acpi_stage);
+#endif

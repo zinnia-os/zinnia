@@ -47,6 +47,14 @@ static bool acpi_stage_init(struct boot_info* info) {
         return false;
     }
 
+    // If we have both a DTB and RSDP, and ACPI wasn't explicitly disabled or
+    // compiled out, we will always prefer the RSDP.
+    if (info->dtb) {
+        log("Ignoring the device tree in favor of ACPI\n");
+        info->dtb = 0;
+        info->dtb_size = 0;
+    }
+
     return true;
 }
 INIT_TASK(acpi_stage, "dev.acpi", acpi_stage_init);
