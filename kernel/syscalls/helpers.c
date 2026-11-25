@@ -2,9 +2,13 @@
 
 #include <lib/compiler.h>
 #include <lib/errno.h>
+#include <lib/iovec.h>
 #include <mem/alloc.h>
 #include <mem/usercopy.h>
+#include <syscalls/private.h>
+#include <stdckdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <zinnia/limits.h>
 
 errno_t copy_user_string(const __user char* str, size_t max, char** out) {
@@ -46,5 +50,21 @@ errno_t copy_user_path(const __user char* path, char** out) {
     kpath[len] = 0;
 
     *out = kpath;
+    return 0;
+}
+
+errno_t copy_iovecs(const __user iovec_t* iov, size_t count, iovec_t* buf, iovec_iter_t* out) {
+    if (count > IOV_MAX)
+        return EINVAL;
+    if (count && !usercopy_read(buf, iov, count * sizeof(iovec_t)))
+        return EFAULT;
+
+    size_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (ckd_add(&total, total, buf[i].iov_len) || total > SIZE_MAX / 2)
+            return EINVAL;
+    }
+
+    *out = iovec_iter_user(buf, count);
     return 0;
 }

@@ -329,22 +329,7 @@ static struct syscall_ret do_remove(int dirfd, const __user char* path, bool dir
     return ret;
 }
 
-static errno_t copy_iovecs(const __user iovec_t* iov, size_t count, iovec_t** out) {
-    if (count > __IOV_MAX)
-        return EINVAL;
-    const size_t buf_size = MAX(count, 1) * sizeof(iovec_t);
-    iovec_t* iovecs = mem_alloc(buf_size, 0);
-    if (!iovecs)
-        return ENOMEM;
-    if (count && !usercopy_read(iovecs, iov, count * sizeof(iovec_t))) {
-        mem_free(iovecs, buf_size);
-        return EFAULT;
-    }
-    *out = iovecs;
-    return 0;
-}
-
-static struct syscall_ret do_io(int fd, iovec_t* iovecs, size_t count, bool write, bool positioned, uint64_t offset) {
+static struct syscall_ret do_io(int fd, iovec_iter_t* iter, bool write, bool positioned, uint64_t offset) {
     struct syscall_ret ret = {};
 
     struct vfs_file* file;
@@ -352,13 +337,11 @@ static struct syscall_ret do_io(int fd, iovec_t* iovecs, size_t count, bool writ
     if (ret.error)
         return ret;
 
-    iovec_iter_t iter = iovec_iter_user(iovecs, count);
-
     ssize_t done = 0;
     if (write)
-        ret.error = positioned ? vfs_file_pwrite(file, &iter, offset, &done) : vfs_file_write(file, &iter, &done);
+        ret.error = positioned ? vfs_file_pwrite(file, iter, offset, &done) : vfs_file_write(file, iter, &done);
     else
-        ret.error = positioned ? vfs_file_pread(file, &iter, offset, &done) : vfs_file_read(file, &iter, &done);
+        ret.error = positioned ? vfs_file_pread(file, iter, offset, &done) : vfs_file_read(file, iter, &done);
     vfs_file_unref(file);
     if (!ret.error)
         ret.value = done;
@@ -375,12 +358,24 @@ static struct syscall_ret do_iov(
 ) {
     struct syscall_ret ret = {};
 
-    iovec_t* iovecs;
-    ret.error = copy_iovecs(iov, count, &iovecs);
-    if (ret.error)
+    if (count > IOV_MAX) {
+        ret.error = EINVAL;
         return ret;
-    ret = do_io(fd, iovecs, count, write, positioned, offset);
-    mem_free(iovecs, MAX(count, 1) * sizeof(iovec_t));
+    }
+
+    const size_t buf_size = MAX(count, 1) * sizeof(iovec_t);
+    iovec_t* buf = mem_alloc(buf_size, 0);
+    if (!buf) {
+        ret.error = ENOMEM;
+        return ret;
+    }
+
+    iovec_iter_t iter;
+    ret.error = copy_iovecs(iov, count, buf, &iter);
+    if (!ret.error)
+        ret = do_io(fd, &iter, write, positioned, offset);
+
+    mem_free(buf, buf_size);
     return ret;
 }
 

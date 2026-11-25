@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <lib/iovec.h>
 #include <lib/percpu.h>
 #include <lib/process.h>
 #include <lib/sched.h>
@@ -13,6 +14,7 @@ static inline struct process* self() {
 
 errno_t copy_user_path(const __user char* path, char** out);
 errno_t copy_user_string(const __user char* str, size_t max, char** out);
+errno_t copy_iovecs(const __user iovec_t* iov, size_t count, iovec_t* buf, iovec_iter_t* out);
 
 bool clock_is_realtime(uintptr_t clock);
 

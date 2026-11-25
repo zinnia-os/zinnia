@@ -6,9 +6,12 @@
 #include <lib/utils.h>
 #include <mem/usercopy.h>
 #include <stddef.h>
+#include <zinnia/limits.h>
 #include <zinnia/uio.h>
 
 typedef struct __iovec iovec_t;
+
+constexpr size_t IOV_MAX = __IOV_MAX;
 
 typedef struct {
     void* iov_base;
