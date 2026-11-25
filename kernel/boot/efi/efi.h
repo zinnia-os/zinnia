@@ -4,8 +4,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #if defined(__x86_64__)
 #include <boot/efi/x86_64/efi.h>
+#elif defined(__riscv) && __riscv_xlen == 64
+#include <boot/efi/riscv64/efi.h>
 #else
 #error "Unsupported architecture"
 #endif
@@ -241,15 +244,17 @@ struct efi_graphics_output_protocol {
     struct efi_gop_mode* mode;
 };
 
-static const struct efi_guid EFI_LOADED_IMAGE_PROTOCOL_GUID =
+static constexpr struct efi_guid EFI_LOADED_IMAGE_PROTOCOL_GUID =
     {0x5b1b'31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
-static const struct efi_guid EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID =
+static constexpr struct efi_guid EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID =
     {0x964e'5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
-static const struct efi_guid EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID =
+static constexpr struct efi_guid EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID =
     {0x9042'a9de, 0x23dc, 0x4a38, {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}};
-static const struct efi_guid EFI_ACPI_20_TABLE_GUID =
+static constexpr struct efi_guid EFI_ACPI_20_TABLE_GUID =
     {0x8868'e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}};
-static const struct efi_guid EFI_ACPI_10_TABLE_GUID =
+static constexpr struct efi_guid EFI_ACPI_10_TABLE_GUID =
     {0xeb9d'2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}};
-static const struct efi_guid EFI_DTB_TABLE_GUID =
+static constexpr struct efi_guid EFI_DTB_TABLE_GUID =
     {0xb1b6'21d5, 0xf19c, 0x41a5, {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0}};
+static constexpr struct efi_guid EFI_RISCV_BOOT_PROTOCOL_GUID =
+    {0xccd15fec, 0x6f73, 0x4eec, {0x83, 0x95, 0x3e, 0x69, 0xe4, 0xb9, 0x40, 0xbf}};

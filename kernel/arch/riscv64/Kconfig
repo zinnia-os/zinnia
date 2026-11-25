@@ -1,0 +1,14 @@
+menu "RISC-V Architecture options"
+
+config RISCV64
+  bool
+  default y
+  select ACPI
+  select HAVE_EFISTUB
+  select HAVE_MMU
+  select HAVE_MMU_GENERIC
+  select HAVE_TLB_SHOOTDOWN_IPI
+  help
+    64-bit RISC-V CPU support.
+
+endmenu

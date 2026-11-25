@@ -6,6 +6,8 @@
 
 #if defined(__x86_64__)
 #include <boot/loader/x86_64/loader_arch.h>
+#elif defined(__riscv) && __riscv_xlen == 64
+#include <boot/loader/riscv64/loader_arch.h>
 #else
 #error "Unsupported architecture"
 #endif
@@ -19,7 +21,7 @@ bool loader_load_kernel(struct kernel_image* out, const char* name) {
 
     struct boot_info* info = out->info;
     memcpy(info->loader, name, MIN(strlen(name), sizeof(info->loader) - 1));
-    info->hhdm_base = ARCH_HHDM_BASE;
+    info->hhdm_base = arch_hhdm_base();
     info->phys_base = out->phys;
     info->virt_base = out->virt;
     return true;
@@ -77,7 +79,7 @@ bool loader_page_tables(
         return false;
 
     const uint64_t trampoline_virt = ROUND_DOWN((uint64_t)arch_enter_kernel, PAGE_SIZE);
-    if (!arch_paging_map(root, ARCH_HHDM_BASE, 0, ROUND_UP(mem_top, ARCH_HUGE_PAGE_SIZE), ARCH_HUGE_PAGE_SIZE) ||
+    if (!arch_paging_map(root, arch_hhdm_base(), 0, ROUND_UP(mem_top, ARCH_HUGE_PAGE_SIZE), ARCH_HUGE_PAGE_SIZE) ||
         !arch_paging_map(root, kernel->virt, kernel->phys, kernel->size, PAGE_SIZE) ||
         !arch_paging_map(root, trampoline_virt, ROUND_DOWN(trampoline_phys, PAGE_SIZE), 2 * PAGE_SIZE, PAGE_SIZE))
         return false;
