@@ -134,10 +134,6 @@ void devctl_notify_destroy(const char* name) {
     devctl_notify("DESTROY", name);
 }
 
-static bool file_nonblocking(struct vfs_file* file) {
-    return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
-}
-
 static errno_t drain_lines(struct devctl_queue* queue, iovec_iter_t* buffer, size_t* out_total) {
     size_t total = 0;
     errno_t status = 0;
@@ -175,7 +171,7 @@ static errno_t devctl_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t
             status = drain_lines(&reader->queue, buffer, &read);
             break;
         }
-        if (file_nonblocking(file)) {
+        if (vfs_file_nonblocking(file)) {
             status = EAGAIN;
             break;
         }

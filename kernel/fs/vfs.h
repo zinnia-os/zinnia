@@ -4,6 +4,7 @@
 
 #include <fs/ident.h>
 #include <fs/poll.h>
+#include <lib/atomic.h>
 #include <lib/epoch.h>
 #include <lib/errno.h>
 #include <lib/initgraph.h>
@@ -360,6 +361,10 @@ struct vfs_file {
 
     struct epoch_head epoch;
 };
+
+static inline bool vfs_file_nonblocking(struct vfs_file* file) {
+    return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
+}
 
 // A file system driver.
 struct vfs_filesystem {

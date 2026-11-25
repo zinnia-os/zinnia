@@ -61,10 +61,6 @@ static bool file_writable(struct vfs_file* file) {
     return atomic_load(&file->flags, ATOMIC_RELAXED) & O_WRONLY;
 }
 
-static bool file_nonblocking(struct vfs_file* file) {
-    return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
-}
-
 static void notify_all(struct pipe* pipe) {
     poll_event_notify(&pipe->read_event);
     poll_event_notify(&pipe->write_event);
@@ -120,7 +116,7 @@ static errno_t pipe_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t o
         }
         if (pipe->writers == 0)
             break;
-        if (file_nonblocking(file)) {
+        if (vfs_file_nonblocking(file)) {
             status = EAGAIN;
             break;
         }
@@ -172,7 +168,7 @@ static errno_t pipe_write(struct vfs_file* file, iovec_iter_t* buffer, uint64_t 
             continue;
         }
 
-        if (file_nonblocking(file)) {
+        if (vfs_file_nonblocking(file)) {
             status = EAGAIN;
             break;
         }
@@ -285,7 +281,7 @@ errno_t pipe_create(
 errno_t vfs_fifo_open(struct vfs_node* node, struct vfs_file* file) {
     const bool readable = file_readable(file);
     const bool writable = file_writable(file);
-    const bool nonblock = atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
+    const bool nonblock = vfs_file_nonblocking(file);
     if (!readable && !writable)
         return EINVAL;
 

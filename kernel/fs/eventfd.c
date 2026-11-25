@@ -14,10 +14,6 @@ struct eventfd {
     struct poll_event write_event;
 };
 
-static bool file_nonblocking(struct vfs_file* file) {
-    return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
-}
-
 static errno_t eventfd_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t offset, ssize_t* out_read) {
     struct eventfd* efd = file->priv;
     if (iovec_iter_len(buffer) < sizeof(uint64_t))
@@ -36,7 +32,7 @@ static errno_t eventfd_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_
             efd->count -= value;
             break;
         }
-        if (file_nonblocking(file)) {
+        if (vfs_file_nonblocking(file)) {
             status = EAGAIN;
             break;
         }
@@ -79,7 +75,7 @@ static errno_t eventfd_write(struct vfs_file* file, iovec_iter_t* buffer, uint64
             efd->count += value;
             break;
         }
-        if (file_nonblocking(file)) {
+        if (vfs_file_nonblocking(file)) {
             status = EAGAIN;
             break;
         }

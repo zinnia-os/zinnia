@@ -222,10 +222,6 @@ bool tty_is_hung_up(struct tty* tty) {
     return atomic_load(&tty->hung_up, ATOMIC_ACQUIRE);
 }
 
-static bool file_nonblocking(struct vfs_file* file) {
-    return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
-}
-
 static bool canon_readable(struct tty* tty) {
     return ringbuf_len(&tty->read_buf) || tty->eof_pending;
 }
@@ -246,7 +242,7 @@ static errno_t tty_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t of
     if (tty->termios.c_lflag & __ICANON) {
         // Wait for a complete line or an EOF.
         while (!status && !canon_readable(tty) && !tty_is_hung_up(tty)) {
-            if (file_nonblocking(file))
+            if (vfs_file_nonblocking(file))
                 status = EAGAIN;
             else if (poll_table_sleep(&table, &tty->lock, nullptr) == EINTR)
                 status = ERESTART;
@@ -294,7 +290,7 @@ static errno_t tty_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t of
                 break;
             if (tty_is_hung_up(tty))
                 break;
-            if (file_nonblocking(file)) {
+            if (vfs_file_nonblocking(file)) {
                 status = EAGAIN;
                 break;
             }

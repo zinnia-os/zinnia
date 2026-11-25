@@ -31,10 +31,6 @@ static const uint8_t syslog_priority[] = {
     [LOG_PANIC] = 0,
 };
 
-static bool file_nonblocking(struct vfs_file* file) {
-    return atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK;
-}
-
 // Converts from a log entry to plain text which can be parsed.
 static size_t format_entry(const struct log_entry* entry, char* out) {
     size_t len = ksnprintf(
@@ -91,7 +87,7 @@ static errno_t kmsg_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t o
         }
 
         // If we can't block, return.
-        if (file_nonblocking(file))
+        if (vfs_file_nonblocking(file))
             break;
 
         // Wait for more lines to appear.

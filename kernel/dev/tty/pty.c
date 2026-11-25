@@ -158,7 +158,7 @@ static errno_t master_read(struct vfs_file* file, iovec_iter_t* buffer, uint64_t
             status = EIO;
             break;
         }
-        if (atomic_load(&file->flags, ATOMIC_RELAXED) & O_NONBLOCK) {
+        if (vfs_file_nonblocking(file)) {
             status = EAGAIN;
             break;
         }
