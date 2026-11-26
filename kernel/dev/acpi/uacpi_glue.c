@@ -6,7 +6,6 @@
 #include <lib/console.h>
 #include <lib/init.h>
 #include <lib/irq.h>
-#include <lib/mmio.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/sched.h>
@@ -15,6 +14,7 @@
 #include <lib/utils.h>
 #include <lib/workqueue.h>
 #include <mem/alloc.h>
+#include <mem/mmio.h>
 #include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>

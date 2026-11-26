@@ -5,7 +5,7 @@
 #include <lib/errno.h>
 #include <lib/initgraph.h>
 #include <lib/irq.h>
-#include <lib/mmio.h>
+#include <mem/mmio.h>
 #include <stdint.h>
 
 struct local_apic {

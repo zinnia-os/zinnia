@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <boot/efi/stub.h>
-#include <lib/mmio.h>
+#include <mem/mmio.h>
 #include <string.h>
 
 constexpr size_t MEM_MAP_SLACK = 64;

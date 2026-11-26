@@ -3,10 +3,10 @@
 #define LOG_FMT(fmt) "pci: " fmt
 
 #include <dev/pci/pci.h>
-#include <lib/mmio.h>
 #include <lib/print.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
+#include <mem/mmio.h>
 #include <mem/page.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>

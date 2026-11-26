@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <dev/block/nvme/nvme.h>
-#include <lib/mmio.h>
+#include <mem/mmio.h>
 
 void nvme_rw_cmd_write(const struct nvme_rw_cmd* cmd, struct nvme_sqe* sqe) {
     uint32_t cdw0 = mmio_field(NVME_SQE_OPC, cmd->do_write ? NVME_CMD_WRITE : NVME_CMD_READ) |

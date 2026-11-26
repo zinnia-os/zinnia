@@ -5,10 +5,10 @@
 #include <lib/clock.h>
 #include <lib/cmdline.h>
 #include <lib/initgraph.h>
-#include <lib/mmio.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/utils.h>
+#include <mem/mmio.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <uacpi/acpi.h>

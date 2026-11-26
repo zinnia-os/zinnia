@@ -3,7 +3,7 @@
 #pragma once
 
 #include <lib/compiler.h>
-#include <lib/mmio.h>
+#include <mem/mmio.h>
 #include <stddef.h>
 #include <stdint.h>
 

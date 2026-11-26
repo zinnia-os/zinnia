@@ -7,13 +7,13 @@
 #include <dev/acpi/acpi.h>
 #include <lib/initgraph.h>
 #include <lib/irq.h>
-#include <lib/mmio.h>
 #include <lib/percpu.h>
 #include <lib/print.h>
 #include <lib/spin.h>
 #include <lib/utils.h>
 #include <mem/alloc.h>
 #include <mem/layout.h>
+#include <mem/mmio.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 #include <uacpi/acpi.h>

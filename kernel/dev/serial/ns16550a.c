@@ -6,10 +6,10 @@
 #include <lib/console.h>
 #include <lib/cpu.h>
 #include <lib/initgraph.h>
-#include <lib/mmio.h>
 #include <lib/module.h>
 #include <lib/print.h>
 #include <mem/alloc.h>
+#include <mem/mmio.h>
 #include <mem/pmap.h>
 #include <mem/vma.h>
 
