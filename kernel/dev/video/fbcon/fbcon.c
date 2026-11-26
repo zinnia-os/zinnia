@@ -155,10 +155,21 @@ static void fbcon_write(struct console* con, const char* buf, size_t count) {
         put_char((uint8_t)buf[i]);
 }
 
-static bool fbcon_setup(struct console* con) {
-    const struct boot_framebuffer* fb = &fbcon.fb;
+// TODO: Make this use a real VT.
+static struct console fbcon_con = {
+    .name = "fbcon",
+    .priority = CONSOLE_PRIO_DISPLAY,
+    .write = fbcon_write,
+};
+
+[[__init]]
+void fbcon_init(struct boot_info* info) {
+    const struct boot_framebuffer* fb = &info->fb;
+    if (!fb->base)
+        return;
+
     if (fb->bytes_per_pixel != 4 || fb->red.size > 8 || fb->green.size > 8 || fb->blue.size > 8)
-        return false;
+        return;
 
     fbcon.fg = pack_color(FG_COLOR);
     fbcon.bg = pack_color(BG_COLOR);
@@ -167,26 +178,6 @@ static bool fbcon_setup(struct console* con) {
     fbcon.offset_x = (fb->width % FONT_WIDTH) / 2;
     fbcon.offset_y = (fb->height % FONT_HEIGHT) / 2;
     if (!fbcon.cols || !fbcon.rows)
-        return false;
-
-    con->cols = fbcon.cols;
-    con->rows = fbcon.rows;
-    clear_screen();
-    return true;
-}
-
-// TODO: Make this use a real VT.
-static struct console fbcon_con = {
-    .name = "fbcon",
-    .priority = CONSOLE_PRIO_DISPLAY,
-    .init = fbcon_setup,
-    .write = fbcon_write,
-};
-
-[[__init]]
-void fbcon_init(struct boot_info* info) {
-    const struct boot_framebuffer* fb = &info->fb;
-    if (!fb->base)
         return;
 
     fbcon.fb = *fb;
@@ -206,6 +197,9 @@ void fbcon_init(struct boot_info* info) {
     if (!fbcon.back)
         return;
 
+    clear_screen();
+    fbcon_con.cols = fbcon.cols;
+    fbcon_con.rows = fbcon.rows;
     console_register(&fbcon_con);
 }
 INIT_TASK(fbcon_stage, "dev.video.fbcon", fbcon_init);

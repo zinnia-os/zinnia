@@ -131,10 +131,7 @@ static void attach_tty(struct console* con) {
     set_tty(con, &ct->tty);
 }
 
-bool console_register(struct console* con) {
-    if (con->init && !con->init(con))
-        return false;
-
+void console_register(struct console* con) {
     con->write(con, "\ec", 2);
     log_replay(console_replay_write, con);
     con->tty = nullptr;
@@ -151,7 +148,6 @@ bool console_register(struct console* con) {
 
     if (ready)
         attach_tty(con);
-    return true;
 }
 
 void console_unregister(struct console* con) {

@@ -48,7 +48,7 @@ static void serial_write(struct console* con, const char* buf, size_t count) {
     }
 }
 
-bool serial_setup(struct console* con) {
+static bool serial_setup() {
     asm_outb(COM1_BASE + 1, 0x00); // Disable interrupts
     asm_outb(COM1_BASE + 3, 0x80); // Enable DLAB (set baud rate divisor)
     asm_outb(COM1_BASE, 0x01);     // Set divisor low byte (115200 baud if 1)
@@ -75,12 +75,12 @@ static struct console serial_con = {
     .name = "com1",
     .priority = CONSOLE_PRIO_SERIAL,
     .write = serial_write,
-    .init = serial_setup,
 };
 
 [[__init]]
 static void serial_init(struct boot_info*) {
-    console_register(&serial_con);
+    if (serial_setup())
+        console_register(&serial_con);
 }
 INIT_TASK(serial_stage, "arch.x86_64.serial", serial_init);
 INIT_ENTAILS(serial_stage, console_stage);

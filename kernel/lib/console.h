@@ -22,8 +22,6 @@ struct console {
     uint16_t cols;
     uint16_t rows;
 
-    // Initializes the console.
-    bool (*init)(struct console* con);
     // Writes to the console.
     void (*write)(struct console* con, const char* buf, size_t count);
     struct tty* (*get_tty)(struct console* con);
@@ -36,7 +34,7 @@ INIT_EXTERN(console_stage);
 INIT_EXTERN(console_tty_stage);
 
 // Registers a console.
-bool console_register(struct console* con);
+void console_register(struct console* con);
 
 // Unregisters a regular console.
 void console_unregister(struct console* con);
