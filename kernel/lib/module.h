@@ -61,7 +61,9 @@ struct match_table {
     static errno_t (*const __exit_fn)(struct module*) = &__module_exit
 #else
 // Built-in drivers can't be unloaded.
-#define MODULE_EXIT(func) static_assert(&(func) != nullptr)
+#define MODULE_EXIT(func) \
+    [[__used, __section(".mod.exit")]] \
+    static errno_t (*const UNIQUE_IDENT(module_exit))(struct module*) = &(func)
 #endif
 
 struct module_segment {
