@@ -4,6 +4,7 @@ kernel_sources += files(
     'dma.c',
     'freelist.c',
     'init.c',
+    'mmio.c',
     'page.c',
     'stack.c',
     'usercopy.c',

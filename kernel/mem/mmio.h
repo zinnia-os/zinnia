@@ -2,8 +2,13 @@
 
 #pragma once
 
+#include <lib/errno.h>
+#include <lib/types.h>
+#include <mem/pmap.h>
 #include <stddef.h>
 #include <stdint.h>
+
+errno_t mmio_map(phys_t base, size_t size, enum cache_mode cache, void** out);
 
 static inline uint8_t mmio_read8(void* ptr) {
     return *((volatile uint8_t*)ptr);

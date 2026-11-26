@@ -9,9 +9,9 @@
 #include <lib/spin.h>
 #include <lib/vec.h>
 #include <mem/alloc.h>
+#include <mem/mmio.h>
 #include <mem/page.h>
 #include <mem/pmap.h>
-#include <mem/vma.h>
 #include <config.h>
 #include <string.h>
 
@@ -67,24 +67,10 @@ errno_t fdt_node_map_reg(struct fdt_node node, size_t index, void** out, size_t*
     if (!fdt_node_reg(node, index, &base, &size))
         return EINVAL;
 
-    const size_t pgsz = page_size();
-    const phys_t start = ROUND_DOWN(base, pgsz);
-    const size_t length = ROUND_UP(base + MAX(size, 1), pgsz) - start;
+    errno_t status = mmio_map(base, size, CACHE_MMIO, out);
+    if (status)
+        return status;
 
-    const uintptr_t vaddr = vm_alloc(length);
-    if (!vaddr)
-        return ENOMEM;
-    for (size_t off = 0; off < length; off += pgsz) {
-        errno_t status = pmap_map(&kernel_vma.pmap, vaddr + off, start + off, PTE_READ | PTE_WRITE, CACHE_MMIO);
-        if (status) {
-            for (size_t undo = 0; undo < off; undo += pgsz)
-                pmap_unmap(&kernel_vma.pmap, vaddr + undo);
-            vm_free(vaddr, length);
-            return status;
-        }
-    }
-
-    *out = (void*)(vaddr + (base - start));
     if (out_size)
         *out_size = size;
     return 0;
