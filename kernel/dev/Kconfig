@@ -13,6 +13,7 @@ config ACPI
     Adds support for ACPI firmware, tables and devices.
 
 source "kernel/dev/block/Kconfig"
+source "kernel/dev/serial/Kconfig"
 source "kernel/dev/pci/Kconfig"
 source "kernel/dev/video/Kconfig"
 

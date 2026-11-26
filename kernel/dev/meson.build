@@ -1,6 +1,7 @@
 subdir('block')
 subdir('char')
 subdir('dt')
+subdir('serial')
 subdir('tty')
 subdir('video')
 

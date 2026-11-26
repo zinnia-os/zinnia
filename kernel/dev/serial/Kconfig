@@ -1,0 +1,7 @@
+menu "Serial drivers"
+
+config NS16550A
+  bool "NS16550A UART serial controller"
+  default y
+
+endmenu
