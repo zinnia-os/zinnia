@@ -114,6 +114,8 @@ static void attach_tty(struct console* con) {
     }
     ct->con = con;
 
+    // TODO: Use generic names instead of the console name.
+    //       This is potentially broken if the name comes from firmware and not our drivers.
     errno_t status = tty_init(&ct->tty, con->name, &console_tty_ops, 4, 64 + next_minor++);
     if (status) {
         log_err("Unable to create a TTY for \"%s\" (%i)\n", con->name, status);
