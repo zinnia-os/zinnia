@@ -3,7 +3,9 @@ kernel_c_args += ['-DUACPI_SIZED_FREES']
 
 kernel_sources += uacpi.get_variable('sources')
 kernel_sources += files(
+    'driver.c',
     'init.c',
+    'resource.c',
     'uacpi_glue.c',
 )
 

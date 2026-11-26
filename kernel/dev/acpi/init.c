@@ -100,6 +100,10 @@ INIT_DEPENDS(acpi_namespace_stage, acpi_stage, workqueue_stage);
 INIT_DEPENDS(acpi_namespace_stage, pci_stage);
 #endif
 
+bool acpi_namespace_ready() {
+    return namespace_done;
+}
+
 errno_t acpi_reboot() {
     if (!namespace_done)
         return ENOSYS;
