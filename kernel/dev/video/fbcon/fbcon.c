@@ -171,6 +171,8 @@ void fbcon_init(struct boot_info* info) {
     if (fb->bytes_per_pixel != 4 || fb->red.size > 8 || fb->green.size > 8 || fb->blue.size > 8)
         return;
 
+    fbcon.fb = *fb;
+
     fbcon.fg = pack_color(FG_COLOR);
     fbcon.bg = pack_color(BG_COLOR);
     fbcon.cols = fb->width / FONT_WIDTH;
@@ -179,8 +181,6 @@ void fbcon_init(struct boot_info* info) {
     fbcon.offset_y = (fb->height % FONT_HEIGHT) / 2;
     if (!fbcon.cols || !fbcon.rows)
         return;
-
-    fbcon.fb = *fb;
 
     const size_t pgsz = page_size();
     const phys_t start = ROUND_DOWN(fb->base, pgsz);
