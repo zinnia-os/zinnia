@@ -39,6 +39,7 @@ struct vfs_filesystem;
 struct vfs_node_ops;
 struct vfs_file_ops;
 struct pipe;
+struct socket;
 
 enum open_flags : uint32_t {
     O_RDONLY = __O_RDONLY,
@@ -293,7 +294,10 @@ struct vfs_node {
 
     mutex_t lock;
     void* priv;
-    struct pipe* pipe;
+    union {
+        struct pipe* pipe;
+        struct socket* socket;
+    };
 
     ino_t id;
     dev_t rdev;

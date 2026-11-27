@@ -56,6 +56,7 @@ subdir('syscalls')
 # Device and file system drivers.
 subdir('dev')
 subdir('fs')
+subdir('net')
 
 if kconfig.get('CONFIG_KTEST', 'n') == 'y'
     kernel_sources += ktest_sources
