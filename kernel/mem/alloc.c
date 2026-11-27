@@ -302,7 +302,8 @@ static inline void mem_cpu_cache_arm(struct mem_cache* cache, struct mem_cpu_cac
 }
 
 void* mem_cache_alloc(struct mem_cache* cache, enum alloc_flags flags) {
-    struct mem_cpu_cache* ccp = mem_cpu_cache_enter(cache, flags);
+    struct mem_cpu_cache* ccp =
+        atomic_load(&cache->magtype, ATOMIC_RELAXED) ? mem_cpu_cache_enter(cache, flags) : nullptr;
     void* buf = nullptr;
 
     while (ccp) {
@@ -352,36 +353,30 @@ void* mem_cache_alloc(struct mem_cache* cache, enum alloc_flags flags) {
 }
 
 static bool mem_cpu_magazine_alloc(struct mem_cache* cache, struct mem_cpu_cache* ccp) {
-    struct mem_magazine* empty = depot_alloc(cache, &cache->depot_empty, nullptr, nullptr, 0);
-    if (empty) {
+    struct mem_magazine* empty = depot_alloc(cache, &cache->depot_empty, &cache->depot_full, ccp->loaded_prev, 0);
+    if (!empty) {
+        struct mem_magtype* magtype = atomic_load(&cache->magtype, ATOMIC_ACQUIRE);
+        if (!magtype)
+            return false;
+
+        empty = slab_alloc(magtype->cache, ALLOC_NOSLEEP | ALLOC_NOZERO);
+        if (!empty)
+            return false;
+
         if (ccp->loaded_prev)
             depot_free(cache, &cache->depot_full, ccp->loaded_prev);
-        mem_cpu_reload(ccp, empty, 0);
-        return true;
     }
 
-    struct mem_magtype* magtype = atomic_load(&cache->magtype, ATOMIC_ACQUIRE);
-    if (!magtype)
-        return false;
-
-    mutex_unlock(&ccp->lock);
-    empty = slab_alloc(magtype->cache, ALLOC_NOSLEEP | ALLOC_NOZERO);
-    mutex_lock(&ccp->lock);
-    if (!empty)
-        return false;
-
-    if (ccp->num_rounds != magtype->num_rounds) {
-        mutex_unlock(&ccp->lock);
-        slab_free(magtype->cache, empty);
-        mutex_lock(&ccp->lock);
-        return true;
-    }
-
-    depot_free(cache, &cache->depot_empty, empty);
+    mem_cpu_reload(ccp, empty, 0);
     return true;
 }
 
 void mem_cache_free(struct mem_cache* cache, void* buf) {
+    if (!atomic_load(&cache->magtype, ATOMIC_RELAXED)) {
+        slab_free(cache, buf);
+        return;
+    }
+
     struct mem_cpu_cache* ccp = mem_cpu_cache_enter(cache, 0);
 
     while (true) {
