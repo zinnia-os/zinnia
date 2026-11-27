@@ -68,6 +68,7 @@ static void ext2_super_destroy(struct vfs_super_block* base) {
     blockdev_release(sb->dev);
     blockdev_unref(sb->dev);
     mem_free(sb->groups, sb->group_count * sizeof(struct ext2_group));
+    radix_destroy(&sb->icache);
     mem_free(sb, sizeof(*sb));
 }
 
@@ -125,6 +126,12 @@ static errno_t ext2_mount(const struct vfs_filesystem* fs, enum mount_flags flag
     sb->base.flags = flags;
     sb->dev = dev;
     mutex_init(&sb->alloc_lock);
+    mutex_init(&sb->icache_lock);
+    condvar_init(&sb->icache_cv);
+    radix_init(&sb->icache);
+
+    struct vfs_node* root_node = nullptr;
+    struct vfs_entry* root_entry = nullptr;
 
     // Read and validate the super block.
     const size_t probe_size = MAX(sizeof(struct ext2_super_block), dev->lba_size);
@@ -269,11 +276,40 @@ static errno_t ext2_mount(const struct vfs_filesystem* fs, enum mount_flags flag
     }
 
     // TODO: Mark the file system as mounted.
+    if (!(flags & MNT_RDONLY)) {
+        // TODO: Implement writing.
+        status = EROFS;
+        goto out;
+    }
 
-    // TODO: Load the root inode and create the mount.
-    status = ENOSYS;
+    status = ext2_get_node(sb, EXT2_ROOT_INO, &root_node);
+    if (status)
+        goto out;
+    if (root_node->type != VNODE_DIRECTORY) {
+        log_err("Root inode is not a directory\n");
+        status = EUCLEAN;
+        goto out;
+    }
+
+    status = vfs_entry_new("", 0, nullptr, &root_entry);
+    if (status)
+        goto out;
+    vfs_entry_set_inode(root_entry, root_node);
+
+    status = vfs_mount_new(flags, root_entry, out);
+    if (!status)
+        log("Mounted %s with %u blocks of %zu bytes, %u inodes%s\n",
+            (const char*)arg,
+            sb->blocks_count,
+            sb->block_size,
+            sb->inodes_count,
+            sb->writable ? "" : " (read-only)");
 
 out:
+    if (root_entry)
+        vfs_entry_unref(root_entry);
+    if (root_node)
+        vfs_node_unref(root_node);
     vfs_super_block_unref(&sb->base);
     return status;
 }

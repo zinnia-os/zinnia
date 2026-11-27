@@ -1,3 +1,7 @@
 modules += {
-    'ext2': files('super.c'),
+    'ext2': files(
+        'dir.c',
+        'inode.c',
+        'super.c',
+    ),
 }

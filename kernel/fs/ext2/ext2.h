@@ -5,8 +5,12 @@
 #include <dev/block/blockdev.h>
 #include <dev/block/buf.h>
 #include <fs/vfs.h>
+#include <lib/condvar.h>
 #include <lib/mutex.h>
+#include <lib/radix.h>
+#include <lib/rwlock.h>
 #include <lib/utils.h>
+#include <mem/vmo.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -172,15 +176,26 @@ struct ext2_super {
     uint16_t mnt_count;
     struct ext2_group* groups;
 
-    // TODO: Add the rename lock and inode cache.
+    mutex_t icache_lock;
+    struct condvar icache_cv;
+    struct radix_tree icache;
 };
 
 struct ext2_inode_info {
-    // TODO
+    struct vmo vmo;
+    struct ext2_super* sb;
+    uint32_t ino;
+    struct rwlock lock;
+    struct ext2_inode raw;
+    struct vfs_node* vnode;
 };
 
 static inline struct ext2_super* ext2_sb(struct vfs_super_block* sb) {
     return containerof(sb, struct ext2_super, base);
+}
+
+static inline struct ext2_inode_info* ext2_info(struct vfs_node* node) {
+    return node->priv;
 }
 
 static inline uint32_t ext2_group_of_ino(struct ext2_super* sb, uint32_t ino) {
@@ -218,4 +233,18 @@ uint32_t ext2_now();
 
 bool ext2_valid_block(struct ext2_super* sb, uint32_t block);
 
-// TODO: Add block/inode allocation, inode IO, bmap and node ops.
+// TODO: Add block/inode allocation.
+
+errno_t ext2_read_inode(struct ext2_super* sb, uint32_t ino, struct ext2_inode* out);
+void ext2_update_vnode(struct vfs_node* node, struct ext2_inode_info* info);
+bool ext2_has_blocks(struct ext2_inode_info* info);
+
+errno_t ext2_bmap(struct ext2_inode_info* info, uint64_t lblk, uint32_t* out);
+
+errno_t ext2_get_node(struct ext2_super* sb, uint32_t ino, struct vfs_node** out);
+void ext2_node_destroy(struct vfs_node* node);
+
+extern const struct vfs_node_ops ext2_dir_ops;
+extern const struct vfs_node_ops ext2_regular_ops;
+extern const struct vfs_node_ops ext2_symlink_ops;
+extern const struct vfs_node_ops ext2_special_ops;
